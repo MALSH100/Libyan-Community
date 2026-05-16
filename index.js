@@ -397,33 +397,42 @@ function getAllCommands() {
   return _allCommands;
 }
 
-async function registerCommands(guildId) {
+async function registerCommands(attempt = 1) {
   if (!process.env.CLIENT_ID) {
-    console.error('❌ CLIENT_ID environment variable is not set! Commands cannot be registered.');
-    return;
-  }
-  if (!process.env.DISCORD_TOKEN) {
-    console.error('❌ DISCORD_TOKEN environment variable is not set!');
+    console.error('❌ CLIENT_ID environment variable is not set!');
     return;
   }
   const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
   try {
     const body = getAllCommands();
-    console.log(`📋 Registering ${body.length} commands for guild ${guildId}...`);
-    await rest.put(Routes.applicationGuildCommands(process.env.CLIENT_ID, guildId), { body });
-    console.log(`✅ Commands registered for guild ${guildId}`);
+    console.log(`📋 Registering ${body.length} global commands (attempt ${attempt})...`);
+
+    await Promise.race([
+      rest.put(Routes.applicationCommands(process.env.CLIENT_ID), { body }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Timed out after 20s')), 20000)),
+    ]);
+
+    console.log(`✅ ${body.length} global commands registered successfully!`);
   } catch (err) {
-    console.error(`❌ Failed to register commands for ${guildId}:`, err.message);
-    if (err.rawError) console.error('Discord error detail:', JSON.stringify(err.rawError));
+    console.error(`❌ Command registration failed (attempt ${attempt}): ${err.message}`);
+    if (err.rawError) console.error('Discord error:', JSON.stringify(err.rawError));
+    if (attempt < 3) {
+      const delay = attempt * 8000;
+      console.log(`⏳ Retrying in ${delay / 1000}s...`);
+      setTimeout(() => registerCommands(attempt + 1), delay);
+    } else {
+      console.error('❌ Giving up after 3 attempts. Commands may not be available.');
+    }
   }
 }
 
 client.once('clientReady', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
-  for (const guild of client.guilds.cache.values()) await registerCommands(guild.id);
+  // Small delay to let Railway network fully initialise
+  setTimeout(() => registerCommands(), 2000);
 });
 
-client.on('guildCreate', async guild => { await registerCommands(guild.id); });
+// No need for guildCreate registration with global commands
 
 // ─── XP on message ───────────────────────────────────────────────────────────
 
@@ -1091,6 +1100,7 @@ async function promptGameSelection(guild, channel, challengerClanName) {
 client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
   const { commandName, user, guild } = interaction;
+  console.log(`📩 Command received: /${commandName} from ${user.tag}`);
   try {
     await handleCommand(interaction, commandName, user, guild);
   } catch (err) {
@@ -1104,19 +1114,66 @@ async function handleCommand(interaction, commandName, user, guild) {
 
   // ── /clan-commands ──────────────────────────────────────────────────────────
   if (commandName === 'clan-commands') {
-    return safeReply(interaction, {
-      flags: 64,
-      embeds: [new EmbedBuilder().setColor(0x5865F2).setTitle('⚔️ Clan Bot — All Commands')
+    const pages = [
+      new EmbedBuilder().setColor(0x5865F2).setTitle('⚔️ Clan Commands — Page 1/3: Clan Management')
         .addFields(
-          { name: '📋 Info', value: ['`/clan-commands`', '`/clan-info [name]`', '`/clan-list`', '`/clan-xp`'].join('\n') },
-          { name: '🏰 Management', value: ['`/clan-create <name>`', '`/clan-disband` *(Leader)*', '`/clan-rename <name> [emoji]` *(Leader)*', '`/clan-description <text>` *(Leader/Officer)*', '`/clan-motto <text>` *(Leader/Officer)*', '`/clan-ranks <member> <officer> <leader>` *(Leader)*'].join('\n') },
-          { name: '👥 Membership', value: ['`/clan-invite @user` *(Leader/Officer)*', '`/clan-invite-accept`', '`/clan-invite-decline`', '`/clan-kick @user` *(Leader/Officer)*', '`/clan-leave`'].join('\n') },
-          { name: '🛡️ Ranks', value: ['`/clan-promote @user` *(Leader)*', '`/clan-demote @user` *(Leader)*', '`/clan-transfer @user` *(Leader)*'].join('\n') },
-          { name: '📢 Channel', value: ['`/clan-channel-create` *(Leader)*', '`/clan-channel-delete` *(Leader)*'].join('\n') },
-          { name: '⚔️ Wars (8 games)', value: ['`/clan-war <clan>` *(Leader)*', '`/clan-war-accept` *(Leader)*', '`/clan-war-decline` *(Leader)*', '', 'Games: Trivia, Anagrams, Dice Battle, Type the Word, Guess the Number, Missing Letters, Hidden Bomb, Maths Quiz'].join('\n') },
-        )
-        .setFooter({ text: 'XP is earned by chatting and winning wars.' })]
+          { name: '📋 Info', value: ['`/clan-commands` — This menu', '`/clan-info [name]` — View clan details', '`/clan-list` — All clans ranked by XP', '`/clan-xp` — XP leaderboard'].join('\n') },
+          { name: '🏰 Management', value: ['`/clan-create <name>` — Create a clan', '`/clan-disband` — Delete your clan *(Leader)*', '`/clan-rename <name> [emoji]` — Rename clan + roles + channel *(Leader)*', '`/clan-description <text>` — Update description *(Leader/Officer)*', '`/clan-motto <text>` — Set motto *(Leader/Officer)*', '`/clan-ranks <member> <officer> <leader>` — Rename rank titles *(Leader)*'].join('\n') },
+          { name: '👥 Membership', value: ['`/clan-invite @user` — Send join invite *(Leader/Officer)*', '`/clan-invite-accept` — Accept invite', '`/clan-invite-decline` — Decline invite', '`/clan-kick @user` — Remove a member *(Leader/Officer)*', '`/clan-leave` — Leave your clan'].join('\n') },
+          { name: '🛡️ Ranks', value: ['`/clan-promote @user` — Member → Officer *(Leader)*', '`/clan-demote @user` — Officer → Member *(Leader)*', '`/clan-transfer @user` — Hand over leadership *(Leader)*'].join('\n') },
+          { name: '📢 Channel', value: ['`/clan-channel-create` — Create private channel *(Leader)*', '`/clan-channel-delete` — Delete private channel *(Leader)*'].join('\n') },
+          { name: '⚔️ Wars', value: ['`/clan-war <clan>` — Challenge a clan *(Leader/Officer)*', '`/clan-war-accept` — Accept a challenge *(Leader)*', '`/clan-war-decline` — Decline a challenge *(Leader)*'].join('\n') },
+        ).setFooter({ text: 'Page 1 of 3 — use buttons to navigate' }),
+
+      new EmbedBuilder().setColor(0xFF0000).setTitle('🎮 Clan Commands — Page 2/3: Pokémon')
+        .addFields(
+          { name: '🌿 Catching', value: ['`/pokemon-team` — View your Pokémon', '`/pokemon-stats <slot>` — Detailed stats + XP bar', '`/pokemon-view @user` — View someone else\'s Pokémon', '`/pokemon-release <slot>` — Release a Pokémon', '`/pokemon-nickname <slot> <name>` — Nickname a Pokémon', '`/pokemon-info <name>` — Look up any Pokémon'].join('\n') },
+          { name: '⚔️ Battles', value: ['`/pokemon-challenge @user <slot>` — Challenge a member to 1v1', '`/pokemon-accept <slot>` — Accept a battle challenge', '`/pokemon-decline` — Decline a battle challenge'].join('\n') },
+          { name: '🎒 Items', value: ['`/pokemon-bag` — View your item bag', '`/pokemon-claim` — Claim an active item drop in your channel'].join('\n') },
+          { name: '📊 Stats', value: ['`/pokemon-leaderboard` — Your clan\'s Pokémon rankings', '`/pokemon-server` — Server-wide top Pokémon by wins', '`/pokedex` — Your clan\'s Pokédex completion'].join('\n') },
+          { name: '🎁 Item Drops', value: 'Items drop in clan channels every **1 hour** and expire in **30 minutes**.\nFirst person to use `/pokemon-claim` gets it!\n\n🔵 Great Ball · ⚫ Ultra Ball · 🧪 Super Potion · 💊 Hyper Potion · 🍯 Honey' },
+        ).setFooter({ text: 'Page 2 of 3 — use buttons to navigate' }),
+
+      new EmbedBuilder().setColor(0xFFD700).setTitle('🏅 Clan Commands — Page 3/3: Rank Permissions')
+        .setDescription('What each rank can do in the clan system.')
+        .addFields(
+          { name: '👑 Leader — Full access', value: ['✅ Create / disband / rename the clan', '✅ Invite, kick, promote, demote members', '✅ Transfer leadership', '✅ Set description, motto, rank names', '✅ Create / delete private channel', '✅ Declare & accept clan wars', '✅ All Officer and Member permissions'].join('\n') },
+          { name: '🛡️ Officer — Management access', value: ['✅ Invite members', '✅ Kick regular members', '✅ Set clan description and motto', '✅ Declare clan wars', '✅ All Member permissions', '❌ Cannot disband, rename, or transfer leadership', '❌ Cannot kick other Officers'].join('\n') },
+          { name: '⚔️ Member — Basic access', value: ['✅ View clan info and leaderboards', '✅ Participate in Pokémon encounters', '✅ Battle other clan members', '✅ Claim item drops', '✅ Leave the clan', '❌ Cannot invite or kick', '❌ Cannot start wars'].join('\n') },
+        ).setFooter({ text: 'Page 3 of 3 — use buttons to navigate' }),
+    ];
+
+    const prevBtn = new ButtonBuilder().setCustomId('cmd_prev').setLabel('◀ Previous').setStyle(ButtonStyle.Secondary);
+    const nextBtn = new ButtonBuilder().setCustomId('cmd_next').setLabel('Next ▶').setStyle(ButtonStyle.Primary);
+
+    let page = 0;
+
+    const buildRow = (currentPage) => new ActionRowBuilder().addComponents(
+      ButtonBuilder.from(prevBtn.toJSON()).setDisabled(currentPage === 0),
+      ButtonBuilder.from(nextBtn.toJSON()).setDisabled(currentPage === pages.length - 1),
+    );
+
+    await safeReply(interaction, { embeds: [pages[0]], components: [buildRow(0)], flags: 64 });
+
+    const msg = await interaction.fetchReply().catch(() => null);
+    if (!msg) return;
+
+    const col = msg.createMessageComponentCollector({
+      filter: i => i.user.id === user.id && ['cmd_prev','cmd_next'].includes(i.customId),
+      time: 120_000,
     });
+
+    col.on('collect', async i => {
+      if (i.customId === 'cmd_next' && page < pages.length - 1) page++;
+      if (i.customId === 'cmd_prev' && page > 0) page--;
+      await i.update({ embeds: [pages[page]], components: [buildRow(page)] }).catch(() => {});
+    });
+
+    col.on('end', () => {
+      interaction.editReply({ components: [] }).catch(() => {});
+    });
+
+    return;
   }
 
   // ── /clan-info ──────────────────────────────────────────────────────────────
@@ -1217,9 +1274,9 @@ async function handleCommand(interaction, commandName, user, guild) {
 
     let leaderRole, officerRole, memberRole;
     try {
-      leaderRole  = await guild.roles.create({ name: buildRoleName(name, rn.leader),  color: 0xFFD700, reason: `Clan created by ${user.tag}` });
-      officerRole = await guild.roles.create({ name: buildRoleName(name, rn.officer), color: 0x5865F2, reason: `Officer role for ${name}` });
-      memberRole  = await guild.roles.create({ name: buildRoleName(name, rn.member),  color: 0x99AAB5, reason: `Member role for ${name}` });
+      leaderRole  = await guild.roles.create({ name: buildRoleName(name, rn.leader),  colors: 0xFFD700, reason: `Clan created by ${user.tag}` });
+      officerRole = await guild.roles.create({ name: buildRoleName(name, rn.officer), colors: 0x5865F2, reason: `Officer role for ${name}` });
+      memberRole  = await guild.roles.create({ name: buildRoleName(name, rn.member),  colors: 0x99AAB5, reason: `Member role for ${name}` });
     } catch (e) {
       if (leaderRole)  await leaderRole.delete().catch(() => {});
       if (officerRole) await officerRole.delete().catch(() => {});
@@ -1282,14 +1339,34 @@ async function handleCommand(interaction, commandName, user, guild) {
       gc[newName] = result.clan;
       delete gc[oldName];
     }
+
+    // Rename the private clan channel if one exists
+    let channelRenamed = false;
+    if (result.clan.channelId) {
+      const clanChannel = guild.channels.cache.get(result.clan.channelId);
+      if (clanChannel) {
+        const newChannelName = `${newEmoji}-${newName.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').slice(0, 90)}`;
+        try {
+          await clanChannel.setName(newChannelName);
+          channelRenamed = true;
+        } catch (e) {
+          console.error('Could not rename clan channel:', e.message);
+        }
+      } else {
+        // Channel no longer exists — clear stale ID
+        result.clan.channelId = null;
+      }
+    }
+
     saveData();
 
     return safeReply(interaction, {
       embeds: [new EmbedBuilder().setColor(0x5865F2).setTitle('✅ Clan Renamed!')
         .addFields(
-          { name: 'Old name', value: `${oldName}`, inline: true },
-          { name: 'New name', value: `${newEmoji} ${newName}`, inline: true },
-          { name: 'Roles updated', value: `${lRole ?? 'N/A'} · ${oRole ?? 'N/A'} · ${mRole ?? 'N/A'}` },
+          { name: 'Old name',       value: `${oldName}`,                                        inline: true },
+          { name: 'New name',       value: `${newEmoji} ${newName}`,                            inline: true },
+          { name: 'Roles updated',  value: `${lRole ?? 'N/A'} · ${oRole ?? 'N/A'} · ${mRole ?? 'N/A'}` },
+          { name: 'Channel',        value: channelRenamed ? '✅ Renamed to match' : result.clan.channelId ? '⚠️ Could not rename' : 'No channel' },
         )]
     });
   }
@@ -1579,7 +1656,8 @@ async function handleCommand(interaction, commandName, user, guild) {
     const defenderName = interaction.options.getString('clan').trim();
     const result       = getUserClan(guild.id, user.id);
     if (!result) return safeReply(interaction, { content: '❌ You are not in a clan.', flags: 64 });
-    if (result.clan.leader !== user.id) return safeReply(interaction, { content: '❌ Only the Leader can declare war.', flags: 64 });
+    const warRank = getUserRank(result.clan, user.id);
+    if (warRank === 'Member') return safeReply(interaction, { content: '❌ Only the Leader or Officers can declare war.', flags: 64 });
     if (defenderName === result.name) return safeReply(interaction, { content: '❌ You cannot war your own clan.', flags: 64 });
     if (activeWars[guild.id]) return safeReply(interaction, { content: '❌ A war is already in progress on this server.', flags: 64 });
     if (!gc[defenderName]) {
