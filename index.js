@@ -22,8 +22,7 @@ const {
   ActionRowBuilder,
 } = require('discord.js');
 
-const fs   = require('fs');
-const path = require('path');
+// mongodb is used for persistent storage — install with: npm install mongodb
 
 // ─── Safe reply helpers ───────────────────────────────────────────────────────
 
@@ -47,42 +46,88 @@ async function safeDefer(interaction, opts = {}) {
   }
 }
 
-// ─── Persistent Storage ───────────────────────────────────────────────────────
+const { MongoClient } = require('mongodb');
 
-const DATA_FILE = path.join(__dirname, 'clans.json');
+// ─── Persistent Storage (MongoDB) ────────────────────────────────────────────
+// Uses MongoDB Atlas free tier — survives Railway restarts and redeploys.
+// Set MONGODB_URI in Railway environment variables.
+// Format: mongodb+srv://user:password@cluster.mongodb.net/clanbot
 
-function loadData() {
-  try {
-    if (fs.existsSync(DATA_FILE)) return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
-  } catch (e) {
-    console.error('⚠️  Could not load clans.json, starting fresh:', e.message);
+let mongoClient = null;
+let mongoCollection = null;
+let db = {}; // in-memory cache — always write-through to MongoDB
+
+async function connectMongo() {
+  const uri = process.env.MONGODB_URI;
+  if (!uri) {
+    console.error('❌ MONGODB_URI not set — data will NOT persist between restarts!');
+    console.error('   Add MONGODB_URI to your Railway environment variables.');
+    return false;
   }
-  return {};
+  try {
+    mongoClient     = new MongoClient(uri);
+    await mongoClient.connect();
+    const database  = mongoClient.db('clanbot');
+    mongoCollection = database.collection('data');
+    console.log('✅ Connected to MongoDB');
+    return true;
+  } catch (e) {
+    console.error('❌ MongoDB connection failed:', e.message);
+    return false;
+  }
 }
 
-function saveData() {
+async function loadData() {
+  if (!mongoCollection) return;
   try {
-    fs.writeFileSync(DATA_FILE, JSON.stringify(db, null, 2), 'utf8');
+    const docs = await mongoCollection.find({}).toArray();
+    for (const doc of docs) {
+      const guildId = doc._id;
+      db[guildId]   = doc.data;
+    }
+    console.log(`✅ Loaded data for ${docs.length} guild(s) from MongoDB`);
   } catch (e) {
-    console.error('⚠️  Could not save clans.json:', e.message);
+    console.error('⚠️  Could not load from MongoDB:', e.message);
   }
 }
 
-// ─── Periodic auto-save ───────────────────────────────────────────────────────
-// Safety net: saves every 5 minutes regardless of individual saveData() calls.
-// Prevents data loss if any code path forgets to call saveData().
+// Debounced save — batches rapid writes into one DB call per guild per 2s
+const _saveTimers = {};
+function saveData(guildIdHint) {
+  // Find which guild IDs need saving
+  const guildsToSave = guildIdHint ? [guildIdHint] : Object.keys(db);
+  for (const guildId of guildsToSave) {
+    if (_saveTimers[guildId]) clearTimeout(_saveTimers[guildId]);
+    _saveTimers[guildId] = setTimeout(() => _persistGuild(guildId), 2000);
+  }
+}
+
+async function _persistGuild(guildId) {
+  if (!mongoCollection) return;
+  try {
+    await mongoCollection.replaceOne(
+      { _id: guildId },
+      { _id: guildId, data: db[guildId] || {} },
+      { upsert: true }
+    );
+  } catch (e) {
+    console.error(`⚠️  MongoDB save failed for guild ${guildId}:`, e.message);
+  }
+}
+
+// ─── Periodic full save safety net ───────────────────────────────────────────
 setInterval(() => {
-  try {
-    fs.writeFileSync(DATA_FILE, JSON.stringify(db, null, 2), 'utf8');
-  } catch (e) {
-    console.error('⚠️  Auto-save failed:', e.message);
+  for (const guildId of Object.keys(db)) {
+    _persistGuild(guildId);
   }
 }, 5 * 60 * 1000);
 
-let db = loadData();
 
 function getGuildClans(guildId) {
-  if (!db[guildId]) db[guildId] = {};
+  if (!db[guildId]) {
+    db[guildId] = {};
+    saveData(guildId);
+  }
   return db[guildId];
 }
 
@@ -436,7 +481,12 @@ async function registerCommands(attempt = 1) {
 
 client.once('clientReady', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
-  // Small delay to let Railway network fully initialise
+
+  // Connect to MongoDB and load all data before doing anything
+  await connectMongo();
+  await loadData();
+
+  // Small delay for Railway network to stabilise
   setTimeout(() => registerCommands(), 2000);
 });
 
@@ -1282,9 +1332,9 @@ async function handleCommand(interaction, commandName, user, guild) {
 
     let leaderRole, officerRole, memberRole;
     try {
-      leaderRole  = await guild.roles.create({ name: buildRoleName(name, rn.leader),  color: 0xFFD700, reason: `Clan created by ${user.tag}` });
-      officerRole = await guild.roles.create({ name: buildRoleName(name, rn.officer), color: 0x5865F2, reason: `Officer role for ${name}` });
-      memberRole  = await guild.roles.create({ name: buildRoleName(name, rn.member),  color: 0x99AAB5, reason: `Member role for ${name}` });
+      leaderRole  = await guild.roles.create({ name: buildRoleName(name, rn.leader),  colors: 0xFFD700, reason: `Clan created by ${user.tag}` });
+      officerRole = await guild.roles.create({ name: buildRoleName(name, rn.officer), colors: 0x5865F2, reason: `Officer role for ${name}` });
+      memberRole  = await guild.roles.create({ name: buildRoleName(name, rn.member),  colors: 0x99AAB5, reason: `Member role for ${name}` });
     } catch (e) {
       if (leaderRole)  await leaderRole.delete().catch(() => {});
       if (officerRole) await officerRole.delete().catch(() => {});
@@ -1744,14 +1794,18 @@ async function handleCommand(interaction, commandName, user, guild) {
 // Save data when Railway redeploys or the process is stopped.
 
 function shutdown(signal) {
-  console.log(`\n⚡ ${signal} received — saving data before exit...`);
-  try {
-    fs.writeFileSync(DATA_FILE, JSON.stringify(db, null, 2), 'utf8');
-    console.log('✅ Data saved. Goodbye!');
-  } catch (e) {
-    console.error('⚠️  Could not save on shutdown:', e.message);
-  }
-  process.exit(0);
+  console.log(`\n⚡ ${signal} received — flushing data to MongoDB before exit...`);
+  const saves = Object.keys(db).map(guildId => _persistGuild(guildId));
+  Promise.all(saves)
+    .then(() => {
+      console.log('✅ Data flushed. Goodbye!');
+      if (mongoClient) mongoClient.close();
+      process.exit(0);
+    })
+    .catch(e => {
+      console.error('⚠️  Flush error on shutdown:', e.message);
+      process.exit(1);
+    });
 }
 
 process.on('SIGTERM', () => shutdown('SIGTERM'));

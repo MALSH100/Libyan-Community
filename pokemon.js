@@ -1150,6 +1150,7 @@ module.exports = function initPokemon({ client, db, saveData, getGuildClans, get
     if (!interaction.commandName.startsWith('pokemon') && interaction.commandName !== 'pokedex') return;
 
     const { commandName, user, guild } = interaction;
+    console.log(`📩 Pokemon command: /${commandName} from ${user.tag}`);
 
     try {
       await handlePokemonCommand(interaction, commandName, user, guild);
