@@ -1,7 +1,14 @@
 // ═══════════════════════════════════════════════════════════════════════════════
-// POKEMON SYSTEM — Clan Bot Extension v8
-// New: Item drops, Officer war start, Paginated /clan-commands,
-//      /pokemon-view, /pokemon-stats, channel rename fix, stale channel fix
+// POKEMON SYSTEM — Clan Bot Extension
+// - Wild spawns every 4 hours in clan private channels
+// - Real Pokemon data from PokéAPI (Gen 1–8, #1–898)
+// - Attack, Heavy Strike, Catch, Run buttons
+// - HP-based catch rate — faint = no catch
+// - Personal Pokemon per member (follow member when leaving clan)
+// - 30 Pokemon cap per member
+// - 1v1 battles — any member can challenge
+// - Shiny Pokemon (1/50 chance)
+// - Simple items: Pokeballs (3 per spawn) + Potions (2 per battle)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const {
@@ -15,88 +22,17 @@ const {
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const MAX_POKEMON        = 30;
-const SPAWN_INTERVAL_MS  = 2 * 60 * 60 * 1000;   // 2 hours
-const SPAWN_FLEE_MS      = 60 * 60 * 1000;        // 1 hour
-const DROP_INTERVAL_MS   = 60 * 60 * 1000;        // Item drops every 1 hour
-const DROP_EXPIRE_MS     = 30 * 60 * 1000;        // Item drops expire in 30 mins
+const SPAWN_INTERVAL_MS  = 2 * 60 * 60 * 1000;  // 2 hours
+const SPAWN_FLEE_MS      = 60 * 60 * 1000;       // 1 hour
 const POKEBALL_PER_SPAWN = 3;
-const MAX_POKEMON_ID     = 898;
-const SHINY_CHANCE       = 50;
-const POTION_HEAL_PCT    = 0.30;
-const BATTLE_TIMEOUT_MS  = 60 * 1000;
-const FIRST_HIT_XP       = 15;
-const STREAK_THRESHOLD   = 3;
-const STREAK_XP_BONUS    = 50;
-const STREAK_DURATION_MS = 7 * 24 * 60 * 60 * 1000;
-const HONEY_DURATION_MS  = 12 * 60 * 60 * 1000;  // 12 hours
-
-// ─── Item Definitions ─────────────────────────────────────────────────────────
-
-const ITEMS = {
-  great_ball: {
-    id:          'great_ball',
-    name:        'Great Ball',
-    emoji:       '🔵',
-    description: 'A high-performance Ball with a higher catch rate than a standard Pokéball.',
-    catchBonus:  1.5,   // multiplier on catch rate
-    type:        'ball',
-    pokeApiId:   'great-ball',
-  },
-  ultra_ball: {
-    id:          'ultra_ball',
-    name:        'Ultra Ball',
-    emoji:       '⚫',
-    description: 'An ultra-high performance Ball with a much higher catch rate.',
-    catchBonus:  2.0,
-    type:        'ball',
-    pokeApiId:   'ultra-ball',
-  },
-  super_potion: {
-    id:          'super_potion',
-    name:        'Super Potion',
-    emoji:       '🧪',
-    description: 'Restores 50 HP to a Pokémon during battle.',
-    healAmount:  50,
-    type:        'potion',
-    pokeApiId:   'super-potion',
-  },
-  hyper_potion: {
-    id:          'hyper_potion',
-    name:        'Hyper Potion',
-    emoji:       '💊',
-    description: 'Restores 120 HP to a Pokémon during battle.',
-    healAmount:  120,
-    type:        'potion',
-    pokeApiId:   'hyper-potion',
-  },
-  honey: {
-    id:          'honey',
-    name:        'Honey',
-    emoji:       '🍯',
-    description: 'A sweet honey that attracts rare Pokémon. Activates automatically when claimed — rare spawns for 12 hours!',
-    type:        'honey',
-    pokeApiId:   'honey',
-  },
-};
-
-// Weighted drop pool — honey is rarest
-const DROP_POOL = [
-  { item: 'great_ball',   weight: 35 },
-  { item: 'ultra_ball',   weight: 20 },
-  { item: 'super_potion', weight: 25 },
-  { item: 'hyper_potion', weight: 15 },
-  { item: 'honey',        weight: 5  },
-];
-
-function randomDrop() {
-  const total  = DROP_POOL.reduce((s, e) => s + e.weight, 0);
-  let   roll   = Math.random() * total;
-  for (const entry of DROP_POOL) {
-    roll -= entry.weight;
-    if (roll <= 0) return entry.item;
-  }
-  return 'great_ball';
-}
+const MAX_POKEMON_ID     = 898; // Gen 1–8
+const SHINY_CHANCE       = 50;  // 1 in 50
+const POTION_HEAL_PCT    = 0.30; // 30% max HP
+const BATTLE_TIMEOUT_MS  = 60 * 1000; // 60s per turn
+const FIRST_HIT_XP       = 15;  // Bonus clan XP for landing the first hit
+const STREAK_THRESHOLD   = 3;   // Catches in a row to trigger streak bonus
+const STREAK_XP_BONUS    = 50;  // Bonus XP for hitting the streak
+const STREAK_DURATION_MS = 7 * 24 * 60 * 60 * 1000; // 1 week multiplier window
 
 // Type colour map for embed colours
 const TYPE_COLOURS = {
@@ -265,37 +201,8 @@ async function buildCaughtPokemon(apiData, level, isShiny, caughtByUserId) {
 function getMemberPokemon(db, guildId, userId) {
   if (!db[guildId]) db[guildId] = {};
   if (!db[guildId].__pokemon) db[guildId].__pokemon = {};
-  if (!db[guildId].__pokemon[userId]) {
-    db[guildId].__pokemon[userId] = {
-      pokemon:    [],
-      pokeballs:  5,
-      battleWins: 0,
-      items:      {}, // { itemId: count }
-    };
-  }
-  // Migrate old records that don't have items yet
-  if (!db[guildId].__pokemon[userId].items) {
-    db[guildId].__pokemon[userId].items = {};
-  }
+  if (!db[guildId].__pokemon[userId]) db[guildId].__pokemon[userId] = { pokemon: [], pokeballs: 5, battleWins: 0 };
   return db[guildId].__pokemon[userId];
-}
-
-// Add an item to a member's bag
-function addItem(memberData, itemId) {
-  memberData.items[itemId] = (memberData.items[itemId] || 0) + 1;
-}
-
-// Use an item from a member's bag — returns true if successful
-function useItem(memberData, itemId) {
-  if (!memberData.items[itemId] || memberData.items[itemId] <= 0) return false;
-  memberData.items[itemId]--;
-  if (memberData.items[itemId] === 0) delete memberData.items[itemId];
-  return true;
-}
-
-// Count items of a type in a member's bag
-function countItem(memberData, itemId) {
-  return memberData.items[itemId] || 0;
 }
 
 function getClanPokemonStats(db, guildId, gc) {
@@ -381,76 +288,11 @@ function faintedEmbed(pokeName, isShiny) {
     .setDescription('It fainted before it could be caught. Better luck next time!');
 }
 
-// Build catch interaction rows — shows available balls as separate buttons
-// memberData is passed so we know which balls the user has
-function catchRows(regularBallsLeft, memberData) {
-  const row1 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('poke_attack').setLabel('⚔️ Attack').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId('poke_heavy').setLabel('💥 Heavy Strike').setStyle(ButtonStyle.Danger),
-    new ButtonBuilder().setCustomId('poke_run').setLabel('🏃 Run').setStyle(ButtonStyle.Secondary),
-  );
-
-  // Build ball buttons
-  const ballButtons = [];
-
-  // Regular pokeball
-  if (regularBallsLeft > 0) {
-    ballButtons.push(
-      new ButtonBuilder()
-        .setCustomId('poke_catch_regular')
-        .setLabel(`🎯 Pokéball (${regularBallsLeft})`)
-        .setStyle(ButtonStyle.Success)
-    );
-  }
-
-  // Great Ball
-  const greatBalls = memberData ? countItem(memberData, 'great_ball') : 0;
-  if (greatBalls > 0) {
-    ballButtons.push(
-      new ButtonBuilder()
-        .setCustomId('poke_catch_great')
-        .setLabel(`🔵 Great Ball (${greatBalls})`)
-        .setStyle(ButtonStyle.Success)
-    );
-  }
-
-  // Ultra Ball
-  const ultraBalls = memberData ? countItem(memberData, 'ultra_ball') : 0;
-  if (ultraBalls > 0) {
-    ballButtons.push(
-      new ButtonBuilder()
-        .setCustomId('poke_catch_ultra')
-        .setLabel(`⚫ Ultra Ball (${ultraBalls})`)
-        .setStyle(ButtonStyle.Success)
-    );
-  }
-
-  // If no balls at all, show disabled catch button
-  if (ballButtons.length === 0) {
-    ballButtons.push(
-      new ButtonBuilder()
-        .setCustomId('poke_catch_regular')
-        .setLabel('🎯 No balls left!')
-        .setStyle(ButtonStyle.Success)
-        .setDisabled(true)
-    );
-  }
-
-  // Discord allows max 5 buttons per row — split if needed
-  const rows = [row1];
-  // Chunk ball buttons into rows of up to 5
-  for (let i = 0; i < ballButtons.length; i += 5) {
-    rows.push(new ActionRowBuilder().addComponents(...ballButtons.slice(i, i + 5)));
-  }
-  return rows;
-}
-
-// Legacy single-row version used for updating embed with simple state
 function catchButtons(ballsLeft) {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('poke_attack').setLabel('⚔️ Attack').setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId('poke_heavy').setLabel('💥 Heavy Strike').setStyle(ButtonStyle.Danger),
-    new ButtonBuilder().setCustomId('poke_catch_regular').setLabel(`🎯 Catch (${ballsLeft})`).setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('poke_catch').setLabel(`🎯 Catch (${ballsLeft} ball${ballsLeft !== 1 ? 's' : ''})`).setStyle(ButtonStyle.Success),
     new ButtonBuilder().setCustomId('poke_run').setLabel('🏃 Run').setStyle(ButtonStyle.Secondary),
   );
 }
@@ -459,7 +301,7 @@ function disabledButtons() {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('poke_attack').setLabel('⚔️ Attack').setStyle(ButtonStyle.Primary).setDisabled(true),
     new ButtonBuilder().setCustomId('poke_heavy').setLabel('💥 Heavy Strike').setStyle(ButtonStyle.Danger).setDisabled(true),
-    new ButtonBuilder().setCustomId('poke_catch_regular').setLabel('🎯 Catch').setStyle(ButtonStyle.Success).setDisabled(true),
+    new ButtonBuilder().setCustomId('poke_catch').setLabel('🎯 Catch').setStyle(ButtonStyle.Success).setDisabled(true),
     new ButtonBuilder().setCustomId('poke_run').setLabel('🏃 Run').setStyle(ButtonStyle.Secondary).setDisabled(true),
   );
 }
@@ -599,34 +441,15 @@ async function triggerSpawn(channel, db, saveData, getGuildClans, getUserClan) {
 
     activeSpawns[channel.id] = spawn;
 
-    const embed = spawnEmbed(spawn.hp, spawn.maxHp, apiData.name, types, spriteUrl, isShiny, level, spawn.speciesCatchRate);
-    // Spawn message uses basic buttons — no member data available at this stage
-    const initialRows = catchRows(POKEBALL_PER_SPAWN, null);
+    const typeColour = TYPE_COLOURS[types[0]] || 0x5865F2;
+    const embed      = spawnEmbed(spawn.hp, spawn.maxHp, apiData.name, types, spriteUrl, isShiny, level, spawn.speciesCatchRate);
+    const row        = catchButtons(POKEBALL_PER_SPAWN);
 
-    // Check if honey is active for this channel's clan — if so boost to rare spawn
-    // (honey effect already applied at spawn selection level above)
-
-    let msg;
-    try {
-      msg = await channel.send({
-        content: `🌿 **A wild Pokémon has appeared!** ${isShiny ? '✨ It\'s shiny!' : ''}`,
-        embeds: [embed],
-        components: initialRows,
-      });
-    } catch (err) {
-      // Channel deleted or inaccessible
-      if (err.code === 10003 || err.code === 50013) {
-        console.warn(`⚠️ Cannot send to channel ${channel.id} — clearing stale channelId`);
-        // Find and clear the clan channelId
-        const gc = getGuildClans(channel.guild?.id || '');
-        for (const clan of Object.values(gc)) {
-          if (clan.channelId === channel.id) { clan.channelId = null; saveData(); break; }
-        }
-        delete activeSpawns[channel.id];
-        return;
-      }
-      throw err;
-    }
+    const msg = await channel.send({
+      content: `🌿 **A wild Pokémon has appeared!** ${isShiny ? '✨ It\'s shiny!' : ''}`,
+      embeds: [embed],
+      components: [row],
+    });
 
     spawn.messageId = msg.id;
     spawn.message   = msg;
@@ -634,7 +457,7 @@ async function triggerSpawn(channel, db, saveData, getGuildClans, getUserClan) {
     // Auto-flee timer
     const fleeTimer = setTimeout(async () => {
       if (!activeSpawns[channel.id] || activeSpawns[channel.id].caught || activeSpawns[channel.id].fainted) return;
-      const wasInteracted = spawn.firstHitUserId !== undefined;
+      const wasInteracted = spawn.firstHitUserId !== undefined; // someone attacked but didn't catch
       delete activeSpawns[channel.id];
       try {
         await msg.edit({
@@ -655,10 +478,9 @@ async function triggerSpawn(channel, db, saveData, getGuildClans, getUserClan) {
 
     spawn.fleeTimer = fleeTimer;
 
-    // Button collector — updated filter to catch all ball types
-    const CATCH_IDS = ['poke_attack','poke_heavy','poke_catch_regular','poke_catch_great','poke_catch_ultra','poke_run'];
+    // Set up button collector
     const collector = msg.createMessageComponentCollector({
-      filter: i => CATCH_IDS.includes(i.customId),
+      filter: i => ['poke_attack','poke_heavy','poke_catch','poke_run'].includes(i.customId),
       time: SPAWN_FLEE_MS,
     });
 
@@ -808,56 +630,30 @@ async function handleSpawnInteraction(i, spawn, channel, db, saveData, getGuildC
       return;
     }
 
-    // ── CATCH (all ball types) ────────────────────────────────────────────────
-    if (['poke_catch_regular','poke_catch_great','poke_catch_ultra'].includes(i.customId)) {
-      // Determine which ball is being used
-      let ballType    = 'regular';
-      let catchBonus  = 1.0;
-      let ballEmoji   = '🎯';
-      let ballName    = 'Pokéball';
+    // ── CATCH ────────────────────────────────────────────────────────────────
+    if (i.customId === 'poke_catch') {
+      // Check user's personal ball count for this spawn
+      if (spawn.userBalls[userId] === undefined) spawn.userBalls[userId] = POKEBALL_PER_SPAWN;
 
-      if (i.customId === 'poke_catch_great') {
-        ballType   = 'great_ball';
-        catchBonus = ITEMS.great_ball.catchBonus;
-        ballEmoji  = ITEMS.great_ball.emoji;
-        ballName   = ITEMS.great_ball.name;
-      } else if (i.customId === 'poke_catch_ultra') {
-        ballType   = 'ultra_ball';
-        catchBonus = ITEMS.ultra_ball.catchBonus;
-        ballEmoji  = ITEMS.ultra_ball.emoji;
-        ballName   = ITEMS.ultra_ball.name;
+      if (spawn.userBalls[userId] <= 0) {
+        await i.followUp({ content: '❌ You have no Pokéballs left for this encounter!', flags: 64 });
+        return;
       }
 
-      // Check ball availability
-      if (ballType === 'regular') {
-        if (spawn.userBalls[userId] === undefined) spawn.userBalls[userId] = POKEBALL_PER_SPAWN;
-        if (spawn.userBalls[userId] <= 0) {
-          await i.followUp({ content: '❌ You have no Pokéballs left for this encounter!', flags: 64 });
-          return;
-        }
-        spawn.userBalls[userId]--;
-      } else {
-        // Special ball — check and consume from inventory
-        if (!useItem(memberData, ballType)) {
-          await i.followUp({ content: `❌ You don't have any ${ballName}s!`, flags: 64 });
-          return;
-        }
-        saveData();
-      }
-
-      const ballsLeft = spawn.userBalls[userId] ?? 0;
-      const catchRate = Math.min(0.95, calcCatchRate(spawn.hp, spawn.maxHp, spawn.speciesCatchRate) * catchBonus);
-      const caught    = Math.random() < catchRate;
+      spawn.userBalls[userId]--;
+      const ballsLeft  = spawn.userBalls[userId];
+      const catchRate  = calcCatchRate(spawn.hp, spawn.maxHp, spawn.speciesCatchRate);
+      const caught     = Math.random() < catchRate;
 
       if (caught) {
+        // Check 30 Pokemon cap
         if (memberData.pokemon.length >= MAX_POKEMON) {
           await i.followUp({
-            content: `❌ You already have **${MAX_POKEMON} Pokémon**! Use \`/pokemon-release\` to release one first.`,
+            content: `❌ You already have **${MAX_POKEMON} Pokémon**! Use \`/pokemon-release\` to release one first, then try catching again.`,
             flags: 64,
           });
-          // Give ball back
-          if (ballType === 'regular') spawn.userBalls[userId]++;
-          else { addItem(memberData, ballType); saveData(); }
+          // Give the ball back since they can't catch
+          spawn.userBalls[userId]++;
           return;
         }
 
@@ -870,21 +666,25 @@ async function handleSpawnInteraction(i, spawn, channel, db, saveData, getGuildC
         memberData.pokemon.push(caughtPoke);
         memberData.pokeballs = (memberData.pokeballs || 0) + POKEBALL_PER_SPAWN;
 
-        // Catch streak tracking
+        // ── Catch streak tracking ───────────────────────────────────────────
         let streakMsg = '';
         if (channelClan) {
-          if (!channelClan.catchStreak)      channelClan.catchStreak = 0;
-          if (!channelClan.lastCatchTime)    channelClan.lastCatchTime = 0;
-          if (!channelClan.streakBonusUntil) channelClan.streakBonusUntil = 0;
+          // Initialise streak data if not present
+          if (!channelClan.catchStreak)       channelClan.catchStreak = 0;
+          if (!channelClan.lastCatchTime)     channelClan.lastCatchTime = 0;
+          if (!channelClan.streakBonusUntil)  channelClan.streakBonusUntil = 0;
+
           channelClan.catchStreak++;
           channelClan.lastCatchTime = Date.now();
+
           if (channelClan.catchStreak >= STREAK_THRESHOLD) {
+            // Award streak XP bonus
             channelClan.xp = (channelClan.xp || 0) + STREAK_XP_BONUS;
             channelClan.streakBonusUntil = Date.now() + STREAK_DURATION_MS;
-            channelClan.catchStreak = 0;
-            streakMsg = `\n\n🔥 **${STREAK_THRESHOLD} catch streak!** +${STREAK_XP_BONUS} bonus clan XP!`;
+            channelClan.catchStreak = 0; // reset streak counter after reward
+            streakMsg = `\n\n🔥 **${STREAK_THRESHOLD} catch streak!** +${STREAK_XP_BONUS} bonus clan XP! XP multiplier active for 1 week!`;
           } else {
-            streakMsg = `\n\n🔥 Catch streak: **${channelClan.catchStreak}/${STREAK_THRESHOLD}**`;
+            streakMsg = `\n\n🔥 Catch streak: **${channelClan.catchStreak}/${STREAK_THRESHOLD}** — keep it up for bonus XP!`;
           }
         }
 
@@ -894,13 +694,12 @@ async function handleSpawnInteraction(i, spawn, channel, db, saveData, getGuildC
         const typeColour = TYPE_COLOURS[spawn.types[0]] || 0x57F287;
 
         await spawn.message.edit({
-          content: `🎉 **${i.user.displayName}** caught the wild **${shinyStr}${capitalize(spawn.pokeName)}** with a **${ballName}**!`,
+          content: `🎉 **${i.user.displayName}** caught the wild **${shinyStr}${capitalize(spawn.pokeName)}**!`,
           embeds: [new EmbedBuilder()
             .setColor(typeColour)
             .setTitle(`🎉 Gotcha! ${shinyStr}${capitalize(spawn.pokeName)} was caught!`)
             .setDescription(
               `**Caught by:** ${i.user.displayName}\n` +
-              `**Ball used:** ${ballEmoji} ${ballName}\n` +
               `**Level:** ${spawn.level}\n` +
               `**Type:** ${spawn.types.map(t => `${TYPE_EMOJI[t] || ''}${capitalize(t)}`).join(' / ')}\n\n` +
               `Use \`/pokemon-team\` to see your Pokémon!` +
@@ -912,14 +711,18 @@ async function handleSpawnInteraction(i, spawn, channel, db, saveData, getGuildC
 
       } else {
         // Failed catch
-        const shakes = `💫 ${i.user.displayName} threw a **${ballName}**... Oh no! The Pokémon broke free!`;
+        const shakes = ballsLeft > 0 ? '💫 Oh no! The Pokémon broke free!' : '💨 The Pokéball missed completely!';
+
         const updatedEmbed = spawnEmbed(spawn.hp, spawn.maxHp, spawn.pokeName, spawn.types, spawn.spriteUrl, spawn.isShiny, spawn.level, spawn.speciesCatchRate);
         updatedEmbed.setDescription(
-          updatedEmbed.data.description + `\n\n${shakes}`
+          updatedEmbed.data.description +
+          `\n\n${i.user.displayName} threw a Pokéball... ${shakes}\n` +
+          (ballsLeft > 0 ? `You have **${ballsLeft}** ball${ballsLeft !== 1 ? 's' : ''} left.` : '❌ **You\'re out of Pokéballs!**')
         );
+
         await spawn.message.edit({
           embeds: [updatedEmbed],
-          components: catchRows(ballsLeft, memberData),
+          components: [catchButtons(ballsLeft)],
         }).catch(() => {});
       }
     }
@@ -956,7 +759,7 @@ function buildBattleEmbed(battle, turn) {
     .setFooter({ text: `${battle.currentTurnUserId === battle.p1UserId ? battle.p1Name : battle.p2Name}'s turn — 60 seconds` });
 }
 
-function battleMoveButtons(pokemon, potionsLeft, memberData) {
+function battleMoveButtons(pokemon, potionsLeft) {
   const rows = [];
 
   // Move buttons (up to 4)
@@ -972,48 +775,18 @@ function battleMoveButtons(pokemon, potionsLeft, memberData) {
     rows.push(new ActionRowBuilder().addComponents(...moveButtons.slice(0, 4)));
   }
 
-  // Build item/forfeit row
-  const actionButtons = [];
-
-  // Basic potion (built-in, 2 per battle)
-  actionButtons.push(
+  // Item / Forfeit row
+  rows.push(new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId('battle_potion')
-      .setLabel(`🧪 Potion (${potionsLeft})`)
+      .setLabel(`🧪 Potion (${potionsLeft} left)`)
       .setStyle(ButtonStyle.Success)
-      .setDisabled(potionsLeft <= 0)
-  );
-
-  // Super Potion from inventory
-  const superCount = memberData ? countItem(memberData, 'super_potion') : 0;
-  if (superCount > 0) {
-    actionButtons.push(
-      new ButtonBuilder()
-        .setCustomId('battle_super_potion')
-        .setLabel(`🧪 Super Potion (${superCount})`)
-        .setStyle(ButtonStyle.Success)
-    );
-  }
-
-  // Hyper Potion from inventory
-  const hyperCount = memberData ? countItem(memberData, 'hyper_potion') : 0;
-  if (hyperCount > 0) {
-    actionButtons.push(
-      new ButtonBuilder()
-        .setCustomId('battle_hyper_potion')
-        .setLabel(`💊 Hyper Potion (${hyperCount})`)
-        .setStyle(ButtonStyle.Success)
-    );
-  }
-
-  actionButtons.push(
+      .setDisabled(potionsLeft <= 0),
     new ButtonBuilder()
       .setCustomId('battle_forfeit')
       .setLabel('🏳️ Forfeit')
-      .setStyle(ButtonStyle.Danger)
-  );
-
-  rows.push(new ActionRowBuilder().addComponents(...actionButtons.slice(0, 5)));
+      .setStyle(ButtonStyle.Danger),
+  ));
 
   return rows;
 }
@@ -1034,24 +807,6 @@ async function runBattleTurn(battle, channel, db, saveData, moveNameOrAction, us
       const heal         = Math.floor(attacker.maxHp * POTION_HEAL_PCT);
       attacker.currentHp = Math.min(attacker.maxHp, attacker.currentHp + heal);
       logEntry = `🧪 **${atkName}** used a Potion! **${capitalize(attacker.name)}** restored **${heal} HP**.`;
-
-    } else if (moveNameOrAction === 'super_potion') {
-      const actualUserId  = isP1 ? battle.p1ActualUserId : battle.p2ActualUserId;
-      const userData      = getMemberPokemon(db, battle.guildId, actualUserId);
-      if (!useItem(userData, 'super_potion')) return null;
-      saveData();
-      const heal          = ITEMS.super_potion.healAmount;
-      attacker.currentHp  = Math.min(attacker.maxHp, attacker.currentHp + heal);
-      logEntry = `🧪 **${atkName}** used a Super Potion! **${capitalize(attacker.name)}** restored **${heal} HP**.`;
-
-    } else if (moveNameOrAction === 'hyper_potion') {
-      const actualUserId  = isP1 ? battle.p1ActualUserId : battle.p2ActualUserId;
-      const userData      = getMemberPokemon(db, battle.guildId, actualUserId);
-      if (!useItem(userData, 'hyper_potion')) return null;
-      saveData();
-      const heal          = ITEMS.hyper_potion.healAmount;
-      attacker.currentHp  = Math.min(attacker.maxHp, attacker.currentHp + heal);
-      logEntry = `💊 **${atkName}** used a Hyper Potion! **${capitalize(attacker.name)}** restored **${heal} HP**.`;
 
     } else if (moveNameOrAction === 'forfeit') {
       return 'forfeit';
@@ -1128,7 +883,6 @@ module.exports = function initPokemon({ client, db, saveData, getGuildClans, get
           if (channel) {
             console.log(`🌿 Scheduling spawns for #${channel.name}`);
             scheduleNextSpawn(channel, db, saveData, getGuildClans, getUserClan);
-            scheduleNextDrop(channel);
           } else {
             console.warn(`⚠️ Could not find channel ${clan.channelId} — clearing stale channelId`);
             clan.channelId = null;
@@ -1573,175 +1327,7 @@ module.exports = function initPokemon({ client, db, saveData, getGuildClans, get
           .setFooter({ text: 'Catch more Pokémon when they spawn in your clan channel!' })]
       });
     }
-
-    // ── /pokemon-claim ─────────────────────────────────────────────────────
-    if (commandName === 'pokemon-claim') {
-      const channelId = interaction.channelId;
-      const drop = activeDrops[channelId];
-
-      if (!drop) {
-        return safeReplyPoke(interaction, { content: '❌ There is no active item drop in this channel right now.', flags: 64 });
-      }
-      if (Date.now() > drop.expiresAt) {
-        delete activeDrops[channelId];
-        return safeReplyPoke(interaction, { content: '❌ That drop has already expired.', flags: 64 });
-      }
-
-      // Verify user is in the clan that owns this channel
-      const gc = getGuildClans(guild.id);
-      let channelClanForDrop = null;
-      for (const clan of Object.values(gc)) {
-        if (clan.channelId === channelId) { channelClanForDrop = clan; break; }
-      }
-      if (channelClanForDrop) {
-        const inClan = channelClanForDrop.leader === user.id ||
-          (channelClanForDrop.officers || []).includes(user.id) ||
-          (channelClanForDrop.members  || []).includes(user.id);
-        if (!inClan) {
-          return safeReplyPoke(interaction, { content: '❌ Only members of this clan can claim drops!', flags: 64 });
-        }
-      }
-
-      const itemId  = drop.itemId;
-      const item    = ITEMS[itemId];
-      delete activeDrops[channelId];
-
-      // Special handling for honey — activate immediately
-      if (itemId === 'honey') {
-        if (channelClanForDrop) {
-          channelClanForDrop.honeyActiveUntil = Date.now() + HONEY_DURATION_MS;
-          saveData();
-        }
-        return safeReplyPoke(interaction, {
-          embeds: [new EmbedBuilder()
-            .setColor(0xFFD700)
-            .setTitle(`🍯 Honey Claimed!`)
-            .setDescription(
-              `<@${user.id}> claimed the **Honey**!\n\n` +
-              `🍯 Rare Pokémon are now attracted to this channel for the next **12 hours!**\n` +
-              `Higher rarity spawns will appear more frequently.`
-            )]
-        });
-      }
-
-      // Add item to inventory
-      addItem(memberData, itemId);
-      saveData();
-
-      return safeReplyPoke(interaction, {
-        embeds: [new EmbedBuilder()
-          .setColor(0xFFD700)
-          .setTitle(`${item.emoji} Item Claimed!`)
-          .setDescription(
-            `<@${user.id}> claimed **${item.name}**!\n\n` +
-            `*${item.description}*\n\n` +
-            `${item.type === 'ball' ? 'It will appear as a button option during wild Pokémon encounters.' : 'It will appear as a button option during battles.'}\n` +
-            `Use \`/pokemon-bag\` to check your items.`
-          )]
-      });
-    }
-
-    // ── /pokemon-bag ───────────────────────────────────────────────────────
-    if (commandName === 'pokemon-bag') {
-      const items = memberData.items || {};
-      const keys  = Object.keys(items).filter(k => items[k] > 0);
-
-      if (keys.length === 0) {
-        return safeReplyPoke(interaction, {
-          content: '🎒 Your bag is empty! Claim item drops in your clan channel.',
-          flags: 64,
-        });
-      }
-
-      const desc = keys.map(k => {
-        const item = ITEMS[k];
-        if (!item) return null;
-        return `${item.emoji} **${item.name}** ×${items[k]}\n   *${item.description}*`;
-      }).filter(Boolean).join('\n\n');
-
-      return safeReplyPoke(interaction, {
-        embeds: [new EmbedBuilder()
-          .setColor(0xFFD700)
-          .setTitle(`🎒 ${user.displayName}'s Bag`)
-          .setDescription(desc)
-          .setFooter({ text: 'Items are used automatically via buttons during encounters and battles.' })],
-        flags: 64,
-      });
-    }
-
-    // ── /pokemon-view ──────────────────────────────────────────────────────
-    if (commandName === 'pokemon-view') {
-      const target     = interaction.options.getUser('user');
-      const targetData = getMemberPokemon(db, guild.id, target.id);
-      const pokemon    = targetData.pokemon;
-
-      if (pokemon.length === 0) {
-        return safeReplyPoke(interaction, {
-          content: `📭 **${target.displayName}** hasn't caught any Pokémon yet.`,
-          flags: 64,
-        });
-      }
-
-      let targetMember;
-      try { targetMember = await guild.members.fetch(target.id); } catch {}
-      const displayName = targetMember?.displayName || target.username;
-
-      const embed = new EmbedBuilder()
-        .setColor(0x5865F2)
-        .setTitle(`🎒 ${displayName}'s Pokémon (${pokemon.length}/${MAX_POKEMON})`)
-        .setDescription(
-          pokemon.map((p, idx) => {
-            const shiny = p.isShiny ? '✨' : '';
-            const name  = p.nickname ? `**${p.nickname}** *(${capitalize(p.name)})*` : `**${capitalize(p.name)}**`;
-            const types = p.types.map(t => `${TYPE_EMOJI[t] || ''}${capitalize(t)}`).join('/');
-            return `\`${String(idx + 1).padStart(2, '0')}\` ${shiny}${name} • Lv.${p.level} • ${types} • Wins: ${p.battleWins || 0}`;
-          }).join('\n')
-        )
-        .setFooter({ text: `Total battle wins: ${targetData.battleWins || 0}` });
-
-      return safeReplyPoke(interaction, { embeds: [embed] });
-    }
-
-    // ── /pokemon-stats ─────────────────────────────────────────────────────
-    if (commandName === 'pokemon-stats') {
-      const slot    = interaction.options.getInteger('slot') - 1;
-      const pokemon = memberData.pokemon;
-
-      if (slot < 0 || slot >= pokemon.length) {
-        return safeReplyPoke(interaction, { content: `❌ Invalid slot. You have ${pokemon.length} Pokémon.`, flags: 64 });
-      }
-
-      const p       = pokemon[slot];
-      const name    = p.nickname ? `${p.nickname} (${capitalize(p.name)})` : capitalize(p.name);
-      const shiny   = p.isShiny ? ' ✨ SHINY' : '';
-      const types   = p.types.map(t => `${TYPE_EMOJI[t] || ''}${capitalize(t)}`).join(' / ');
-      const xpPct   = Math.min(100, Math.floor((p.xp / p.xpToNext) * 100));
-      const xpFilled = Math.round(xpPct / 10);
-      const xpBar   = '🟦'.repeat(xpFilled) + '⬛'.repeat(10 - xpFilled);
-
-      const moves = p.moves.map(m =>
-        `${TYPE_EMOJI[m.type] || ''}**${capitalize(m.name)}** — Power: ${m.power} | PP: ${m.pp}/${m.maxPp} | Type: ${capitalize(m.type)}`
-      ).join('\n');
-
-      const embed = new EmbedBuilder()
-        .setColor(TYPE_COLOURS[p.types[0]] || 0x5865F2)
-        .setTitle(`${shiny} ${name} — Detailed Stats`)
-        .addFields(
-          { name: '🏷️ Info',        value: `Type: ${types}\nLevel: **${p.level}**\nShiny: ${p.isShiny ? 'Yes ✨' : 'No'}`, inline: true },
-          { name: '🏆 Battle',      value: `Wins: **${p.battleWins || 0}**\nCaught by: <@${p.caughtBy}>`,                   inline: true },
-          { name: '❤️ HP',          value: `${hpBar(p.currentHp, p.maxHp)} ${p.currentHp}/${p.maxHp}`,                     inline: false },
-          { name: '📈 XP Progress', value: `${xpBar} ${p.xp}/${p.xpToNext} (${xpPct}%)`,                                   inline: false },
-          { name: '⚔️ Attack',      value: `${p.attack}`,        inline: true },
-          { name: '🛡️ Defence',     value: `${p.defense}`,       inline: true },
-          { name: '✨ Sp. Atk',     value: `${p.specialAttack}`, inline: true },
-          { name: '💨 Speed',       value: `${p.speed}`,         inline: true },
-          { name: '🎯 Moves',       value: moves || 'None',      inline: false },
-        );
-
-      if (p.spriteUrl) embed.setThumbnail(p.spriteUrl);
-      return safeReplyPoke(interaction, { embeds: [embed], flags: 64 });
-    }
-  } // end handlePokemonCommand
+  }
 
   // ─── Battle loop ──────────────────────────────────────────────────────────
 
@@ -1760,7 +1346,7 @@ module.exports = function initPokemon({ client, db, saveData, getGuildClans, get
           currentEmbed.addFields({ name: '📋 Battle Log', value: battle.log.join('\n') });
         }
 
-        const rows = battleMoveButtons(currentPoke, potionsLeft, getMemberPokemon(db, battle.guildId, battle.currentTurnUserId));
+        const rows = battleMoveButtons(currentPoke, potionsLeft);
 
         const msg = await channel.send({
           content: `<@${battle.currentTurnUserId}> — it's your turn!`,
@@ -1770,6 +1356,7 @@ module.exports = function initPokemon({ client, db, saveData, getGuildClans, get
 
         if (!msg) break;
 
+        // Wait for the current player's action
         const result = await new Promise(resolve => {
           const col = msg.createMessageComponentCollector({
             filter: i => i.user.id === battle.currentTurnUserId,
@@ -1780,12 +1367,16 @@ module.exports = function initPokemon({ client, db, saveData, getGuildClans, get
           col.on('collect', async i => {
             await i.deferUpdate().catch(() => {});
             const customId = i.customId;
-            if (customId === 'battle_potion')        resolve('potion');
-            else if (customId === 'battle_super_potion') resolve('super_potion');
-            else if (customId === 'battle_hyper_potion') resolve('hyper_potion');
-            else if (customId === 'battle_forfeit')   resolve('forfeit');
-            else if (customId.startsWith('battle_move_')) resolve(customId.replace('battle_move_', ''));
-            else resolve(null);
+
+            if (customId === 'battle_potion') {
+              resolve('potion');
+            } else if (customId === 'battle_forfeit') {
+              resolve('forfeit');
+            } else if (customId.startsWith('battle_move_')) {
+              resolve(customId.replace('battle_move_', ''));
+            } else {
+              resolve(null);
+            }
           });
 
           col.on('end', (collected) => {
@@ -1896,80 +1487,8 @@ module.exports = function initPokemon({ client, db, saveData, getGuildClans, get
     }
   }
 
-  // ─── Item Drop System ─────────────────────────────────────────────────────
-  // Active drops: { channelId: { itemId, messageId, expiresAt } }
-  const activeDrops  = {};
-  const dropTimers   = {};
-
-  function scheduleNextDrop(channel) {
-    if (dropTimers[channel.id]) clearTimeout(dropTimers[channel.id]);
-    dropTimers[channel.id] = setTimeout(
-      () => triggerDrop(channel),
-      DROP_INTERVAL_MS
-    );
-  }
-
-  async function triggerDrop(channel) {
-    if (activeDrops[channel.id]) {
-      scheduleNextDrop(channel);
-      return;
-    }
-    try {
-      const itemId = randomDrop();
-      const item   = ITEMS[itemId];
-      const expiry = Date.now() + DROP_EXPIRE_MS;
-
-      const embed = new EmbedBuilder()
-        .setColor(0xFFD700)
-        .setTitle(`🎁 Item Drop!`)
-        .setDescription(
-          `**${item.emoji} ${item.name}** has appeared in the channel!\n\n` +
-          `*${item.description}*\n\n` +
-          `Use \`/pokemon-claim\` to claim it! First come, first served.\n` +
-          `⏰ Expires in **30 minutes**.`
-        )
-        .setFooter({ text: 'Only one player can claim this!' });
-
-      let msg;
-      try {
-        msg = await channel.send({ embeds: [embed] });
-      } catch (err) {
-        if (err.code === 10003) {
-          // Channel deleted
-          const gc = getGuildClans(channel.guild?.id || '');
-          for (const clan of Object.values(gc)) {
-            if (clan.channelId === channel.id) { clan.channelId = null; saveData(); break; }
-          }
-          return;
-        }
-        throw err;
-      }
-
-      activeDrops[channel.id] = { itemId, messageId: msg.id, expiresAt: expiry };
-
-      // Auto-expire
-      setTimeout(async () => {
-        if (!activeDrops[channel.id] || activeDrops[channel.id].messageId !== msg.id) return;
-        delete activeDrops[channel.id];
-        try {
-          await msg.edit({
-            embeds: [new EmbedBuilder()
-              .setColor(0x888888)
-              .setTitle('🎁 Item Drop Expired')
-              .setDescription(`The **${item.emoji} ${item.name}** was not claimed in time and disappeared.`)]
-          });
-        } catch {}
-        scheduleNextDrop(channel);
-      }, DROP_EXPIRE_MS);
-
-      scheduleNextDrop(channel);
-    } catch (err) {
-      console.error('Drop error:', err.message);
-      scheduleNextDrop(channel);
-    }
-  }
-
   // ─── Watch for new clan channels being created ────────────────────────────
+  // Small delay ensures index.js has saved channelId to clans.json before we check
 
   client.on('channelCreate', channel => {
     setTimeout(() => {
@@ -1980,7 +1499,6 @@ module.exports = function initPokemon({ client, db, saveData, getGuildClans, get
           if (clan.channelId === channel.id) {
             console.log(`🌿 New clan channel detected — scheduling spawns for #${channel.name}`);
             scheduleNextSpawn(channel, db, saveData, getGuildClans, getUserClan);
-            scheduleNextDrop(channel);
             break;
           }
         }

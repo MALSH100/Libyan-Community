@@ -1,5 +1,6 @@
 // ─── Pokemon Command Definitions ─────────────────────────────────────────────
-// All pokemon slash commands — registered together with clan commands by index.js
+// Exported so index.js can register ALL commands (clan + pokemon) in one
+// single REST PUT call, preventing partial registration issues.
 
 const { SlashCommandBuilder } = require('discord.js');
 
@@ -8,16 +9,6 @@ module.exports = function getPokemonCommands() {
     new SlashCommandBuilder()
       .setName('pokemon-team')
       .setDescription('View your personal Pokémon collection'),
-
-    new SlashCommandBuilder()
-      .setName('pokemon-stats')
-      .setDescription('View detailed stats and XP bar for one of your Pokémon')
-      .addIntegerOption(o => o.setName('slot').setDescription('Slot number from /pokemon-team').setRequired(true).setMinValue(1).setMaxValue(30)),
-
-    new SlashCommandBuilder()
-      .setName('pokemon-view')
-      .setDescription('View another player\'s Pokémon collection')
-      .addUserOption(o => o.setName('user').setDescription('The player to view').setRequired(true)),
 
     new SlashCommandBuilder()
       .setName('pokemon-release')
@@ -34,14 +25,6 @@ module.exports = function getPokemonCommands() {
       .setName('pokemon-info')
       .setDescription('Look up any Pokémon using the PokéAPI')
       .addStringOption(o => o.setName('pokemon').setDescription('Pokémon name or number').setRequired(true)),
-
-    new SlashCommandBuilder()
-      .setName('pokemon-bag')
-      .setDescription('View your item bag'),
-
-    new SlashCommandBuilder()
-      .setName('pokemon-claim')
-      .setDescription('Claim an active item drop in your clan channel'),
 
     new SlashCommandBuilder()
       .setName('pokemon-challenge')
