@@ -9,6 +9,8 @@
 // /clan-rename updates the clan name prefix on all 3 roles
 // ═══════════════════════════════════════════════════════════════════════════════
 
+require("./pokemon");
+
 const {
   Client,
   GatewayIntentBits,
