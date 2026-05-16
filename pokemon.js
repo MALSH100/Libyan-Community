@@ -1107,6 +1107,10 @@ async function runBattleTurn(battle, channel, db, saveData, moveNameOrAction, us
 
 module.exports = function initPokemon({ client, db, saveData, getGuildClans, getUserClan }) {
 
+  // ─── State variables ──────────────────────────────────────────────────────
+  const activeDrops = {};   // { channelId: { itemId, messageId, expiresAt } }
+  const dropTimers  = {};   // { channelId: timeoutId }
+
   // ─── On ready: start spawn timers for all clan channels ────────────────────
 
   client.once('clientReady', async () => {
@@ -1897,9 +1901,6 @@ module.exports = function initPokemon({ client, db, saveData, getGuildClans, get
   }
 
   // ─── Item Drop System ─────────────────────────────────────────────────────
-  // Active drops: { channelId: { itemId, messageId, expiresAt } }
-  const activeDrops  = {};
-  const dropTimers   = {};
 
   function scheduleNextDrop(channel) {
     if (dropTimers[channel.id]) clearTimeout(dropTimers[channel.id]);
