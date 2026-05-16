@@ -3,6 +3,7 @@
 // New: Item drops, Officer war start, Paginated /clan-commands,
 //      /pokemon-view, /pokemon-stats, channel rename fix, stale channel fix
 // ═══════════════════════════════════════════════════════════════════════════════
+console.log("NEW VERSION LOADED 12345");
 
 const {
   SlashCommandBuilder,
