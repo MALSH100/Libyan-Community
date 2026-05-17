@@ -9,8 +9,6 @@
 // /clan-rename updates the clan name prefix on all 3 roles
 // ═══════════════════════════════════════════════════════════════════════════════
 
-
-
 const {
   Client,
   GatewayIntentBits,
@@ -437,18 +435,18 @@ const commands = [
 // Registers ALL commands (clan + pokemon) in one single PUT call.
 // This avoids any risk of commands being partially registered or overwriting each other.
 
-let _allCommands = null; // cached after first build
+let _allCommands = null; // reset on each startup — always re-registers
 
 function getAllCommands() {
   if (_allCommands) return _allCommands;
-  // Dynamically require pokemon command definitions
   let pokeCommands = [];
   try {
     pokeCommands = require('./pokemon-commands')();
-  } catch {
-    // pokemon-commands.js not present — skip
+  } catch (e) {
+    console.error('⚠️ Could not load pokemon-commands.js:', e.message);
   }
   _allCommands = [...commands, ...pokeCommands];
+  console.log(`📋 Command list built: ${_allCommands.map(c => c.name).join(', ')}`);
   return _allCommands;
 }
 
@@ -467,7 +465,8 @@ async function registerCommands(attempt = 1) {
       new Promise((_, reject) => setTimeout(() => reject(new Error('Timed out after 20s')), 20000)),
     ]);
 
-    console.log(`✅ ${body.length} global commands registered successfully!`);
+    console.log(`✅ ${body.length} global commands registered!`);
+    console.log(`   Commands: ${body.map(c => c.name).join(', ')}`);
   } catch (err) {
     console.error(`❌ Command registration failed (attempt ${attempt}): ${err.message}`);
     if (err.rawError) console.error('Discord error:', JSON.stringify(err.rawError));
