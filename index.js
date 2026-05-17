@@ -1173,25 +1173,36 @@ async function promptGameSelection(guild, channel, challengerClanName) {
 
 client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
-  // Global commands can fire in DMs where guild is null — block those
+
   if (!interaction.guild) {
-    await interaction.reply({ content: '❌ These commands only work inside a Discord server, not in DMs.', flags: 64 }).catch(() => {});
-    return;
+    return interaction.reply({
+      content: '❌ These commands only work inside a Discord server, not in DMs.',
+      ephemeral: true
+    });
   }
+
   const { commandName, user, guild } = interaction;
+
   console.log(`📩 Command received: /${commandName} from ${user.tag} in ${guild.name}`);
+
   try {
     await handleCommand(interaction, commandName, user, guild);
   } catch (err) {
     console.error(`❌ Unhandled error in ${commandName}:`, err);
-    await safeReply(interaction, { content: '❌ Something went wrong. Please try again.', flags: 64 });
+
+    if (!interaction.replied && !interaction.deferred) {
+      await interaction.reply({
+        content: '❌ Something went wrong. Please try again.',
+        ephemeral: true
+      });
+    }
   }
 });
 
 async function handleCommand(interaction, commandName, user, guild) {
   // Safety check — should never be null here but guard anyway
   if (!guild || !guild.id) {
-    return safeReply(interaction, { content: '❌ This command must be used inside a server.', flags: 64 });
+    return safeReply(interaction, { content: '❌ This command must be used inside a server.', ephemeral: true });
   }
   const gc = getGuildClans(guild.id);
 
@@ -1236,7 +1247,11 @@ async function handleCommand(interaction, commandName, user, guild) {
       ButtonBuilder.from(nextBtn.toJSON()).setDisabled(currentPage === pages.length - 1),
     );
 
-    await safeReply(interaction, { embeds: [pages[0]], components: [buildRow(0)], flags: 64 });
+   await interaction.reply({
+  embeds: [pages[0]],
+  components: [buildRow(0)],
+  ephemeral: true
+});
 
     const msg = await interaction.fetchReply().catch(() => null);
     if (!msg) return;
@@ -1249,7 +1264,10 @@ async function handleCommand(interaction, commandName, user, guild) {
     col.on('collect', async i => {
       if (i.customId === 'cmd_next' && page < pages.length - 1) page++;
       if (i.customId === 'cmd_prev' && page > 0) page--;
-      await i.update({ embeds: [pages[page]], components: [buildRow(page)] }).catch(() => {});
+      await i.update({
+  embeds: [pages[page]],
+  components: [buildRow(page)]
+});
     });
 
     col.on('end', () => {
@@ -1265,10 +1283,10 @@ async function handleCommand(interaction, commandName, user, guild) {
     let clanName, clan;
     if (nameArg && nameArg.trim().length > 0) {
       clanName = nameArg.trim(); clan = gc[clanName];
-      if (!clan) return safeReply(interaction, { content: `❌ No clan named **${clanName}** found.`, flags: 64 });
+      if (!clan) return safeReply(interaction, { content: `❌ No clan named **${clanName}** found.`, ephemeral: true });
     } else {
       const r = getUserClan(guild.id, user.id);
-      if (!r) return safeReply(interaction, { content: '❌ You are not in a clan. Join one or type a clan name.', flags: 64 });
+      if (!r) return safeReply(interaction, { content: '❌ You are not in a clan. Join one or type a clan name.', ephemeral: true });
       clanName = r.name; clan = r.clan;
     }
     normaliseClan(clan);
@@ -1315,7 +1333,7 @@ async function handleCommand(interaction, commandName, user, guild) {
   // ── /clan-list ──────────────────────────────────────────────────────────────
   if (commandName === 'clan-list') {
     const names = Object.keys(gc).filter(k => !k.startsWith("__"));
-    if (names.length === 0) return safeReply(interaction, { content: '📋 No clans yet!', flags: 64 });
+    if (names.length === 0) return safeReply(interaction, { content: '📋 No clans yet!', ephemeral: true });
     const sorted = names.map(n => ({ n, c: gc[n] })).sort((a, b) => (b.c.xp || 0) - (a.c.xp || 0));
     return safeReply(interaction, {
       embeds: [new EmbedBuilder().setColor(0x5865F2).setTitle('⚔️ All Clans')
@@ -1330,7 +1348,7 @@ async function handleCommand(interaction, commandName, user, guild) {
   // ── /clan-xp ────────────────────────────────────────────────────────────────
   if (commandName === 'clan-xp') {
     const names = Object.keys(gc).filter(k => !k.startsWith("__"));
-    if (names.length === 0) return safeReply(interaction, { content: '📋 No clans yet!', flags: 64 });
+    if (names.length === 0) return safeReply(interaction, { content: '📋 No clans yet!', ephemeral: true });
     const sorted = names.map(n => ({ n, c: gc[n] })).sort((a, b) => (b.c.xp || 0) - (a.c.xp || 0));
     const medals = ['🥇','🥈','🥉'];
     return safeReply(interaction, {
@@ -1347,9 +1365,9 @@ async function handleCommand(interaction, commandName, user, guild) {
   if (commandName === 'clan-create') {
     const name        = interaction.options.getString('name').trim();
     const description = interaction.options.getString('description') || 'No description set.';
-    if (getUserClan(guild.id, user.id)) return safeReply(interaction, { content: '❌ You are already in a clan.', flags: 64 });
-    if (gc[name]) return safeReply(interaction, { content: `❌ A clan named **${name}** already exists.`, flags: 64 });
-    if (name.length > 30) return safeReply(interaction, { content: '❌ Clan name must be 30 characters or fewer.', flags: 64 });
+    if (getUserClan(guild.id, user.id)) return safeReply(interaction, { content: '❌ You are already in a clan.', ephemeral: true });
+    if (gc[name]) return safeReply(interaction, { content: `❌ A clan named **${name}** already exists.`, ephemeral: true });
+    if (name.length > 30) return safeReply(interaction, { content: '❌ Clan name must be 30 characters or fewer.', ephemeral: true });
 
     await safeDefer(interaction);
 
@@ -1363,7 +1381,7 @@ async function handleCommand(interaction, commandName, user, guild) {
     } catch (e) {
       if (leaderRole)  await leaderRole.delete().catch(() => {});
       if (officerRole) await officerRole.delete().catch(() => {});
-      return safeReply(interaction, { content: '❌ Failed to create clan roles. Check bot permissions and role position.', flags: 64 });
+      return safeReply(interaction, { content: '❌ Failed to create clan roles. Check bot permissions and role position.', ephemeral: true });
     }
 
     // Give leader the Leader role
@@ -1394,15 +1412,15 @@ async function handleCommand(interaction, commandName, user, guild) {
   // ── /clan-rename ────────────────────────────────────────────────────────────
   if (commandName === 'clan-rename') {
     const result = getUserClan(guild.id, user.id);
-    if (!result) return safeReply(interaction, { content: '❌ You are not in a clan.', flags: 64 });
-    if (result.clan.leader !== user.id) return safeReply(interaction, { content: '❌ Only the Leader can rename the clan.', flags: 64 });
+    if (!result) return safeReply(interaction, { content: '❌ You are not in a clan.', ephemeral: true });
+    if (result.clan.leader !== user.id) return safeReply(interaction, { content: '❌ Only the Leader can rename the clan.', ephemeral: true });
 
     const newName  = interaction.options.getString('name').trim();
     const newEmoji = interaction.options.getString('emoji')?.trim() || result.clan.emoji || '⚔️';
     const oldName  = result.name;
 
-    if (newName.length > 30) return safeReply(interaction, { content: '❌ Clan name must be 30 characters or fewer.', flags: 64 });
-    if (newName !== oldName && gc[newName]) return safeReply(interaction, { content: `❌ A clan named **${newName}** already exists.`, flags: 64 });
+    if (newName.length > 30) return safeReply(interaction, { content: '❌ Clan name must be 30 characters or fewer.', ephemeral: true });
+    if (newName !== oldName && gc[newName]) return safeReply(interaction, { content: `❌ A clan named **${newName}** already exists.`, ephemeral: true });
 
     await safeDefer(interaction);
 
@@ -1457,15 +1475,15 @@ async function handleCommand(interaction, commandName, user, guild) {
   // ── /clan-disband ───────────────────────────────────────────────────────────
   if (commandName === 'clan-disband') {
     const result = getUserClan(guild.id, user.id);
-    if (!result) return safeReply(interaction, { content: '❌ You are not in a clan.', flags: 64 });
-    if (result.clan.leader !== user.id) return safeReply(interaction, { content: '❌ Only the Leader can disband the clan.', flags: 64 });
+    if (!result) return safeReply(interaction, { content: '❌ You are not in a clan.', ephemeral: true });
+    if (result.clan.leader !== user.id) return safeReply(interaction, { content: '❌ Only the Leader can disband the clan.', ephemeral: true });
 
     const yes = new ButtonBuilder().setCustomId('disband_yes').setLabel('Yes, disband').setStyle(ButtonStyle.Danger);
     const no  = new ButtonBuilder().setCustomId('disband_no').setLabel('Cancel').setStyle(ButtonStyle.Secondary);
     await safeReply(interaction, {
       content: `⚠️ Are you sure you want to disband **${result.name}**? This permanently deletes all roles and the channel.`,
       components: [new ActionRowBuilder().addComponents(yes, no)],
-      flags: 64,
+      ephemeral: true,
     });
 
     const col = interaction.channel.createMessageComponentCollector({
@@ -1495,8 +1513,8 @@ async function handleCommand(interaction, commandName, user, guild) {
   // ── /clan-ranks ─────────────────────────────────────────────────────────────
   if (commandName === 'clan-ranks') {
     const result = getUserClan(guild.id, user.id);
-    if (!result) return safeReply(interaction, { content: '❌ You are not in a clan.', flags: 64 });
-    if (result.clan.leader !== user.id) return safeReply(interaction, { content: '❌ Only the Leader can rename ranks.', flags: 64 });
+    if (!result) return safeReply(interaction, { content: '❌ You are not in a clan.', ephemeral: true });
+    if (result.clan.leader !== user.id) return safeReply(interaction, { content: '❌ Only the Leader can rename ranks.', ephemeral: true });
 
     const m = interaction.options.getString('member').trim().slice(0, 30);
     const o = interaction.options.getString('officer').trim().slice(0, 30);
@@ -1531,9 +1549,9 @@ async function handleCommand(interaction, commandName, user, guild) {
   if (commandName === 'clan-motto') {
     const motto  = interaction.options.getString('motto').trim();
     const result = getUserClan(guild.id, user.id);
-    if (!result) return safeReply(interaction, { content: '❌ You are not in a clan.', flags: 64 });
-    if (getUserRank(result.clan, user.id) === 'Member') return safeReply(interaction, { content: '❌ Only Leaders and Officers can set the motto.', flags: 64 });
-    if (motto.length > 100) return safeReply(interaction, { content: '❌ Motto must be 100 characters or fewer.', flags: 64 });
+    if (!result) return safeReply(interaction, { content: '❌ You are not in a clan.', ephemeral: true });
+    if (getUserRank(result.clan, user.id) === 'Member') return safeReply(interaction, { content: '❌ Only Leaders and Officers can set the motto.', ephemeral: true });
+    if (motto.length > 100) return safeReply(interaction, { content: '❌ Motto must be 100 characters or fewer.', ephemeral: true });
     result.clan.motto = motto; saveData();
     return safeReply(interaction, { embeds: [new EmbedBuilder().setColor(0x5865F2).setTitle('📜 Motto Updated').setDescription(`**${result.name}**'s motto:\n*"${motto}"*`)] });
   }
@@ -1542,9 +1560,9 @@ async function handleCommand(interaction, commandName, user, guild) {
   if (commandName === 'clan-description') {
     const description = interaction.options.getString('description').trim();
     const result      = getUserClan(guild.id, user.id);
-    if (!result) return safeReply(interaction, { content: '❌ You are not in a clan.', flags: 64 });
-    if (getUserRank(result.clan, user.id) === 'Member') return safeReply(interaction, { content: '❌ Only Leaders and Officers can update the description.', flags: 64 });
-    if (description.length > 200) return safeReply(interaction, { content: '❌ Description must be 200 characters or fewer.', flags: 64 });
+    if (!result) return safeReply(interaction, { content: '❌ You are not in a clan.', ephemeral: true });
+    if (getUserRank(result.clan, user.id) === 'Member') return safeReply(interaction, { content: '❌ Only Leaders and Officers can update the description.', ephemeral: true });
+    if (description.length > 200) return safeReply(interaction, { content: '❌ Description must be 200 characters or fewer.', ephemeral: true });
     result.clan.description = description; saveData();
     return safeReply(interaction, { embeds: [new EmbedBuilder().setColor(0x5865F2).setTitle('📝 Description Updated').setDescription(`**${result.name}**'s description has been updated.`)] });
   }
@@ -1553,13 +1571,13 @@ async function handleCommand(interaction, commandName, user, guild) {
   if (commandName === 'clan-invite') {
     const target = interaction.options.getUser('user');
     const result = getUserClan(guild.id, user.id);
-    if (!result) return safeReply(interaction, { content: '❌ You are not in a clan.', flags: 64 });
-    if (getUserRank(result.clan, user.id) === 'Member') return safeReply(interaction, { content: '❌ Only Leaders and Officers can invite members.', flags: 64 });
-    if (target.bot) return safeReply(interaction, { content: '❌ You cannot invite bots.', flags: 64 });
-    if (target.id === user.id) return safeReply(interaction, { content: '❌ You cannot invite yourself.', flags: 64 });
-    if (getUserClan(guild.id, target.id)) return safeReply(interaction, { content: `❌ **${target.username}** is already in a clan.`, flags: 64 });
+    if (!result) return safeReply(interaction, { content: '❌ You are not in a clan.', ephemeral: true });
+    if (getUserRank(result.clan, user.id) === 'Member') return safeReply(interaction, { content: '❌ Only Leaders and Officers can invite members.', ephemeral: true });
+    if (target.bot) return safeReply(interaction, { content: '❌ You cannot invite bots.', ephemeral: true });
+    if (target.id === user.id) return safeReply(interaction, { content: '❌ You cannot invite yourself.', ephemeral: true });
+    if (getUserClan(guild.id, target.id)) return safeReply(interaction, { content: `❌ **${target.username}** is already in a clan.`, ephemeral: true });
     const key = `${guild.id}_${target.id}`;
-    if (pendingInvites[key]) return safeReply(interaction, { content: `❌ **${target.username}** already has a pending invite.`, flags: 64 });
+    if (pendingInvites[key]) return safeReply(interaction, { content: `❌ **${target.username}** already has a pending invite.`, ephemeral: true });
     pendingInvites[key] = { clanName: result.name, guildId: guild.id, inviterId: user.id, expiresAt: Date.now() + 5 * 60_000 };
     setTimeout(() => { if (pendingInvites[key]?.clanName === result.name) delete pendingInvites[key]; }, 5 * 60_000);
     return safeReply(interaction, {
@@ -1571,11 +1589,11 @@ async function handleCommand(interaction, commandName, user, guild) {
   // ── /clan-invite-accept ─────────────────────────────────────────────────────
   if (commandName === 'clan-invite-accept') {
     const key = `${guild.id}_${user.id}`; const invite = pendingInvites[key];
-    if (!invite) return safeReply(interaction, { content: '❌ You have no pending clan invite.', flags: 64 });
-    if (Date.now() > invite.expiresAt) { delete pendingInvites[key]; return safeReply(interaction, { content: '❌ Your invite has expired.', flags: 64 }); }
-    if (getUserClan(guild.id, user.id)) { delete pendingInvites[key]; return safeReply(interaction, { content: '❌ You are already in a clan.', flags: 64 }); }
+    if (!invite) return safeReply(interaction, { content: '❌ You have no pending clan invite.', ephemeral: true });
+    if (Date.now() > invite.expiresAt) { delete pendingInvites[key]; return safeReply(interaction, { content: '❌ Your invite has expired.', ephemeral: true }); }
+    if (getUserClan(guild.id, user.id)) { delete pendingInvites[key]; return safeReply(interaction, { content: '❌ You are already in a clan.', ephemeral: true }); }
     const clan = gc[invite.clanName];
-    if (!clan) { delete pendingInvites[key]; return safeReply(interaction, { content: '❌ That clan no longer exists.', flags: 64 }); }
+    if (!clan) { delete pendingInvites[key]; return safeReply(interaction, { content: '❌ That clan no longer exists.', ephemeral: true }); }
     await safeDefer(interaction);
     normaliseClan(clan);
     await assignRankRole(guild, clan, user.id, 'Member');
@@ -1586,7 +1604,7 @@ async function handleCommand(interaction, commandName, user, guild) {
   // ── /clan-invite-decline ────────────────────────────────────────────────────
   if (commandName === 'clan-invite-decline') {
     const key = `${guild.id}_${user.id}`; const invite = pendingInvites[key];
-    if (!invite) return safeReply(interaction, { content: '❌ You have no pending clan invite.', flags: 64 });
+    if (!invite) return safeReply(interaction, { content: '❌ You have no pending clan invite.', ephemeral: true });
     const clanName = invite.clanName; delete pendingInvites[key];
     return safeReply(interaction, { embeds: [new EmbedBuilder().setColor(0xED4245).setTitle('❌ Invite Declined').setDescription(`<@${user.id}> declined the invite to **${clanName}**.`)] });
   }
@@ -1595,14 +1613,14 @@ async function handleCommand(interaction, commandName, user, guild) {
   if (commandName === 'clan-kick') {
     const target = interaction.options.getUser('user');
     const result = getUserClan(guild.id, user.id);
-    if (!result) return safeReply(interaction, { content: '❌ You are not in a clan.', flags: 64 });
+    if (!result) return safeReply(interaction, { content: '❌ You are not in a clan.', ephemeral: true });
     const rank = getUserRank(result.clan, user.id);
-    if (rank === 'Member') return safeReply(interaction, { content: '❌ Only Leaders and Officers can kick members.', flags: 64 });
-    if (target.id === user.id) return safeReply(interaction, { content: '❌ You cannot kick yourself.', flags: 64 });
-    if (result.clan.leader === target.id) return safeReply(interaction, { content: '❌ You cannot kick the Leader.', flags: 64 });
+    if (rank === 'Member') return safeReply(interaction, { content: '❌ Only Leaders and Officers can kick members.', ephemeral: true });
+    if (target.id === user.id) return safeReply(interaction, { content: '❌ You cannot kick yourself.', ephemeral: true });
+    if (result.clan.leader === target.id) return safeReply(interaction, { content: '❌ You cannot kick the Leader.', ephemeral: true });
     const targetRank = getUserRank(result.clan, target.id);
-    if (!targetRank) return safeReply(interaction, { content: `❌ **${target.username}** is not in your clan.`, flags: 64 });
-    if (rank === 'Officer' && targetRank === 'Officer') return safeReply(interaction, { content: '❌ Officers cannot kick other Officers.', flags: 64 });
+    if (!targetRank) return safeReply(interaction, { content: `❌ **${target.username}** is not in your clan.`, ephemeral: true });
+    if (rank === 'Officer' && targetRank === 'Officer') return safeReply(interaction, { content: '❌ Officers cannot kick other Officers.', ephemeral: true });
     await safeDefer(interaction);
     try {
       const m  = await guild.members.fetch(target.id);
@@ -1622,9 +1640,9 @@ async function handleCommand(interaction, commandName, user, guild) {
   // ── /clan-leave ─────────────────────────────────────────────────────────────
   if (commandName === 'clan-leave') {
     const result = getUserClan(guild.id, user.id);
-    if (!result) return safeReply(interaction, { content: '❌ You are not in a clan.', flags: 64 });
-    if (result.clan.leader === user.id) return safeReply(interaction, { content: '❌ Leaders cannot leave. Use `/clan-transfer` or `/clan-disband`.', flags: 64 });
-    await safeDefer(interaction, { flags: 64 });
+    if (!result) return safeReply(interaction, { content: '❌ You are not in a clan.', ephemeral: true });
+    if (result.clan.leader === user.id) return safeReply(interaction, { content: '❌ Leaders cannot leave. Use `/clan-transfer` or `/clan-disband`.', ephemeral: true });
+    await safeDefer(interaction, { ephemeral: true });
     try {
       const m  = await guild.members.fetch(user.id);
       const lr = guild.roles.cache.get(result.clan.leaderRoleId);
@@ -1644,9 +1662,9 @@ async function handleCommand(interaction, commandName, user, guild) {
   if (commandName === 'clan-promote') {
     const target = interaction.options.getUser('user');
     const result = getUserClan(guild.id, user.id);
-    if (!result) return safeReply(interaction, { content: '❌ You are not in a clan.', flags: 64 });
-    if (result.clan.leader !== user.id) return safeReply(interaction, { content: '❌ Only the Leader can promote members.', flags: 64 });
-    if (!result.clan.members.includes(target.id)) return safeReply(interaction, { content: `❌ **${target.username}** is not a Member in your clan.`, flags: 64 });
+    if (!result) return safeReply(interaction, { content: '❌ You are not in a clan.', ephemeral: true });
+    if (result.clan.leader !== user.id) return safeReply(interaction, { content: '❌ Only the Leader can promote members.', ephemeral: true });
+    if (!result.clan.members.includes(target.id)) return safeReply(interaction, { content: `❌ **${target.username}** is not a Member in your clan.`, ephemeral: true });
     await safeDefer(interaction);
     await assignRankRole(guild, result.clan, target.id, 'Officer');
     result.clan.members  = result.clan.members.filter(id => id !== target.id);
@@ -1658,9 +1676,9 @@ async function handleCommand(interaction, commandName, user, guild) {
   if (commandName === 'clan-demote') {
     const target = interaction.options.getUser('user');
     const result = getUserClan(guild.id, user.id);
-    if (!result) return safeReply(interaction, { content: '❌ You are not in a clan.', flags: 64 });
-    if (result.clan.leader !== user.id) return safeReply(interaction, { content: '❌ Only the Leader can demote officers.', flags: 64 });
-    if (!result.clan.officers.includes(target.id)) return safeReply(interaction, { content: `❌ **${target.username}** is not an Officer.`, flags: 64 });
+    if (!result) return safeReply(interaction, { content: '❌ You are not in a clan.', ephemeral: true });
+    if (result.clan.leader !== user.id) return safeReply(interaction, { content: '❌ Only the Leader can demote officers.', ephemeral: true });
+    if (!result.clan.officers.includes(target.id)) return safeReply(interaction, { content: `❌ **${target.username}** is not an Officer.`, ephemeral: true });
     await safeDefer(interaction);
     await assignRankRole(guild, result.clan, target.id, 'Member');
     result.clan.officers = result.clan.officers.filter(id => id !== target.id);
@@ -1672,10 +1690,10 @@ async function handleCommand(interaction, commandName, user, guild) {
   if (commandName === 'clan-transfer') {
     const target = interaction.options.getUser('user');
     const result = getUserClan(guild.id, user.id);
-    if (!result) return safeReply(interaction, { content: '❌ You are not in a clan.', flags: 64 });
-    if (result.clan.leader !== user.id) return safeReply(interaction, { content: '❌ Only the Leader can transfer leadership.', flags: 64 });
-    if (target.id === user.id) return safeReply(interaction, { content: '❌ You are already the Leader.', flags: 64 });
-    if (!getUserRank(result.clan, target.id)) return safeReply(interaction, { content: `❌ **${target.username}** is not in your clan.`, flags: 64 });
+    if (!result) return safeReply(interaction, { content: '❌ You are not in a clan.', ephemeral: true });
+    if (result.clan.leader !== user.id) return safeReply(interaction, { content: '❌ Only the Leader can transfer leadership.', ephemeral: true });
+    if (target.id === user.id) return safeReply(interaction, { content: '❌ You are already the Leader.', ephemeral: true });
+    if (!getUserRank(result.clan, target.id)) return safeReply(interaction, { content: `❌ **${target.username}** is not in your clan.`, ephemeral: true });
     await safeDefer(interaction);
     result.clan.officers = result.clan.officers.filter(id => id !== target.id);
     result.clan.members  = result.clan.members.filter(id => id !== target.id);
@@ -1690,18 +1708,18 @@ async function handleCommand(interaction, commandName, user, guild) {
   // ── /clan-channel-create ────────────────────────────────────────────────────
   if (commandName === 'clan-channel-create') {
     const result = getUserClan(guild.id, user.id);
-    if (!result) return safeReply(interaction, { content: '❌ You are not in a clan.', flags: 64 });
-    if (result.clan.leader !== user.id) return safeReply(interaction, { content: '❌ Only the Leader can create the clan channel.', flags: 64 });
+    if (!result) return safeReply(interaction, { content: '❌ You are not in a clan.', ephemeral: true });
+    if (result.clan.leader !== user.id) return safeReply(interaction, { content: '❌ Only the Leader can create the clan channel.', ephemeral: true });
     if (result.clan.channelId) {
       const existing = guild.channels.cache.get(result.clan.channelId);
-      if (existing) return safeReply(interaction, { content: `❌ Your clan already has a channel: ${existing}`, flags: 64 });
+      if (existing) return safeReply(interaction, { content: `❌ Your clan already has a channel: ${existing}`, ephemeral: true });
       result.clan.channelId = null; saveData();
     }
     await safeDefer(interaction);
     const memberRole = guild.roles.cache.get(result.clan.memberRoleId || result.clan.roleId);
     const leaderRole = guild.roles.cache.get(result.clan.leaderRoleId);
     const offRole    = guild.roles.cache.get(result.clan.officerRoleId);
-    if (!memberRole) return safeReply(interaction, { content: '❌ Clan roles not found.', flags: 64 });
+    if (!memberRole) return safeReply(interaction, { content: '❌ Clan roles not found.', ephemeral: true });
     let channel;
     try {
       channel = await guild.channels.create({
@@ -1715,7 +1733,7 @@ async function handleCommand(interaction, commandName, user, guild) {
           { id: client.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages] },
         ],
       });
-    } catch { return safeReply(interaction, { content: '❌ Failed to create channel. Check Manage Channels permission.', flags: 64 }); }
+    } catch { return safeReply(interaction, { content: '❌ Failed to create channel. Check Manage Channels permission.', ephemeral: true }); }
     result.clan.channelId = channel.id; saveData();
     await channel.send({ embeds: [new EmbedBuilder().setColor(0x5865F2).setTitle(`${result.clan.emoji || '⚔️'} Welcome to ${result.name}'s channel!`).setDescription('Only clan members can see this!')] }).catch(() => {});
     return safeReply(interaction, { embeds: [new EmbedBuilder().setColor(0x57F287).setTitle('✅ Clan Channel Created').setDescription(`Your private channel ${channel} is ready!`)] });
@@ -1724,10 +1742,10 @@ async function handleCommand(interaction, commandName, user, guild) {
   // ── /clan-channel-delete ────────────────────────────────────────────────────
   if (commandName === 'clan-channel-delete') {
     const result = getUserClan(guild.id, user.id);
-    if (!result) return safeReply(interaction, { content: '❌ You are not in a clan.', flags: 64 });
-    if (result.clan.leader !== user.id) return safeReply(interaction, { content: '❌ Only the Leader can delete the clan channel.', flags: 64 });
-    if (!result.clan.channelId) return safeReply(interaction, { content: '❌ Your clan does not have a private channel.', flags: 64 });
-    await safeDefer(interaction, { flags: 64 });
+    if (!result) return safeReply(interaction, { content: '❌ You are not in a clan.', ephemeral: true });
+    if (result.clan.leader !== user.id) return safeReply(interaction, { content: '❌ Only the Leader can delete the clan channel.', ephemeral: true });
+    if (!result.clan.channelId) return safeReply(interaction, { content: '❌ Your clan does not have a private channel.', ephemeral: true });
+    await safeDefer(interaction, { ephemeral: true });
     const ch = guild.channels.cache.get(result.clan.channelId);
     if (ch) await ch.delete().catch(() => {});
     result.clan.channelId = null; saveData();
@@ -1738,15 +1756,15 @@ async function handleCommand(interaction, commandName, user, guild) {
   if (commandName === 'clan-war') {
     const defenderName = interaction.options.getString('clan').trim();
     const result       = getUserClan(guild.id, user.id);
-    if (!result) return safeReply(interaction, { content: '❌ You are not in a clan.', flags: 64 });
+    if (!result) return safeReply(interaction, { content: '❌ You are not in a clan.', ephemeral: true });
     const warRank = getUserRank(result.clan, user.id);
-    if (warRank === 'Member') return safeReply(interaction, { content: '❌ Only the Leader or Officers can declare war.', flags: 64 });
-    if (defenderName === result.name) return safeReply(interaction, { content: '❌ You cannot war your own clan.', flags: 64 });
-    if (activeWars[guild.id]) return safeReply(interaction, { content: '❌ A war is already in progress on this server.', flags: 64 });
+    if (warRank === 'Member') return safeReply(interaction, { content: '❌ Only the Leader or Officers can declare war.', ephemeral: true });
+    if (defenderName === result.name) return safeReply(interaction, { content: '❌ You cannot war your own clan.', ephemeral: true });
+    if (activeWars[guild.id]) return safeReply(interaction, { content: '❌ A war is already in progress on this server.', ephemeral: true });
     if (!gc[defenderName]) {
       const available = Object.keys(gc).filter(n => n !== result.name && !n.startsWith('__'));
       const list = available.length ? available.map(n => `• **${n}**`).join('\n') : 'No other clans exist yet.';
-      return safeReply(interaction, { content: `❌ No clan named **${defenderName}** found. Names are case-sensitive!\n\n**Clans you can challenge:**\n${list}`, flags: 64 });
+      return safeReply(interaction, { content: `❌ No clan named **${defenderName}** found. Names are case-sensitive!\n\n**Clans you can challenge:**\n${list}`, ephemeral: true });
     }
     const defender = gc[defenderName];
     activeWars[guild.id] = { challengerClan: result.name, defenderClan: defenderName, channelId: interaction.channelId, pending: true };
@@ -1785,11 +1803,11 @@ async function handleCommand(interaction, commandName, user, guild) {
   // ── /clan-war-accept ────────────────────────────────────────────────────────
   if (commandName === 'clan-war-accept') {
     const result = getUserClan(guild.id, user.id);
-    if (!result) return safeReply(interaction, { content: '❌ You are not in a clan.', flags: 64 });
-    if (result.clan.leader !== user.id) return safeReply(interaction, { content: '❌ Only the Leader can accept a war.', flags: 64 });
+    if (!result) return safeReply(interaction, { content: '❌ You are not in a clan.', ephemeral: true });
+    if (result.clan.leader !== user.id) return safeReply(interaction, { content: '❌ Only the Leader can accept a war.', ephemeral: true });
     const war = activeWars[guild.id];
-    if (!war || !war.pending) return safeReply(interaction, { content: '❌ No pending war challenge found.', flags: 64 });
-    if (war.defenderClan !== result.name) return safeReply(interaction, { content: `❌ This challenge is for **${war.defenderClan}**, not your clan.`, flags: 64 });
+    if (!war || !war.pending) return safeReply(interaction, { content: '❌ No pending war challenge found.', ephemeral: true });
+    if (war.defenderClan !== result.name) return safeReply(interaction, { content: `❌ This challenge is for **${war.defenderClan}**, not your clan.`, ephemeral: true });
     war.pending = false;
     const warChannel = guild.channels.cache.get(war.channelId) || interaction.channel;
     await safeReply(interaction, { embeds: [new EmbedBuilder().setColor(0xFF0000).setTitle('⚔️ War Accepted!').setDescription(`**${result.name}** accepted! The challenger now picks the game...`)] });
@@ -1803,11 +1821,11 @@ async function handleCommand(interaction, commandName, user, guild) {
   // ── /clan-war-decline ───────────────────────────────────────────────────────
   if (commandName === 'clan-war-decline') {
     const result = getUserClan(guild.id, user.id);
-    if (!result) return safeReply(interaction, { content: '❌ You are not in a clan.', flags: 64 });
-    if (result.clan.leader !== user.id) return safeReply(interaction, { content: '❌ Only the Leader can decline a war.', flags: 64 });
+    if (!result) return safeReply(interaction, { content: '❌ You are not in a clan.', ephemeral: true });
+    if (result.clan.leader !== user.id) return safeReply(interaction, { content: '❌ Only the Leader can decline a war.', ephemeral: true });
     const war = activeWars[guild.id];
-    if (!war || !war.pending) return safeReply(interaction, { content: '❌ No pending war challenge found.', flags: 64 });
-    if (war.defenderClan !== result.name) return safeReply(interaction, { content: `❌ This challenge is for **${war.defenderClan}**, not your clan.`, flags: 64 });
+    if (!war || !war.pending) return safeReply(interaction, { content: '❌ No pending war challenge found.', ephemeral: true });
+    if (war.defenderClan !== result.name) return safeReply(interaction, { content: `❌ This challenge is for **${war.defenderClan}**, not your clan.`, ephemeral: true });
     if (war.eventId) guild.scheduledEvents.delete(war.eventId).catch(() => {});
     const challengerName = war.challengerClan;
     delete activeWars[guild.id];
