@@ -450,6 +450,16 @@ function getAllCommands() {
   return _allCommands;
 }
 
+async function clearGuildCommands(guildId) {
+  const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
+  try {
+    await rest.put(Routes.applicationGuildCommands(process.env.CLIENT_ID, guildId), { body: [] });
+    console.log(`🧹 Cleared old guild commands for ${guildId}`);
+  } catch (e) {
+    // Guild may not have any — that's fine
+  }
+}
+
 async function registerCommands(attempt = 1) {
   if (!process.env.CLIENT_ID) {
     console.error('❌ CLIENT_ID environment variable is not set!');
@@ -459,6 +469,11 @@ async function registerCommands(attempt = 1) {
   try {
     const body = getAllCommands();
     console.log(`📋 Registering ${body.length} global commands (attempt ${attempt})...`);
+
+    // First wipe any old guild-specific commands that might be overriding global ones
+    for (const guild of client.guilds.cache.values()) {
+      await clearGuildCommands(guild.id);
+    }
 
     await Promise.race([
       rest.put(Routes.applicationCommands(process.env.CLIENT_ID), { body }),
@@ -1342,9 +1357,9 @@ async function handleCommand(interaction, commandName, user, guild) {
 
     let leaderRole, officerRole, memberRole;
     try {
-      leaderRole  = await guild.roles.create({ name: buildRoleName(name, rn.leader),  color: 0xFFD700, reason: `Clan created by ${user.tag}` });
-      officerRole = await guild.roles.create({ name: buildRoleName(name, rn.officer), color: 0x5865F2, reason: `Officer role for ${name}` });
-      memberRole  = await guild.roles.create({ name: buildRoleName(name, rn.member),  color: 0x99AAB5, reason: `Member role for ${name}` });
+      leaderRole  = await guild.roles.create({ name: buildRoleName(name, rn.leader),  colors: 0xFFD700, reason: `Clan created by ${user.tag}` });
+      officerRole = await guild.roles.create({ name: buildRoleName(name, rn.officer), colors: 0x5865F2, reason: `Officer role for ${name}` });
+      memberRole  = await guild.roles.create({ name: buildRoleName(name, rn.member),  colors: 0x99AAB5, reason: `Member role for ${name}` });
     } catch (e) {
       if (leaderRole)  await leaderRole.delete().catch(() => {});
       if (officerRole) await officerRole.delete().catch(() => {});
