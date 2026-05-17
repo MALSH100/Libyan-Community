@@ -1148,9 +1148,12 @@ module.exports = function initPokemon({ client, db, saveData, getGuildClans, get
   client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
     if (!interaction.commandName.startsWith('pokemon') && interaction.commandName !== 'pokedex') return;
-
+    if (!interaction.guild) {
+      await interaction.reply({ content: '❌ These commands only work inside a Discord server.', flags: 64 }).catch(() => {});
+      return;
+    }
     const { commandName, user, guild } = interaction;
-    console.log(`📩 Pokemon command: /${commandName} from ${user.tag}`);
+    console.log(`📩 Pokemon command: /${commandName} from ${user.tag} in ${guild.name}`);
 
     try {
       await handlePokemonCommand(interaction, commandName, user, guild);

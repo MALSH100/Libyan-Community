@@ -384,7 +384,7 @@ const client = new Client({
 // ─── Command Definitions ──────────────────────────────────────────────────────
 
 const commands = [
-  new SlashCommandBuilder().setName('clan-commands').setDescription('View all clan bot commands'),
+  new SlashCommandBuilder().setName('clan-commands').setDescription('View all clan bot commands').setDMPermission(false),
   new SlashCommandBuilder().setName('clan-info').setDescription('View details about a clan')
     .addStringOption(o => o.setName('name').setDescription('Clan name — leave blank for your own').setRequired(false)),
   new SlashCommandBuilder().setName('clan-list').setDescription('List all clans on this server'),
@@ -429,7 +429,7 @@ const commands = [
     .addStringOption(o => o.setName('clan').setDescription('Name of the clan to challenge').setRequired(true)),
   new SlashCommandBuilder().setName('clan-war-accept').setDescription('Accept a pending clan war challenge (Leader only)'),
   new SlashCommandBuilder().setName('clan-war-decline').setDescription('Decline a pending clan war challenge (Leader only)'),
-].map(c => c.toJSON());
+].map(c => c.setDMPermission(false).toJSON());
 
 // ─── Register Commands ────────────────────────────────────────────────────────
 // Registers ALL commands (clan + pokemon) in one single PUT call.
@@ -1158,8 +1158,13 @@ async function promptGameSelection(guild, channel, challengerClanName) {
 
 client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
+  // Global commands can fire in DMs where guild is null — block those
+  if (!interaction.guild) {
+    await interaction.reply({ content: '❌ These commands only work inside a Discord server, not in DMs.', flags: 64 }).catch(() => {});
+    return;
+  }
   const { commandName, user, guild } = interaction;
-  console.log(`📩 Command received: /${commandName} from ${user.tag}`);
+  console.log(`📩 Command received: /${commandName} from ${user.tag} in ${guild.name}`);
   try {
     await handleCommand(interaction, commandName, user, guild);
   } catch (err) {
@@ -1169,6 +1174,10 @@ client.on('interactionCreate', async interaction => {
 });
 
 async function handleCommand(interaction, commandName, user, guild) {
+  // Safety check — should never be null here but guard anyway
+  if (!guild || !guild.id) {
+    return safeReply(interaction, { content: '❌ This command must be used inside a server.', flags: 64 });
+  }
   const gc = getGuildClans(guild.id);
 
   // ── /clan-commands ──────────────────────────────────────────────────────────
