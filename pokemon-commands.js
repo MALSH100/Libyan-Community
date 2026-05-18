@@ -75,5 +75,5 @@ module.exports = function getPokemonCommands() {
       .setDescription('Force a Pokémon to spawn in a clan channel — Admin only')
       .addChannelOption(o => o.setName('channel').setDescription('The clan channel to spawn in').setRequired(false)),
 
-  ].map(c => c.setDMPermission(false).toJSON());
+  ].map(c => c.toJSON());
 };

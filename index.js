@@ -429,7 +429,7 @@ const commands = [
     .addStringOption(o => o.setName('clan').setDescription('Name of the clan to challenge').setRequired(true)),
   new SlashCommandBuilder().setName('clan-war-accept').setDescription('Accept a pending clan war challenge (Leader only)'),
   new SlashCommandBuilder().setName('clan-war-decline').setDescription('Decline a pending clan war challenge (Leader only)'),
-].map(c => c.setDMPermission(false).toJSON());
+].map(c => c.toJSON());
 
 // ─── Register Commands ────────────────────────────────────────────────────────
 // Registers ALL commands (clan + pokemon) in one single PUT call.
@@ -451,13 +451,7 @@ function getAllCommands() {
 }
 
 async function clearGuildCommands(guildId) {
-  const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
-  try {
-    await rest.put(Routes.applicationGuildCommands(process.env.CLIENT_ID, guildId), { body: [] });
-    console.log(`🧹 Cleared old guild commands for ${guildId}`);
-  } catch (e) {
-    // Guild may not have any — that's fine
-  }
+  // No longer needed — keeping for safety but not called
 }
 
 async function registerCommands(attempt = 1) {
@@ -468,19 +462,17 @@ async function registerCommands(attempt = 1) {
   const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
   try {
     const body = getAllCommands();
-    console.log(`📋 Registering ${body.length} global commands (attempt ${attempt})...`);
 
-    // First wipe any old guild-specific commands that might be overriding global ones
+    // Register as GUILD commands — instant for all members, no permission issues
     for (const guild of client.guilds.cache.values()) {
-      await clearGuildCommands(guild.id);
+      console.log(`📋 Registering ${body.length} commands for guild: ${guild.name} (attempt ${attempt})...`);
+      await Promise.race([
+        rest.put(Routes.applicationGuildCommands(process.env.CLIENT_ID, guild.id), { body }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Timed out after 20s')), 20000)),
+      ]);
+      console.log(`✅ Commands registered for ${guild.name}`);
     }
 
-    await Promise.race([
-      rest.put(Routes.applicationCommands(process.env.CLIENT_ID), { body }),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('Timed out after 20s')), 20000)),
-    ]);
-
-    console.log(`✅ ${body.length} global commands registered!`);
     console.log(`   Commands: ${body.map(c => c.name).join(', ')}`);
   } catch (err) {
     console.error(`❌ Command registration failed (attempt ${attempt}): ${err.message}`);
@@ -490,7 +482,7 @@ async function registerCommands(attempt = 1) {
       console.log(`⏳ Retrying in ${delay / 1000}s...`);
       setTimeout(() => registerCommands(attempt + 1), delay);
     } else {
-      console.error('❌ Giving up after 3 attempts. Commands may not be available.');
+      console.error('❌ Giving up after 3 attempts.');
     }
   }
 }
@@ -1357,9 +1349,9 @@ async function handleCommand(interaction, commandName, user, guild) {
 
     let leaderRole, officerRole, memberRole;
     try {
-      leaderRole  = await guild.roles.create({ name: buildRoleName(name, rn.leader),  colors: 0xFFD700, reason: `Clan created by ${user.tag}` });
-      officerRole = await guild.roles.create({ name: buildRoleName(name, rn.officer), colors: 0x5865F2, reason: `Officer role for ${name}` });
-      memberRole  = await guild.roles.create({ name: buildRoleName(name, rn.member),  colors: 0x99AAB5, reason: `Member role for ${name}` });
+      leaderRole  = await guild.roles.create({ name: buildRoleName(name, rn.leader),  color: 0xFFD700, reason: `Clan created by ${user.tag}` });
+      officerRole = await guild.roles.create({ name: buildRoleName(name, rn.officer), color: 0x5865F2, reason: `Officer role for ${name}` });
+      memberRole  = await guild.roles.create({ name: buildRoleName(name, rn.member),  color: 0x99AAB5, reason: `Member role for ${name}` });
     } catch (e) {
       if (leaderRole)  await leaderRole.delete().catch(() => {});
       if (officerRole) await officerRole.delete().catch(() => {});
