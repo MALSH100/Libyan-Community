@@ -213,7 +213,33 @@ async function assignRankRole(guild, clan, userId, newRank) {
   }
 }
 
-// ─── State ────────────────────────────────────────────────────────────────────
+// ─── Libyan Points (LP) ───────────────────────────────────────────────────────
+// Universal personal points system across all game modes.
+
+function getLPData(guildId, userId) {
+  if (!db[guildId]) db[guildId] = {};
+  if (!db[guildId].__lp) db[guildId].__lp = {};
+  if (!db[guildId].__lp[userId]) {
+    db[guildId].__lp[userId] = {
+      total:       0,
+      warWins:     0,
+      warLosses:   0,
+      pokemonLP:   0,
+      yaraytLP:    0,
+    };
+  }
+  return db[guildId].__lp[userId];
+}
+
+function awardLP(guildId, userId, amount, source) {
+  const lp    = getLPData(guildId, userId);
+  lp.total   += amount;
+  if (source === 'war_win')    lp.warWins   += amount;
+  if (source === 'war_loss')   lp.warLosses += amount;
+  if (source === 'pokemon')    lp.pokemonLP += amount;
+  if (source === 'yarayt')     lp.yaraytLP  += amount;
+  saveData(guildId);
+}
 
 const activeWars     = {};
 const pendingInvites = {};
@@ -384,7 +410,11 @@ const client = new Client({
 // ─── Command Definitions ──────────────────────────────────────────────────────
 
 const commands = [
-  new SlashCommandBuilder().setName('clan-commands').setDescription('View all clan bot commands').setDMPermission(false),
+  new SlashCommandBuilder().setName('libyan-commands').setDescription('View all bot commands').setDMPermission(false),
+  new SlashCommandBuilder().setName('clan-commands').setDescription('View all bot commands (alias for /libyan-commands)').setDMPermission(false),
+  new SlashCommandBuilder().setName('libyan-stats').setDescription('View Libyan Points (LP) stats')
+    .addUserOption(o => o.setName('user').setDescription('View another player\'s stats (blank = your own)').setRequired(false))
+    .setDMPermission(false),
   new SlashCommandBuilder().setName('clan-info').setDescription('View details about a clan')
     .addStringOption(o => o.setName('name').setDescription('Clan name — leave blank for your own').setRequired(false)),
   new SlashCommandBuilder().setName('clan-list').setDescription('List all clans on this server'),
@@ -1104,6 +1134,16 @@ async function runWar(guild, channel, challengerName, defenderName, gameChoice) 
     const loserClan  = gc[loserId];
     if (winnerClan) { winnerClan.wins    = (winnerClan.wins    || 0) + 1; winnerClan.xp = (winnerClan.xp || 0) + 100; }
     if (loserClan)  { loserClan.losses   = (loserClan.losses   || 0) + 1; loserClan.xp  = (loserClan.xp  || 0) + 20; }
+
+    // Award Libyan Points to all members of both clans
+    if (winnerClan) {
+      const winMembers = [winnerClan.leader, ...(winnerClan.officers || []), ...(winnerClan.members || [])];
+      for (const uid of winMembers) awardLP(guild.id, uid, 50, 'war_win');
+    }
+    if (loserClan) {
+      const loseMembers = [loserClan.leader, ...(loserClan.officers || []), ...(loserClan.members || [])];
+      for (const uid of loseMembers) awardLP(guild.id, uid, 10, 'war_loss');
+    }
     delete activeWars[guild.id];
     saveData();
 
@@ -1187,49 +1227,54 @@ async function handleCommand(interaction, commandName, user, guild) {
   }
   const gc = getGuildClans(guild.id);
 
-  // ── /clan-commands ──────────────────────────────────────────────────────────
-  if (commandName === 'clan-commands') {
+  // ── /libyan-commands and /clan-commands (alias) ─────────────────────────────
+  if (commandName === 'clan-commands' || commandName === 'libyan-commands') {
     const pages = [
-      new EmbedBuilder().setColor(0x5865F2).setTitle('⚔️ Clan Commands — Page 1/3: Clan Management')
+      new EmbedBuilder().setColor(0x5865F2).setTitle('🏛️ Libyan Community Bot — Page 1/4: Clan Management')
         .addFields(
-          { name: '📋 Info', value: ['`/clan-commands` — This menu', '`/clan-info [name]` — View clan details', '`/clan-list` — All clans ranked by XP', '`/clan-xp` — XP leaderboard'].join('\n') },
-          { name: '🏰 Management', value: ['`/clan-create <name>` — Create a clan', '`/clan-disband` — Delete your clan *(Leader)*', '`/clan-rename <name> [emoji]` — Rename clan + roles + channel *(Leader)*', '`/clan-description <text>` — Update description *(Leader/Officer)*', '`/clan-motto <text>` — Set motto *(Leader/Officer)*', '`/clan-ranks <member> <officer> <leader>` — Rename rank titles *(Leader)*'].join('\n') },
-          { name: '👥 Membership', value: ['`/clan-invite @user` — Send join invite *(Leader/Officer)*', '`/clan-invite-accept` — Accept invite', '`/clan-invite-decline` — Decline invite', '`/clan-kick @user` — Remove a member *(Leader/Officer)*', '`/clan-leave` — Leave your clan'].join('\n') },
-          { name: '🛡️ Ranks', value: ['`/clan-promote @user` — Member → Officer *(Leader)*', '`/clan-demote @user` — Officer → Member *(Leader)*', '`/clan-transfer @user` — Hand over leadership *(Leader)*'].join('\n') },
-          { name: '📢 Channel', value: ['`/clan-channel-create` — Create private channel *(Leader)*', '`/clan-channel-delete` — Delete private channel *(Leader)*'].join('\n') },
-          { name: '⚔️ Wars', value: ['`/clan-war <clan>` — Challenge a clan *(Leader/Officer)*', '`/clan-war-accept` — Accept a challenge *(Leader)*', '`/clan-war-decline` — Decline a challenge *(Leader)*'].join('\n') },
-        ).setFooter({ text: 'Page 1 of 3 — use buttons to navigate' }),
+          { name: '📋 Info', value: ['`/libyan-commands` — This menu', '`/clan-info [name]` — View clan details', '`/clan-list` — All clans ranked by XP', '`/clan-xp` — XP leaderboard', '`/libyan-stats [@user]` — View Libyan Points (LP)'].join('\n') },
+          { name: '🏰 Management', value: ['`/clan-create <name>` — Create a clan', '`/clan-disband` — Delete your clan *(Leader)*', '`/clan-rename <name> [emoji]` *(Leader)*', '`/clan-description <text>` *(Leader/Officer)*', '`/clan-motto <text>` *(Leader/Officer)*', '`/clan-ranks <member> <officer> <leader>` *(Leader)*'].join('\n') },
+          { name: '👥 Membership', value: ['`/clan-invite @user` *(Leader/Officer)*', '`/clan-invite-accept`', '`/clan-invite-decline`', '`/clan-kick @user` *(Leader/Officer)*', '`/clan-leave`'].join('\n') },
+          { name: '🛡️ Ranks', value: ['`/clan-promote @user` *(Leader)*', '`/clan-demote @user` *(Leader)*', '`/clan-transfer @user` *(Leader)*'].join('\n') },
+          { name: '📢 Channel & Wars', value: ['`/clan-channel-create` *(Leader)*', '`/clan-channel-delete` *(Leader)*', '`/clan-war <clan>` *(Leader/Officer)*', '`/clan-war-accept` *(Leader)*', '`/clan-war-decline` *(Leader)*'].join('\n') },
+        ).setFooter({ text: 'Page 1 of 4 — use buttons to navigate' }),
 
-      new EmbedBuilder().setColor(0xFF0000).setTitle('🎮 Clan Commands — Page 2/3: Pokémon')
+      new EmbedBuilder().setColor(0xFF0000).setTitle('🎮 Libyan Community Bot — Page 2/4: Pokémon')
         .addFields(
-          { name: '🌿 Catching', value: ['`/pokemon-team` — View your Pokémon', '`/pokemon-stats <slot>` — Detailed stats + XP bar', '`/pokemon-view @user` — View someone else\'s Pokémon', '`/pokemon-release <slot>` — Release a Pokémon', '`/pokemon-nickname <slot> <name>` — Nickname a Pokémon', '`/pokemon-info <name>` — Look up any Pokémon'].join('\n') },
-          { name: '⚔️ Battles', value: ['`/pokemon-challenge @user <slot>` — Challenge a member to 1v1', '`/pokemon-accept <slot>` — Accept a battle challenge', '`/pokemon-decline` — Decline a battle challenge'].join('\n') },
-          { name: '🎒 Items', value: ['`/pokemon-bag` — View your item bag', '`/pokemon-claim` — Claim an active item drop in your channel'].join('\n') },
-          { name: '📊 Stats', value: ['`/pokemon-leaderboard` — Your clan\'s Pokémon rankings', '`/pokemon-server` — Server-wide top Pokémon by wins', '`/pokedex` — Your clan\'s Pokédex completion'].join('\n') },
-          { name: '🎁 Item Drops', value: 'Items drop in clan channels every **1 hour** and expire in **30 minutes**.\nFirst person to use `/pokemon-claim` gets it!\n\n🔵 Great Ball · ⚫ Ultra Ball · 🧪 Super Potion · 💊 Hyper Potion · 🍯 Honey' },
-        ).setFooter({ text: 'Page 2 of 3 — use buttons to navigate' }),
+          { name: '🌿 Catching', value: ['`/pokemon-team` — Your Pokémon', '`/pokemon-stats <slot>` — Detailed stats + XP bar', '`/pokemon-view @user` — View someone\'s Pokémon', '`/pokemon-release <slot>` — Release a Pokémon', '`/pokemon-nickname <slot> <name>` — Nickname', '`/pokemon-info <name>` — Look up any Pokémon'].join('\n') },
+          { name: '⚔️ Battles', value: ['`/pokemon-challenge @user <slot>` — Challenge to 1v1', '`/pokemon-accept <slot>` — Accept challenge', '`/pokemon-decline` — Decline challenge'].join('\n') },
+          { name: '🎒 Items', value: ['`/pokemon-bag` — Your item bag', '`/pokemon-claim` — Claim item drop in clan channel'].join('\n') },
+          { name: '📊 Stats', value: ['`/pokemon-leaderboard` — Clan Pokémon rankings', '`/pokemon-server` — Server top Pokémon by wins', '`/pokedex` — Clan Pokédex completion'].join('\n') },
+          { name: '⏱️ Timings', value: 'Wild Pokémon spawn every **5 hours**, flee after **3 hours**\nItem drops every **7 hours**, expire after **5 hours**\nShiny chance: 1 in 50 🌟' },
+        ).setFooter({ text: 'Page 2 of 4 — use buttons to navigate' }),
 
-      new EmbedBuilder().setColor(0xFFD700).setTitle('🏅 Clan Commands — Page 3/3: Rank Permissions')
-        .setDescription('What each rank can do in the clan system.')
+      new EmbedBuilder().setColor(0xFFD700).setTitle('🏅 Libyan Community Bot — Page 3/4: Rank Permissions')
         .addFields(
-          { name: '👑 Leader — Full access', value: ['✅ Create / disband / rename the clan', '✅ Invite, kick, promote, demote members', '✅ Transfer leadership', '✅ Set description, motto, rank names', '✅ Create / delete private channel', '✅ Declare & accept clan wars', '✅ All Officer and Member permissions'].join('\n') },
-          { name: '🛡️ Officer — Management access', value: ['✅ Invite members', '✅ Kick regular members', '✅ Set clan description and motto', '✅ Declare clan wars', '✅ All Member permissions', '❌ Cannot disband, rename, or transfer leadership', '❌ Cannot kick other Officers'].join('\n') },
-          { name: '⚔️ Member — Basic access', value: ['✅ View clan info and leaderboards', '✅ Participate in Pokémon encounters', '✅ Battle other clan members', '✅ Claim item drops', '✅ Leave the clan', '❌ Cannot invite or kick', '❌ Cannot start wars'].join('\n') },
-        ).setFooter({ text: 'Page 3 of 3 — use buttons to navigate' }),
+          { name: '👑 Leader', value: ['✅ All permissions', '✅ Disband, rename, transfer', '✅ Promote, demote, kick anyone', '✅ Start & accept wars', '✅ Create/delete clan channel'].join('\n') },
+          { name: '🛡️ Officer', value: ['✅ Invite & kick members', '✅ Set description & motto', '✅ Start clan wars', '❌ Cannot disband/rename/transfer', '❌ Cannot kick other Officers'].join('\n') },
+          { name: '⚔️ Member', value: ['✅ View clan info', '✅ Participate in Pokémon & Ya Rayt', '✅ Claim item drops', '✅ Leave the clan', '❌ Cannot invite, kick or start wars'].join('\n') },
+          { name: '🏛️ Libyan Points (LP)', value: ['War win: **+50 LP** per member', 'War loss: **+10 LP** per member', 'Catch Pokémon: **+1 LP**', 'Win Pokémon battle: **+15 LP**', 'Lose Pokémon battle: **+3 LP**', 'Ya Rayt reaction received: **+1 LP** each', 'Ya Rayt round winner: **+10 LP** bonus'].join('\n') },
+        ).setFooter({ text: 'Page 3 of 4 — use buttons to navigate' }),
+
+      new EmbedBuilder().setColor(0x00AA44).setTitle('🇱🇾 Libyan Community Bot — Page 4/4: Ya Rayt')
+        .addFields(
+          { name: '📖 What is Ya Rayt?', value: '"Ya Rayt" (يا ريت) means **"I wish"** in Libyan Arabic.\nEvery 2 days at **6PM Libya time**, a new round opens.\nAt **8PM Libya time**, the round closes and results are posted.' },
+          { name: '🎮 Commands', value: ['`/yarayt <wish>` — Submit your wish for the round (1 per round)', '`/top-yarayt` — Top 10 users by total reactions', '`/top-relatable-yarayt` — Top 10 🇱🇾 Relatable', '`/top-funny-yarayt` — Top 10 😂 Funny', '`/top-wholesome-yarayt` — Top 10 ❤️ Wholesome', '`/top-bold-yarayt` — Top 10 🔥 Bold'].join('\n') },
+          { name: '⭐ Reactions', value: ['🇱🇾 — Relatable', '😂 — Funny', '❤️ — Wholesome', '🔥 — Bold'].join('\n') },
+          { name: '🏛️ LP Rewards', value: 'Each reaction received = **+1 LP**\nMost reactions in round = **+10 LP** bonus' },
+        ).setFooter({ text: 'Page 4 of 4 — use buttons to navigate' }),
     ];
 
-    const prevBtn = new ButtonBuilder().setCustomId('cmd_prev').setLabel('◀ Previous').setStyle(ButtonStyle.Secondary);
-    const nextBtn = new ButtonBuilder().setCustomId('cmd_next').setLabel('Next ▶').setStyle(ButtonStyle.Primary);
+    const prev = new ButtonBuilder().setCustomId('cmd_prev').setLabel('◀ Previous').setStyle(ButtonStyle.Secondary);
+    const next = new ButtonBuilder().setCustomId('cmd_next').setLabel('Next ▶').setStyle(ButtonStyle.Primary);
 
-    let page = 0;
-
-    const buildRow = (currentPage) => new ActionRowBuilder().addComponents(
-      ButtonBuilder.from(prevBtn.toJSON()).setDisabled(currentPage === 0),
-      ButtonBuilder.from(nextBtn.toJSON()).setDisabled(currentPage === pages.length - 1),
+    const buildRow = p => new ActionRowBuilder().addComponents(
+      ButtonBuilder.from(prev.toJSON()).setDisabled(p === 0),
+      ButtonBuilder.from(next.toJSON()).setDisabled(p === pages.length - 1),
     );
 
+    let page = 0;
     await safeReply(interaction, { embeds: [pages[0]], components: [buildRow(0)], flags: 64 });
-
     const msg = await interaction.fetchReply().catch(() => null);
     if (!msg) return;
 
@@ -1237,18 +1282,58 @@ async function handleCommand(interaction, commandName, user, guild) {
       filter: i => i.user.id === user.id && ['cmd_prev','cmd_next'].includes(i.customId),
       time: 120_000,
     });
-
     col.on('collect', async i => {
       if (i.customId === 'cmd_next' && page < pages.length - 1) page++;
       if (i.customId === 'cmd_prev' && page > 0) page--;
       await i.update({ embeds: [pages[page]], components: [buildRow(page)] }).catch(() => {});
     });
-
-    col.on('end', () => {
-      interaction.editReply({ components: [] }).catch(() => {});
-    });
-
+    col.on('end', () => { interaction.editReply({ components: [] }).catch(() => {}); });
     return;
+  }
+
+  // ── /libyan-stats ────────────────────────────────────────────────────────────
+  if (commandName === 'libyan-stats') {
+    const target   = interaction.options.getUser('user') || user;
+    const isSelf   = target.id === user.id;
+    const lp       = getLPData(guild.id, target.id);
+
+    // Get pokemon stats
+    const pokeData = db[guild.id]?.__pokemon?.[target.id];
+    const pokeCaught = pokeData?.pokemon?.length || 0;
+    const pokeBattleWins = pokeData?.battleWins || 0;
+
+    // Get Ya Rayt stats
+    const yrData   = db[guild.id]?.__yarayt?.users?.[target.id] || {};
+    const yrTotal  = (yrData.relatable || 0) + (yrData.funny || 0) + (yrData.wholesome || 0) + (yrData.bold || 0);
+
+    // Get clan
+    const targetClan = getUserClan(guild.id, target.id);
+
+    let targetMember;
+    try { targetMember = await guild.members.fetch(target.id); } catch {}
+    const displayName = targetMember?.displayName || target.username;
+
+    const embed = new EmbedBuilder()
+      .setColor(0x00AA44)
+      .setTitle(`🏛️ ${displayName}'s Libyan Points (LP)`)
+      .setThumbnail(target.displayAvatarURL())
+      .addFields(
+        { name: '🏛️ Total LP',        value: `**${lp.total} LP**`,       inline: true },
+        { name: '🏰 Clan',            value: targetClan ? targetClan.name : 'No clan', inline: true },
+        { name: '\u200b',             value: '\u200b',                    inline: true },
+        { name: '⚔️ War Wins LP',     value: `${lp.warWins} LP`,         inline: true },
+        { name: '💀 War Losses LP',   value: `${lp.warLosses} LP`,       inline: true },
+        { name: '\u200b',             value: '\u200b',                    inline: true },
+        { name: '🎮 Pokémon LP',      value: `${lp.pokemonLP} LP`,       inline: true },
+        { name: '🐾 Pokémon Caught',  value: `${pokeCaught}`,            inline: true },
+        { name: '🏆 Battle Wins',     value: `${pokeBattleWins}`,        inline: true },
+        { name: '🇱🇾 Ya Rayt LP',    value: `${lp.yaraytLP} LP`,        inline: true },
+        { name: '❤️ Total Reactions', value: `${yrTotal}`,               inline: true },
+        { name: '\u200b',             value: '\u200b',                    inline: true },
+      )
+      .setFooter({ text: 'LP earned across clan wars, Pokémon and Ya Rayt' });
+
+    return safeReply(interaction, { embeds: [embed], flags: isSelf ? 64 : 0 });
   }
 
   // ── /clan-info ──────────────────────────────────────────────────────────────
@@ -1829,9 +1914,12 @@ process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT',  () => shutdown('SIGINT'));
 
 // ─── Pokemon System ───────────────────────────────────────────────────────────
-// Loaded after client is defined so it can attach its own listeners and commands
 
-require('./pokemon')({ client, db, saveData, getGuildClans, getUserClan });
+require('./pokemon')({ client, db, saveData, getGuildClans, getUserClan, awardLP });
+
+// ─── Ya Rayt System ───────────────────────────────────────────────────────────
+
+require('./yarayt')({ client, db, saveData, awardLP });
 
 // ─── Login ────────────────────────────────────────────────────────────────────
 

@@ -15,10 +15,10 @@ const {
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const MAX_POKEMON        = 30;
-const SPAWN_INTERVAL_MS  = 2 * 60 * 60 * 1000;   // 2 hours
-const SPAWN_FLEE_MS      = 60 * 60 * 1000;        // 1 hour
-const DROP_INTERVAL_MS   = 60 * 60 * 1000;        // Item drops every 1 hour
-const DROP_EXPIRE_MS     = 30 * 60 * 1000;        // Item drops expire in 30 mins
+const SPAWN_INTERVAL_MS  = 5 * 60 * 60 * 1000;   // 5 hours
+const SPAWN_FLEE_MS      = 3 * 60 * 60 * 1000;   // 3 hours
+const DROP_INTERVAL_MS   = 7 * 60 * 60 * 1000;   // Item drops every 7 hours
+const DROP_EXPIRE_MS     = 5 * 60 * 60 * 1000;   // Item drops expire in 5 hours
 const POKEBALL_PER_SPAWN = 3;
 const MAX_POKEMON_ID     = 898;
 const SHINY_CHANCE       = 50;
@@ -870,6 +870,9 @@ async function handleSpawnInteraction(i, spawn, channel, db, saveData, getGuildC
         memberData.pokemon.push(caughtPoke);
         memberData.pokeballs = (memberData.pokeballs || 0) + POKEBALL_PER_SPAWN;
 
+        // Award LP for catching
+        if (awardLP) awardLP(guildId, userId, 1, 'pokemon');
+
         // Catch streak tracking
         let streakMsg = '';
         if (channelClan) {
@@ -1105,7 +1108,7 @@ async function runBattleTurn(battle, channel, db, saveData, moveNameOrAction, us
 // MODULE EXPORT
 // ═══════════════════════════════════════════════════════════════════════════════
 
-module.exports = function initPokemon({ client, db, saveData, getGuildClans, getUserClan }) {
+module.exports = function initPokemon({ client, db, saveData, getGuildClans, getUserClan, awardLP }) {
 
   // ─── State variables ──────────────────────────────────────────────────────
   const activeDrops = {};   // { channelId: { itemId, messageId, expiresAt } }
@@ -1874,21 +1877,19 @@ module.exports = function initPokemon({ client, db, saveData, getGuildClans, get
       const loserData  = getMemberPokemon(db, battle.guildId, loserActual);
 
       if (reason === 'win' || reason === 'forfeit') {
-        // Update winner's stored Pokemon
         if (winnerData.pokemon[winnerSlot]) {
           const { xpGain, levelled } = await awardBattleXp(winnerData.pokemon[winnerSlot], true);
-          // Increment wins on both the member record and the individual Pokemon
           winnerData.battleWins = (winnerData.battleWins || 0) + 1;
           winnerData.pokemon[winnerSlot].battleWins = (winnerData.pokemon[winnerSlot].battleWins || 0) + 1;
+          if (awardLP) awardLP(battle.guildId, winnerActual, 15, 'pokemon');
           if (levelled) {
             await channel.send(`⬆️ **${capitalize(winnerData.pokemon[winnerSlot].name)}** levelled up to **Lv.${winnerData.pokemon[winnerSlot].level}**!`).catch(() => {});
           }
           await channel.send(`⭐ **${capitalize(winnerPoke.name)}** gained **${xpGain} XP**!`).catch(() => {});
         }
-
-        // Update loser's stored Pokemon
         if (loserData.pokemon[loserSlot]) {
           const { xpGain } = await awardBattleXp(loserData.pokemon[loserSlot], false);
+          if (awardLP) awardLP(battle.guildId, loserActual, 3, 'pokemon');
           await channel.send(`⭐ **${capitalize(loserPoke.name)}** gained **${xpGain} XP** for participating!`).catch(() => {});
         }
       }
