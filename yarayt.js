@@ -9,7 +9,7 @@
 // - Reactions counted at round end, LP awarded then
 // - /top-yarayt and category leaderboards
 // - Admin /yarayt-start to force a round immediately
-// - Channel set via YARAYT_CHANNEL_ID environment variable
+// - Channel set via YARAYT_CHANNEL_ID environment variable huhuihui
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const {
