@@ -9,7 +9,7 @@
 // - Reactions counted at round end, LP awarded then
 // - /top-yarayt and category leaderboards
 // - Admin /yarayt-start to force a round immediately
-// - Channel set via YARAYT_CHANNEL_ID environment variable huhuihui
+// - Channel set via YARAYT_CHANNEL_ID environment variable
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const {
@@ -127,21 +127,7 @@ module.exports = function initYarayt({ client, db, saveData, awardLP }) {
   // ─── Register Ya Rayt commands ─────────────────────────────────────────────
 
   async function registerYaraytCommands(guildId) {
-    const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
-    try {
-      const existing = await rest.get(Routes.applicationGuildCommands(process.env.CLIENT_ID, guildId));
-      const existingNames = existing.map(c => c.name);
-      const toAdd = yaraytCommands.filter(c => !existingNames.includes(c.name));
-      if (toAdd.length > 0) {
-        await rest.put(
-          Routes.applicationGuildCommands(process.env.CLIENT_ID, guildId),
-          { body: [...existing, ...toAdd] }
-        );
-      }
-      console.log(`✅ Ya Rayt commands registered for guild ${guildId}`);
-    } catch (err) {
-      console.error(`❌ Ya Rayt command registration failed for ${guildId}:`, err.message);
-    }
+    console.log(`Ya Rayt commands included in central registration for guild ${guildId}`);
   }
 
   // ─── Get the Ya Rayt channel ───────────────────────────────────────────────
@@ -552,3 +538,5 @@ module.exports = function initYarayt({ client, db, saveData, awardLP }) {
   }
 
 };
+
+module.exports.commands = yaraytCommands;

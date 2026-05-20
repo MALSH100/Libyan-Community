@@ -467,21 +467,31 @@ const commands = [
 
 let _allCommands = null; // reset on each startup — always re-registers
 
+const getPokemonCommands = require('./pokemon-commands');
+const initYarayt = require('./yarayt');
+const initBlackMarketExchange = require('./black-market-exchange');
+
 function getAllCommands() {
   if (_allCommands) return _allCommands;
   let pokeCommands = [];
+  let yaraytCommands = [];
   let exchangeCommands = [];
   try {
-    pokeCommands = require('./pokemon-commands')();
+    pokeCommands = getPokemonCommands();
   } catch (e) {
     console.error('⚠️ Could not load pokemon-commands.js:', e.message);
   }
   try {
-    exchangeCommands = require('./black-market-exchange').commands || [];
+    exchangeCommands = initBlackMarketExchange.commands || [];
   } catch (e) {
     console.error('Could not load black-market-exchange.js:', e.message);
   }
-  _allCommands = [...commands, ...pokeCommands, ...exchangeCommands];
+  try {
+    yaraytCommands = initYarayt.commands || [];
+  } catch (e) {
+    console.error('Could not load yarayt.js commands:', e.message);
+  }
+  _allCommands = [...commands, ...pokeCommands, ...yaraytCommands, ...exchangeCommands];
   console.log(`📋 Command list built: ${_allCommands.map(c => c.name).join(', ')}`);
   return _allCommands;
 }
@@ -490,20 +500,39 @@ async function clearGuildCommands(guildId) {
   // No longer needed — keeping for safety but not called
 }
 
+function getApplicationId() {
+  return process.env.CLIENT_ID || process.env.DISCORD_CLIENT_ID || client.application?.id || client.user?.id;
+}
+
+async function getRegistrationGuilds() {
+  const guilds = new Map();
+  for (const guild of client.guilds.cache.values()) guilds.set(guild.id, guild);
+  try {
+    const fetched = await client.guilds.fetch();
+    for (const guild of fetched.values()) guilds.set(guild.id, guild);
+  } catch (err) {
+    console.warn('Could not fetch guild list, using cached guilds only:', err.message);
+  }
+  return [...guilds.values()];
+}
+
 async function registerCommands(attempt = 1) {
-  if (!process.env.CLIENT_ID) {
+  const applicationId = getApplicationId();
+  if (!applicationId) {
     console.error('❌ CLIENT_ID environment variable is not set!');
     return;
   }
   const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
   try {
     const body = getAllCommands();
+    const guilds = await getRegistrationGuilds();
+    if (guilds.length === 0) console.warn('No guilds found for slash command registration.');
 
     // Register as GUILD commands — instant for all members, no permission issues
-    for (const guild of client.guilds.cache.values()) {
+    for (const guild of guilds) {
       console.log(`📋 Registering ${body.length} commands for guild: ${guild.name} (attempt ${attempt})...`);
       await Promise.race([
-        rest.put(Routes.applicationGuildCommands(process.env.CLIENT_ID, guild.id), { body }),
+        rest.put(Routes.applicationGuildCommands(applicationId, guild.id), { body }),
         new Promise((_, reject) => setTimeout(() => reject(new Error('Timed out after 20s')), 20000)),
       ]);
       console.log(`✅ Commands registered for ${guild.name}`);
@@ -1925,10 +1954,10 @@ require('./pokemon')({ client, db, saveData, getGuildClans, getUserClan, awardLP
 
 // ─── Ya Rayt System ───────────────────────────────────────────────────────────
 
-require('./yarayt')({ client, db, saveData, awardLP });
+initYarayt({ client, db, saveData, awardLP });
 
 // Libyan Black Market Exchange Rate System
-require('./black-market-exchange')({ client, db, saveData });
+initBlackMarketExchange({ client, db, saveData });
 
 // ─── Login ────────────────────────────────────────────────────────────────────
 
