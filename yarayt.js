@@ -366,6 +366,71 @@ module.exports = function initYarayt({ client, db, saveData, awardLP }) {
     }, 10000); // 10 second delay so MongoDB data is loaded first
   });
 
+  // ─── Reaction enforcement ─────────────────────────────────────────────────
+  // 1. Remove any emoji that isn't one of the 4 official ones
+  // 2. If a user already reacted with one of the 4, remove their new one
+
+  const VALID_EMOJIS = new Set(REACTIONS.map(r => r.emoji));
+
+  client.on('messageReactionAdd', async (reaction, user) => {
+    try {
+      // Ignore bot reactions
+      if (user.bot) return;
+
+      // Fetch partial reaction/message if needed
+      if (reaction.partial) await reaction.fetch().catch(() => null);
+      if (!reaction.message) return;
+
+      const msg   = reaction.partial ? reaction.message : reaction.message;
+      const guild = msg.guild;
+      if (!guild) return;
+
+      // Only care about the Ya Rayt channel
+      const channelId = process.env.YARAYT_CHANNEL_ID;
+      if (!channelId || msg.channelId !== channelId) return;
+
+      // Only care about messages that are active Ya Rayt wishes
+      const yrData = getYaraytData(db, guild.id);
+      if (!yrData.currentRound) return;
+
+      const wishEntry = Object.values(yrData.currentRound.wishes)
+        .find(w => w.messageId === msg.id);
+      if (!wishEntry) return;
+
+      const emojiName = reaction.emoji.name;
+
+      // ── Rule 1: Remove invalid emojis immediately ─────────────────────────
+      if (!VALID_EMOJIS.has(emojiName)) {
+        await reaction.users.remove(user.id).catch(() => {});
+        return;
+      }
+
+      // ── Rule 2: One reaction per user — remove previous if they picked another
+      // Fetch full message to check all reactions
+      let fullMsg;
+      try { fullMsg = await msg.channel.messages.fetch(msg.id); } catch { return; }
+
+      for (const [, existingReaction] of fullMsg.reactions.cache) {
+        // Skip the reaction they just added
+        if (existingReaction.emoji.name === emojiName) continue;
+        // Skip invalid emojis (already handled above)
+        if (!VALID_EMOJIS.has(existingReaction.emoji.name)) continue;
+        // Check if this user already reacted with this emoji
+        try {
+          const users = await existingReaction.users.fetch();
+          if (users.has(user.id)) {
+            // Remove their old reaction
+            await existingReaction.users.remove(user.id).catch(() => {});
+          }
+        } catch {}
+      }
+
+    } catch (err) {
+      // Never crash on reaction events
+      console.error('Ya Rayt reaction enforcement error:', err.message);
+    }
+  });
+
   // ─── Interaction handler ───────────────────────────────────────────────────
 
   client.on('interactionCreate', async interaction => {
@@ -431,7 +496,7 @@ module.exports = function initYarayt({ client, db, saveData, awardLP }) {
       const embed = new EmbedBuilder()
         .setColor(0x00AA44)
         .setAuthor({ name: `${displayName} يا ريت...`, iconURL: avatarURL })
-        .setDescription(`*"${wish}"*`)
+        .setDescription(`**Ya Rayt...** *"${wish}"*`)
         .setFooter({ text: 'React below to vote! 🇱🇾 Relatable · 😂 Funny · ❤️ Wholesome · 🔥 Bold' })
         .setTimestamp();
 
