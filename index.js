@@ -470,12 +470,18 @@ let _allCommands = null; // reset on each startup — always re-registers
 function getAllCommands() {
   if (_allCommands) return _allCommands;
   let pokeCommands = [];
+  let exchangeCommands = [];
   try {
     pokeCommands = require('./pokemon-commands')();
   } catch (e) {
     console.error('⚠️ Could not load pokemon-commands.js:', e.message);
   }
-  _allCommands = [...commands, ...pokeCommands];
+  try {
+    exchangeCommands = require('./black-market-exchange').commands || [];
+  } catch (e) {
+    console.error('Could not load black-market-exchange.js:', e.message);
+  }
+  _allCommands = [...commands, ...pokeCommands, ...exchangeCommands];
   console.log(`📋 Command list built: ${_allCommands.map(c => c.name).join(', ')}`);
   return _allCommands;
 }
@@ -1920,6 +1926,9 @@ require('./pokemon')({ client, db, saveData, getGuildClans, getUserClan, awardLP
 // ─── Ya Rayt System ───────────────────────────────────────────────────────────
 
 require('./yarayt')({ client, db, saveData, awardLP });
+
+// Libyan Black Market Exchange Rate System
+require('./black-market-exchange')({ client, db, saveData });
 
 // ─── Login ────────────────────────────────────────────────────────────────────
 

@@ -4,10 +4,12 @@
   "description": "A Discord bot for creating and managing clans/guilds",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "postinstall": "npx playwright install chromium"
   },
   "dependencies": {
     "discord.js": "^14.0.0",
-    "mongodb": "^6.0.0"
+    "mongodb": "^6.0.0",
+    "playwright": "^1.52.0"
   }
 }
