@@ -5,7 +5,7 @@ const cheerio = require('cheerio');
 const { chromium } = require('playwright'); // Add this line
 
 const SOURCE_URL = 'https://www.newsnow.co.uk/h/World+News/Africa/Libya?type=ln';
-const CHECK_INTERVAL_MS = 60 * 60 * 1000;
+const CHECK_INTERVAL_MS = 15 * 60 * 1000;
 const MAX_HISTORY = 50;
 
 // --- Resolve final URL using Playwright (handles modern JavaScript redirects) ---
