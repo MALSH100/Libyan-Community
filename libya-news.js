@@ -343,6 +343,9 @@ async function updateNews({ client, db, saveData, guildId, forcePost = false }) 
     const latestArticle = await getLatestLibyaNews();
     const isNew = latestArticle.url !== newsState.lastPostedUrl;
 
+        // Debug: log whether this is considered new and what the URLs are
+    console.log(`[News] Auto check for guild ${guildId}: isNew=${isNew}, lastUrl=${newsState.lastPostedUrl}, currentUrl=${latestArticle.url}`);
+
     newsState.history = newsState.history || [];
     newsState.history.push(latestArticle);
     newsState.history = newsState.history.slice(-MAX_HISTORY);
