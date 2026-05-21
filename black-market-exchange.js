@@ -197,15 +197,8 @@ function buildRateEmbed(exchangeData, latest, forced = false) {
   for (const currency of CURRENCIES) {
     const value = latest.rates[currency];
     const t = trend(history.slice(0, -1), currency, value);
-  const symbolMap = {
-  USD: '$ USD',
-  EUR: '€ EUR',
-  GBP: '£ GBP',
-};
-const displayName = symbolMap[currency] || currency;
-
 embed.addFields({
-  name: displayName,
+  name: currency,
   value: value === null || value === undefined ? 'Not found' : `**${value.toFixed(2)} LYD**\n${t.label}`,
   inline: true,
 });
