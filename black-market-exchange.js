@@ -179,9 +179,9 @@ function trend(history, currency, latestValue) {
   const previous = [...history].reverse().find(entry => entry.rates && entry.rates[currency] !== null && entry.rates[currency] !== undefined);
   if (!previous || latestValue === null || latestValue === undefined) return { label: 'No previous data', delta: null };
   const delta = Math.round((latestValue - previous.rates[currency]) * 1000) / 1000;
-  if (delta > 0) return { label: `Up +${delta.toFixed(3)}`, delta };
-  if (delta < 0) return { label: `Down ${delta.toFixed(3)}`, delta };
-  return { label: 'No change', delta: 0 };
+  if (delta > 0) return { label: `🔴 ↑ +${delta.toFixed(3)}`, delta };
+  if (delta < 0) return { label: `🟢 ↓ ${delta.toFixed(3)}`, delta };
+  return { label: '⚪ No change', delta: 0 };
 }
 
 function buildRateEmbed(exchangeData, latest, forced = false) {
@@ -197,11 +197,18 @@ function buildRateEmbed(exchangeData, latest, forced = false) {
   for (const currency of CURRENCIES) {
     const value = latest.rates[currency];
     const t = trend(history.slice(0, -1), currency, value);
-    embed.addFields({
-      name: currency,
-      value: value === null || value === undefined ? 'Not found' : `**${value.toFixed(2)} LYD**\n${t.label}`,
-      inline: true,
-    });
+  const symbolMap = {
+  USD: '$ USD',
+  EUR: '€ EUR',
+  GBP: '£ GBP',
+};
+const displayName = symbolMap[currency] || currency;
+
+embed.addFields({
+  name: displayName,
+  value: value === null || value === undefined ? 'Not found' : `**${value.toFixed(2)} LYD**\n${t.label}`,
+  inline: true,
+});
   }
 
   return embed;
