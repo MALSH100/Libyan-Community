@@ -292,9 +292,32 @@ function buildChartSvg(history) {
 </svg>`;
 }
 
-function chartAttachment(exchangeData) {
+async function chartAttachment(exchangeData) {
   const svg = buildChartSvg(exchangeData.history || []);
-  return new AttachmentBuilder(Buffer.from(svg, 'utf8'), { name: 'libya-exchange-chart.svg' });
+  const pngBuffer = await svgToPngBuffer(svg);
+  return new AttachmentBuilder(pngBuffer, { name: 'libya-exchange-chart.png' });
+}
+
+async function svgToPngBuffer(svgString) {
+  const { chromium } = require('playwright');
+  const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
+  try {
+    const page = await browser.newPage();
+    await page.setContent(`
+      <html>
+        <body style="margin:0; display:flex; justify-content:center; align-items:center; background:white;">
+          ${svgString}
+        </body>
+      </html>
+    `);
+    // Wait for SVG to render
+    await page.waitForSelector('svg');
+    const element = await page.$('svg');
+    const pngBuffer = await element.screenshot({ type: 'png' });
+    return pngBuffer;
+  } finally {
+    await browser.close();
+  }
 }
 
 async function postUpdate(client, guildId, exchangeData, latest, forced = false) {
@@ -302,13 +325,13 @@ async function postUpdate(client, guildId, exchangeData, latest, forced = false)
   const channel = await client.channels.fetch(exchangeData.channelId).catch(() => null);
   if (!channel || !channel.isTextBased()) return false;
 
-  const files = [];
+   const files = [];
   let embed = buildRateEmbed(exchangeData, latest, forced);
   
   if ((exchangeData.history || []).length >= 2) {
-    const chartFile = chartAttachment(exchangeData);
+    const chartFile = await chartAttachment(exchangeData);
     files.push(chartFile);
-    embed.setImage('attachment://libya-exchange-chart.svg');
+    embed.setImage('attachment://libya-exchange-chart.png');
   }
 
   await channel.send({
