@@ -8,34 +8,72 @@ const SOURCE_URL = 'https://www.newsnow.co.uk/h/World+News/Africa/Libya?type=ln'
 const CHECK_INTERVAL_MS = 60 * 60 * 1000;
 const MAX_HISTORY = 50;
 
-// --- Resolve final URL using Playwright (handles JavaScript redirects) ---
+// --- Resolve final URL using Playwright (handles JavaScript redirects and meta refresh) ---
 async function resolveFinalUrl(intermediateUrl) {
     let browser;
+    let page;
     try {
         browser = await chromium.launch({
             headless: true,
             args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
         });
-        const page = await browser.newPage();
-        
-        // Navigate to the intermediate page and wait for navigation to finish
-        // This will automatically follow any client-side redirects
-        await page.goto(intermediateUrl, { waitUntil: 'networkidle', timeout: 30000 });
-        
-        // Get the final URL after all redirects
-        const finalUrl = page.url();
-        
-        // If we're still on newsnow.co.uk, something went wrong
-        if (finalUrl.includes('newsnow.co.uk')) {
-            console.warn(`[News] Redirect didn't leave NewsNow: ${finalUrl}`);
+        page = await browser.newPage();
+
+        // Navigate to the intermediate page, but don't wait for networkidle
+        await page.goto(intermediateUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+
+        // Try to get the final URL by waiting for navigation
+        let finalUrl = null;
+        try {
+            // Wait for the page to navigate to a non-newsnow URL
+            await page.waitForNavigation({
+                waitUntil: 'domcontentloaded',
+                timeout: 10000,
+            });
+            finalUrl = page.url();
+        } catch (navError) {
+            console.log(`[News] No navigation event detected: ${navError.message}`);
+        }
+
+        // If we didn't get a final URL, try to extract it from a meta refresh tag
+        if (!finalUrl || finalUrl.includes('newsnow.co.uk')) {
+            const metaRefresh = await page.evaluate(() => {
+                const meta = document.querySelector('meta[http-equiv="refresh"]');
+                if (meta) {
+                    const content = meta.getAttribute('content');
+                    const match = content.match(/url=(.*)$/i);
+                    if (match) return match[1];
+                }
+                return null;
+            });
+            if (metaRefresh) {
+                finalUrl = metaRefresh;
+            } else {
+                // Fallback: try to find any link that might be the article
+                const articleLink = await page.evaluate(() => {
+                    const link = document.querySelector('a[href^="http"]:not([href*="newsnow"])');
+                    return link ? link.href : null;
+                });
+                if (articleLink) {
+                    finalUrl = articleLink;
+                }
+            }
+        }
+
+        // Validate the final URL
+        if (finalUrl && !finalUrl.includes('newsnow.co.uk')) {
+            console.log(`[News] Resolved redirect: ${finalUrl}`);
+            return finalUrl;
+        } else {
+            console.warn(`[News] Could not resolve redirect, using original URL: ${intermediateUrl}`);
             return intermediateUrl;
         }
-        
-        return finalUrl;
+
     } catch (error) {
         console.error(`[News] Playwright redirect failed: ${error.message}`);
         return intermediateUrl;
     } finally {
+        if (page) await page.close().catch(() => {});
         if (browser) await browser.close().catch(() => {});
     }
 }
