@@ -128,28 +128,51 @@ async function resolveFinalUrl(intermediateUrl) {
     }
 }
 
-// --- Fetch article details: image, description, etc. (with retry and better timeout handling) ---
+// --- Fetch article details: image, description, etc. (stealth mode for security pages) ---
 async function fetchArticleMetadata(articleUrl, retries = 2) {
     let browser;
     try {
         browser = await chromium.launch({
             headless: true,
-            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-blink-features=AutomationControlled',
+                '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            ],
         });
         const page = await browser.newPage();
         
-        // Use 'domcontentloaded' instead of 'networkidle' – much faster and less strict
-        // Also set a generous timeout but allow the page to load basic content
-        await page.goto(articleUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
-        
-        // Wait a bit for lazy-loaded images and meta tags (but don't wait forever)
-        await page.waitForTimeout(3000);
-        
-        // Additional wait for any dynamic content that might insert meta tags
-        await page.waitForFunction(() => {
-            return document.querySelector('meta[property="og:image"], meta[name="twitter:image"], img');
-        }, { timeout: 5000 }).catch(() => console.log(`[News] No image-related elements found quickly`));
+        // Set a realistic viewport and locale
+        await page.setViewportSize({ width: 1280, height: 800 });
+        await page.setExtraHTTPHeaders({
+            'Accept-Language': 'en-US,en;q=0.9',
+        });
 
+        // Navigate and wait for the page to fully load (including security checks)
+        await page.goto(articleUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        
+        // Wait for the security challenge to resolve (look for article content)
+        console.log(`[News] Waiting for security challenge to pass...`);
+        try {
+            await page.waitForFunction(() => {
+                // If we see an article title or main content, the security check passed
+                const hasArticle = document.querySelector('article, h1, .node-title, .field--name-title');
+                const hasSecurity = document.body.innerText.includes('security service') || 
+                                    document.body.innerText.includes('captcha') ||
+                                    document.body.innerText.includes('verify you are not a bot');
+                return hasArticle && !hasSecurity;
+            }, { timeout: 60000, polling: 2000 });
+            console.log(`[News] Security challenge passed, content loaded.`);
+        } catch (e) {
+            console.log(`[News] Security challenge may still be present or page took too long: ${e.message}`);
+            // Continue anyway – we'll try to extract whatever is there
+        }
+        
+        // Wait a bit more for lazy-loaded images
+        await page.waitForTimeout(4000);
+        
         const metadata = await page.evaluate(() => {
             const getMeta = (name) => {
                 const el = document.querySelector(`meta[property="${name}"], meta[name="${name}"]`);
@@ -159,27 +182,33 @@ async function fetchArticleMetadata(articleUrl, retries = 2) {
             // Try Open Graph image first
             let image = getMeta('og:image') || getMeta('twitter:image');
             if (!image) {
-                // Fallback: find the first large image on the page (width > 100px to catch more)
+                // Fallback: find the first large image that isn't a logo or icon
                 const imgs = Array.from(document.querySelectorAll('img'));
-                const largeImg = imgs.find(img => (img.width >= 100 || img.naturalWidth >= 100) && img.src && !img.src.includes('logo'));
-                if (largeImg) image = largeImg.src;
+                const validImg = imgs.find(img => {
+                    const src = img.src || '';
+                    const width = img.width || img.naturalWidth || 0;
+                    return width >= 100 && 
+                           !src.includes('logo') && 
+                           !src.includes('icon') &&
+                           !src.includes('avatar') &&
+                           !src.includes('advertisement');
+                });
+                if (validImg) image = validImg.src;
             }
 
             // Description fallback
-            let description = getMeta('og:description') || getMeta('description');
+            let description = getMeta('og:description') || getMeta('description') || getMeta('twitter:description');
             if (!description) {
-                // Get the first paragraph with meaningful text
-                const firstPara = document.querySelector('p');
-                if (firstPara && firstPara.innerText.trim().length > 30) {
-                    description = firstPara.innerText.trim().slice(0, 200);
-                } else {
-                    // fallback to any text from the article body
-                    const articleText = document.querySelector('article, .content, main, body');
-                    if (articleText) {
-                        const text = articleText.innerText.trim().slice(0, 200);
-                        if (text.length > 30) description = text;
-                    }
-                }
+                // Try to get the first substantial paragraph
+                const paragraphs = Array.from(document.querySelectorAll('p'));
+                const goodPara = paragraphs.find(p => p.innerText.trim().length > 80);
+                if (goodPara) description = goodPara.innerText.trim().slice(0, 200);
+                else if (paragraphs[0]) description = paragraphs[0].innerText.trim().slice(0, 200);
+            }
+
+            // Ensure description is not the security message
+            if (description && (description.includes('security service') || description.includes('verify you are not a bot'))) {
+                description = null;
             }
 
             return {
