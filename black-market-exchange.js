@@ -172,12 +172,15 @@ function rateKey(rates) {
   return CURRENCIES.map(c => `${c}:${rates[c] ?? 'na'}`).join('|');
 }
 
-function trend(history, currency, latestValue) {
-  const previous = [...history].reverse().find(entry => entry.rates && entry.rates[currency] !== null && entry.rates[currency] !== undefined);
-  if (!previous || latestValue === null || latestValue === undefined) return { label: 'No previous data', delta: null };
-  const delta = Math.round((latestValue - previous.rates[currency]) * 1000) / 1000;
-  if (delta > 0) return { label: `Up +${delta.toFixed(3)}`, delta };
-  if (delta < 0) return { label: `Down ${delta.toFixed(3)}`, delta };
+function inverseTrend(history, currency, latestInverse) {
+  const previousEntry = [...history].reverse().find(entry => 
+    entry.rates && typeof entry.rates[currency] === 'number' && entry.rates[currency] > 0
+  );
+  if (!previousEntry) return { label: 'No previous data', delta: null };
+  const previousInverse = 1 / previousEntry.rates[currency];
+  const delta = Math.round((latestInverse - previousInverse) * 10000) / 10000;
+  if (delta > 0) return { label: `Up +${delta.toFixed(4)}`, delta };
+  if (delta < 0) return { label: `Down ${delta.toFixed(4)}`, delta };
   return { label: 'No change', delta: 0 };
 }
 
@@ -189,14 +192,26 @@ function buildRateEmbed(exchangeData, latest, forced = false) {
     .setURL(SOURCE_URL)
     .setDescription(forced ? 'Manual refresh from the configured Facebook source.' : 'Latest hourly update from the configured Facebook source.')
     .setTimestamp(new Date(latest.scrapedAt || Date.now()))
-    .setFooter({ text: 'Source: Dollar Euro Pound Libya Black Market Exchange Rate' });
+    .setFooter({ text: 'Source: Dollar Euro Pound Libya Black Market Exchange Rate | Showing how much foreign currency you get for 1 LYD' });
 
   for (const currency of CURRENCIES) {
     const value = latest.rates[currency];
-    const t = trend(history.slice(0, -1), currency, value);
+    if (value === null || value === undefined || value <= 0) {
+      embed.addFields({
+        name: currency,
+        value: 'Not found',
+        inline: true,
+      });
+      continue;
+    }
+
+    const inverse = 1 / value;
+    const displayInverse = Math.round(inverse * 10000) / 10000;
+    const trendData = inverseTrend(history.slice(0, -1), currency, inverse);
+    
     embed.addFields({
-      name: currency,
-      value: value === null || value === undefined ? 'Not found' : `**${value.toFixed(3)} LYD**\n${t.label}`,
+      name: `1 LYD → ${currency}`,
+      value: `**${displayInverse.toFixed(4)} ${currency}**\n${trendData.label}`,
       inline: true,
     });
   }
