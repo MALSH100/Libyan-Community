@@ -2,23 +2,41 @@
 const { SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits } = require('discord.js');
 const axios = require('axios');
 const cheerio = require('cheerio');
+const { chromium } = require('playwright'); // Add this line
 
 const SOURCE_URL = 'https://www.newsnow.co.uk/h/World+News/Africa/Libya?type=ln';
 const CHECK_INTERVAL_MS = 60 * 60 * 1000;
 const MAX_HISTORY = 50;
 
-// --- Resolve final URL from NewsNow redirect ---
+// --- Resolve final URL using Playwright (handles JavaScript redirects) ---
 async function resolveFinalUrl(intermediateUrl) {
+    let browser;
     try {
-        const response = await axios.head(intermediateUrl, {
-            maxRedirects: 0,
-            validateStatus: (status) => status === 301 || status === 302,
+        browser = await chromium.launch({
+            headless: true,
+            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
         });
-        const finalUrl = response.headers.location;
-        return finalUrl || intermediateUrl;
+        const page = await browser.newPage();
+        
+        // Navigate to the intermediate page and wait for navigation to finish
+        // This will automatically follow any client-side redirects
+        await page.goto(intermediateUrl, { waitUntil: 'networkidle', timeout: 30000 });
+        
+        // Get the final URL after all redirects
+        const finalUrl = page.url();
+        
+        // If we're still on newsnow.co.uk, something went wrong
+        if (finalUrl.includes('newsnow.co.uk')) {
+            console.warn(`[News] Redirect didn't leave NewsNow: ${finalUrl}`);
+            return intermediateUrl;
+        }
+        
+        return finalUrl;
     } catch (error) {
-        console.error(`[News] Redirect resolution failed: ${error.message}`);
+        console.error(`[News] Playwright redirect failed: ${error.message}`);
         return intermediateUrl;
+    } finally {
+        if (browser) await browser.close().catch(() => {});
     }
 }
 
@@ -30,9 +48,6 @@ async function getLatestLibyaNews() {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
             }
         });
-        
-        // Debug: log first 500 chars to see structure
-        console.log('[News] HTML sample:', html.slice(0, 500));
         
         const $ = cheerio.load(html);
         
@@ -56,9 +71,6 @@ async function getLatestLibyaNews() {
         }
         
         if (!headlineElement || !headlineElement.length) {
-            // Log all links for debugging
-            const allLinks = $('a').map((i, el) => $(el).attr('href')).get().slice(0, 10);
-            console.log('[News] First 10 links found:', allLinks);
             throw new Error('No article headlines found with any selector.');
         }
 
@@ -76,7 +88,9 @@ async function getLatestLibyaNews() {
         
         console.log(`[News] Found: "${title}" -> ${intermediateUrl}`);
         
+        // Resolve the redirect to get the final article URL
         const finalUrl = await resolveFinalUrl(intermediateUrl);
+        
         return {
             title,
             url: finalUrl,
