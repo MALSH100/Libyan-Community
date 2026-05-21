@@ -187,12 +187,11 @@ function trend(history, currency, latestValue) {
 function buildRateEmbed(exchangeData, latest, forced = false) {
   const history = exchangeData.history || [];
   const embed = new EmbedBuilder()
-    .setColor(0x1B8F5A)
-    .setTitle('Libyan Black Market Exchange Rate')
-    .setURL(SOURCE_URL)
-    .setDescription(forced ? 'Manual refresh from the configured Facebook source.' : 'Latest hourly update from the configured Facebook source.')
-    .setTimestamp(new Date(latest.scrapedAt || Date.now()))
-    .setFooter({ text: 'Source: Dollar Euro Pound Libya Black Market Exchange Rate' });
+  .setColor(0x1B8F5A)
+  .setTitle('Libyan Black Market Exchange Rate')
+  .setDescription(forced ? 'Manual refresh from the configured source.' : 'Latest hourly update from the configured source.')
+  .setTimestamp(new Date(latest.scrapedAt || Date.now()))
+  .setFooter({ text: 'Live Libyan black market rates • Updated hourly' });
 
   for (const currency of CURRENCIES) {
     const value = latest.rates[currency];
