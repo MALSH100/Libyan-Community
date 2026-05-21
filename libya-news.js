@@ -137,19 +137,42 @@ async function fetchArticleMetadata(articleUrl) {
             args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
         });
         const page = await browser.newPage();
-        await page.goto(articleUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+        // Wait for network idle to ensure all images and meta tags are loaded
+        await page.goto(articleUrl, { waitUntil: 'networkidle', timeout: 30000 });
 
         const metadata = await page.evaluate(() => {
             const getMeta = (name) => {
                 const el = document.querySelector(`meta[property="${name}"], meta[name="${name}"]`);
                 return el ? el.getAttribute('content') : null;
             };
+
+            // Try Open Graph image first
+            let image = getMeta('og:image') || getMeta('twitter:image');
+            if (!image) {
+                // Fallback: find the first large image on the page (width > 200px)
+                const imgs = Array.from(document.querySelectorAll('img'));
+                const largeImg = imgs.find(img => img.width >= 200 || img.naturalWidth >= 200);
+                if (largeImg) image = largeImg.src;
+            }
+
+            // Description fallback
+            let description = getMeta('og:description') || getMeta('description');
+            if (!description) {
+                // Get the first paragraph with meaningful text
+                const firstPara = document.querySelector('p');
+                if (firstPara && firstPara.innerText.trim().length > 50) {
+                    description = firstPara.innerText.trim().slice(0, 200);
+                }
+            }
+
             return {
-                image: getMeta('og:image') || getMeta('twitter:image') || null,
-                description: getMeta('og:description') || getMeta('description') || null,
-                siteName: getMeta('og:site_name') || null,
+                image,
+                description,
+                siteName: getMeta('og:site_name'),
             };
         });
+
+        console.log(`[News] Metadata extracted: image=${metadata.image ? 'yes' : 'no'}, description=${metadata.description ? 'yes' : 'no'}`);
         return metadata;
     } catch (err) {
         console.error(`[News] Failed to fetch metadata: ${err.message}`);
