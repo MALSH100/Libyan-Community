@@ -470,6 +470,7 @@ let _allCommands = null; // reset on each startup — always re-registers
 const getPokemonCommands = require('./pokemon-commands');
 const initYarayt = require('./yarayt');
 const initBlackMarketExchange = require('./black-market-exchange');
+const initLibyaNews = require('./libya-news');
 
 function getAllCommands() {
   if (_allCommands) return _allCommands;
@@ -1958,6 +1959,9 @@ initYarayt({ client, db, saveData, awardLP });
 
 // Libyan Black Market Exchange Rate System
 initBlackMarketExchange({ client, db, saveData });
+
+// Libya News System
+initLibyaNews({ client, db, saveData });
 
 // ─── Login ────────────────────────────────────────────────────────────────────
 
