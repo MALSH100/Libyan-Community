@@ -8,7 +8,7 @@ const SOURCE_URL = 'https://www.newsnow.co.uk/h/World+News/Africa/Libya?type=ln'
 const CHECK_INTERVAL_MS = 60 * 60 * 1000;
 const MAX_HISTORY = 50;
 
-// --- Resolve final URL using Playwright (handles JavaScript redirects and meta refresh) ---
+// --- Resolve final URL using Playwright (handles modern JavaScript redirects) ---
 async function resolveFinalUrl(intermediateUrl) {
     let browser;
     let page;
@@ -19,23 +19,51 @@ async function resolveFinalUrl(intermediateUrl) {
         });
         page = await browser.newPage();
 
-        // Navigate to the intermediate page, but don't wait for networkidle
+        // Navigate to the intermediate page
         await page.goto(intermediateUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
 
-        // Try to get the final URL by waiting for navigation
+        // Strategy 1: Wait for URL to change (polling)
         let finalUrl = null;
         try {
-            // Wait for the page to navigate to a non-newsnow URL
-            await page.waitForNavigation({
-                waitUntil: 'domcontentloaded',
-                timeout: 10000,
-            });
+            await page.waitForFunction(
+                () => window.location.href && !window.location.href.includes('newsnow.co.uk'),
+                { timeout: 20000, polling: 500 }
+            );
             finalUrl = page.url();
-        } catch (navError) {
-            console.log(`[News] No navigation event detected: ${navError.message}`);
+        } catch (e) {
+            console.log(`[News] URL did not change automatically: ${e.message}`);
         }
 
-        // If we didn't get a final URL, try to extract it from a meta refresh tag
+        // Strategy 2: Look for a 'Continue' or 'Go to article' button and click it
+        if (!finalUrl || finalUrl.includes('newsnow.co.uk')) {
+            try {
+                const buttonSelectors = [
+                    'button:has-text("Continue")',
+                    'a:has-text("Continue")',
+                    'button:has-text("Go to article")',
+                    'a:has-text("Go to article")',
+                    '.continue-button',
+                    '.btn-continue'
+                ];
+                let clicked = false;
+                for (const selector of buttonSelectors) {
+                    const button = await page.$(selector);
+                    if (button) {
+                        await button.click();
+                        clicked = true;
+                        break;
+                    }
+                }
+                if (clicked) {
+                    await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 10000 });
+                    finalUrl = page.url();
+                }
+            } catch (clickError) {
+                console.log(`[News] Could not click continue button: ${clickError.message}`);
+            }
+        }
+
+        // Strategy 3: Extract from meta refresh or find any external link
         if (!finalUrl || finalUrl.includes('newsnow.co.uk')) {
             const metaRefresh = await page.evaluate(() => {
                 const meta = document.querySelector('meta[http-equiv="refresh"]');
@@ -49,20 +77,18 @@ async function resolveFinalUrl(intermediateUrl) {
             if (metaRefresh) {
                 finalUrl = metaRefresh;
             } else {
-                // Fallback: try to find any link that might be the article
                 const articleLink = await page.evaluate(() => {
-                    const link = document.querySelector('a[href^="http"]:not([href*="newsnow"])');
-                    return link ? link.href : null;
+                    const links = Array.from(document.querySelectorAll('a[href^="http"]'));
+                    const external = links.find(link => !link.href.includes('newsnow.co.uk'));
+                    return external ? external.href : null;
                 });
-                if (articleLink) {
-                    finalUrl = articleLink;
-                }
+                if (articleLink) finalUrl = articleLink;
             }
         }
 
-        // Validate the final URL
+        // Validate and return the final URL
         if (finalUrl && !finalUrl.includes('newsnow.co.uk')) {
-            console.log(`[News] Resolved redirect: ${finalUrl}`);
+            console.log(`[News] Successfully resolved redirect to: ${finalUrl}`);
             return finalUrl;
         } else {
             console.warn(`[News] Could not resolve redirect, using original URL: ${intermediateUrl}`);
