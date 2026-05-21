@@ -122,8 +122,39 @@ async function resolveFinalUrl(intermediateUrl) {
     } catch (error) {
         console.error(`[News] Playwright redirect failed: ${error.message}`);
         return intermediateUrl;
-    } finally {
+       } finally {
         if (page) await page.close().catch(() => {});
+        if (browser) await browser.close().catch(() => {});
+    }
+}
+
+// --- Fetch article details: image, description, etc. ---
+async function fetchArticleMetadata(articleUrl) {
+    let browser;
+    try {
+        browser = await chromium.launch({
+            headless: true,
+            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+        });
+        const page = await browser.newPage();
+        await page.goto(articleUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+
+        const metadata = await page.evaluate(() => {
+            const getMeta = (name) => {
+                const el = document.querySelector(`meta[property="${name}"], meta[name="${name}"]`);
+                return el ? el.getAttribute('content') : null;
+            };
+            return {
+                image: getMeta('og:image') || getMeta('twitter:image') || null,
+                description: getMeta('og:description') || getMeta('description') || null,
+                siteName: getMeta('og:site_name') || null,
+            };
+        });
+        return metadata;
+    } catch (err) {
+        console.error(`[News] Failed to fetch metadata: ${err.message}`);
+        return { image: null, description: null, siteName: null };
+    } finally {
         if (browser) await browser.close().catch(() => {});
     }
 }
@@ -205,18 +236,26 @@ function getNewsData(db, guildId) {
     return db[guildId].__news;
 }
 
-// --- Post to Discord ---
+// --- Post to Discord with rich embed (including image) ---
 async function postNewsUpdate(client, newsState, latestArticle, forced = false) {
     if (!newsState.channelId) return false;
     const channel = await client.channels.fetch(newsState.channelId).catch(() => null);
     if (!channel || !channel.isTextBased()) return false;
 
+    // Fetch the article's image and description
+    const metadata = await fetchArticleMetadata(latestArticle.url);
+
     const embed = new EmbedBuilder()
-        .setColor(0x00A3E0)
-        .setTitle(`📰 Latest Libya News`)
-        .setDescription(`**[${latestArticle.title}](${latestArticle.url})**`)
+        .setColor(0xE67E22) // Libyan gold/orange
+        .setTitle(`📰 ${latestArticle.title}`)
+        .setURL(latestArticle.url)
+        .setDescription(metadata.description || 'Click the title to read the full article.')
         .setTimestamp(new Date(latestArticle.scrapedAt))
-        .setFooter({ text: 'Source: NewsNow Libya' });
+        .setFooter({ text: `Source: NewsNow Libya${metadata.siteName ? ` · ${metadata.siteName}` : ''}` });
+
+    if (metadata.image) {
+        embed.setImage(metadata.image);
+    }
 
     await channel.send({ embeds: [embed] });
     return true;
