@@ -22,6 +22,9 @@ async function resolveFinalUrl(intermediateUrl) {
         // Navigate to the intermediate page
         await page.goto(intermediateUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
 
+        // Log the initial URL
+        console.log(`[News] Initial URL after navigation: ${page.url()}`);
+
         // Strategy 1: Wait for URL to change (polling)
         let finalUrl = null;
         try {
@@ -30,6 +33,7 @@ async function resolveFinalUrl(intermediateUrl) {
                 { timeout: 20000, polling: 500 }
             );
             finalUrl = page.url();
+            console.log(`[News] URL changed to: ${finalUrl}`);
         } catch (e) {
             console.log(`[News] URL did not change automatically: ${e.message}`);
         }
@@ -42,28 +46,39 @@ async function resolveFinalUrl(intermediateUrl) {
                     'a:has-text("Continue")',
                     'button:has-text("Go to article")',
                     'a:has-text("Go to article")',
+                    'button:has-text("Read full article")',
+                    'a:has-text("Read full article")',
                     '.continue-button',
-                    '.btn-continue'
+                    '.btn-continue',
+                    'a[href*="facebook"]', // Avoid Facebook links
                 ];
                 let clicked = false;
                 for (const selector of buttonSelectors) {
                     const button = await page.$(selector);
                     if (button) {
+                        const href = await button.getAttribute('href');
+                        // Skip Facebook links
+                        if (href && href.includes('facebook.com')) {
+                            console.log(`[News] Skipping Facebook button: ${href}`);
+                            continue;
+                        }
                         await button.click();
                         clicked = true;
+                        console.log(`[News] Clicked button: ${selector}`);
                         break;
                     }
                 }
                 if (clicked) {
                     await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 10000 });
                     finalUrl = page.url();
+                    console.log(`[News] After click, URL: ${finalUrl}`);
                 }
             } catch (clickError) {
                 console.log(`[News] Could not click continue button: ${clickError.message}`);
             }
         }
 
-        // Strategy 3: Extract from meta refresh or find any external link
+        // Strategy 3: Extract from meta refresh or find any external link (excluding Facebook)
         if (!finalUrl || finalUrl.includes('newsnow.co.uk')) {
             const metaRefresh = await page.evaluate(() => {
                 const meta = document.querySelector('meta[http-equiv="refresh"]');
@@ -74,24 +89,33 @@ async function resolveFinalUrl(intermediateUrl) {
                 }
                 return null;
             });
-            if (metaRefresh) {
+            if (metaRefresh && !metaRefresh.includes('facebook.com')) {
                 finalUrl = metaRefresh;
+                console.log(`[News] Found meta refresh URL: ${finalUrl}`);
             } else {
                 const articleLink = await page.evaluate(() => {
                     const links = Array.from(document.querySelectorAll('a[href^="http"]'));
-                    const external = links.find(link => !link.href.includes('newsnow.co.uk'));
+                    // Exclude Facebook, NewsNow, and social media
+                    const external = links.find(link => 
+                        !link.href.includes('newsnow.co.uk') && 
+                        !link.href.includes('facebook.com') &&
+                        !link.href.includes('twitter.com')
+                    );
                     return external ? external.href : null;
                 });
-                if (articleLink) finalUrl = articleLink;
+                if (articleLink) {
+                    finalUrl = articleLink;
+                    console.log(`[News] Found external link: ${finalUrl}`);
+                }
             }
         }
 
         // Validate and return the final URL
-        if (finalUrl && !finalUrl.includes('newsnow.co.uk')) {
+        if (finalUrl && !finalUrl.includes('newsnow.co.uk') && !finalUrl.includes('facebook.com')) {
             console.log(`[News] Successfully resolved redirect to: ${finalUrl}`);
             return finalUrl;
         } else {
-            console.warn(`[News] Could not resolve redirect, using original URL: ${intermediateUrl}`);
+            console.warn(`[News] Could not resolve redirect to an article, using original URL: ${intermediateUrl}`);
             return intermediateUrl;
         }
 
