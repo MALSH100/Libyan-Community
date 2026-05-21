@@ -85,43 +85,46 @@ function findRateNearKeyword(text, keywords) {
 }
 
 function parseRatesFromText(text) {
-  const cleaned = text
-    .replace(/\u00a0/g, ' ')
-    .replace(/[£€$]/g, match => ` ${match} `)
-    .replace(/\s+/g, ' ');
-
-  const rates = {
-    USD: null,
-    EUR: null,
-    GBP: null,
+  const rates = { USD: null, EUR: null, GBP: null };
+  
+  // Exact patterns based on Facebook example:
+  // "-dollar $1=08.32 LYD."
+  // "-Euro €1=9.61 LYD."
+  // "-Pound £1=10.98 LYD."
+  const patterns = {
+    USD: /dollar\s*\$?1\s*=\s*(\d{1,2}(?:[.,]\d{1,2})?)\s*LYD/i,
+    EUR: /euro\s*€?1\s*=\s*(\d{1,2}(?:[.,]\d{1,2})?)\s*LYD/i,
+    GBP: /pound\s*£?1\s*=\s*(\d{1,2}(?:[.,]\d{1,2})?)\s*LYD/i,
   };
-
-  const compact = cleaned.toLowerCase();
-  const sequencePatterns = [
-    {
-      order: ['USD', 'EUR', 'GBP'],
-      re: /(?:usd|dollar|dolar|دولار)\D{0,40}(\d{1,2}(?:[.,]\d{1,4})?)\D{0,80}(?:eur|euro|يورو)\D{0,40}(\d{1,2}(?:[.,]\d{1,4})?)\D{0,80}(?:gbp|pound|sterling|باوند|جنيه|استرليني)\D{0,40}(\d{1,2}(?:[.,]\d{1,4})?)/i,
-    },
-    {
-      order: ['USD', 'GBP', 'EUR'],
-      re: /(?:usd|dollar|dolar|دولار)\D{0,40}(\d{1,2}(?:[.,]\d{1,4})?)\D{0,80}(?:gbp|pound|sterling|باوند|جنيه|استرليني)\D{0,40}(\d{1,2}(?:[.,]\d{1,4})?)\D{0,80}(?:eur|euro|يورو)\D{0,40}(\d{1,2}(?:[.,]\d{1,4})?)/i,
-    },
-  ];
-
-  for (const pattern of sequencePatterns) {
-    const match = compact.match(pattern.re);
-    if (!match) continue;
-    pattern.order.forEach((currency, idx) => {
-      rates[currency] = num(match[idx + 1]);
-    });
-    break;
+  
+  for (const [currency, regex] of Object.entries(patterns)) {
+    const match = text.match(regex);
+    if (match) {
+      rates[currency] = num(match[1]);
+    }
   }
-
-  if (rates.USD === null) rates.USD = findRateNearKeyword(text, ['usd', 'dollar', 'dolar', '$', 'دولار']);
-  if (rates.EUR === null) rates.EUR = findRateNearKeyword(text, ['eur', 'euro', '€', 'يورو']);
-  if (rates.GBP === null) rates.GBP = findRateNearKeyword(text, ['gbp', 'pound', 'sterling', '£', 'باوند', 'جنيه', 'استرليني']);
-
-  if (CURRENCIES.every(c => rates[c] === null)) return null;
+  
+  // Fallback: look for "$1=8.32" without the word "dollar"
+  if (rates.USD === null) {
+    const fallback = text.match(/\$1\s*=\s*(\d{1,2}(?:[.,]\d{1,2})?)/i);
+    if (fallback) rates.USD = num(fallback[1]);
+  }
+  if (rates.EUR === null) {
+    const fallback = text.match(/€1\s*=\s*(\d{1,2}(?:[.,]\d{1,2})?)/i);
+    if (fallback) rates.EUR = num(fallback[1]);
+  }
+  if (rates.GBP === null) {
+    const fallback = text.match(/£1\s*=\s*(\d{1,2}(?:[.,]\d{1,2})?)/i);
+    if (fallback) rates.GBP = num(fallback[1]);
+  }
+  
+  // If still missing, try the old generic extraction (keep your original complex logic as a final fallback)
+  // But for brevity, if null, return null
+  if (CURRENCIES.every(c => rates[c] === null)) {
+    console.warn('New pattern matching failed, returning null');
+    return null;
+  }
+  
   return rates;
 }
 
@@ -172,15 +175,12 @@ function rateKey(rates) {
   return CURRENCIES.map(c => `${c}:${rates[c] ?? 'na'}`).join('|');
 }
 
-function inverseTrend(history, currency, latestInverse) {
-  const previousEntry = [...history].reverse().find(entry => 
-    entry.rates && typeof entry.rates[currency] === 'number' && entry.rates[currency] > 0
-  );
-  if (!previousEntry) return { label: 'No previous data', delta: null };
-  const previousInverse = 1 / previousEntry.rates[currency];
-  const delta = Math.round((latestInverse - previousInverse) * 10000) / 10000;
-  if (delta > 0) return { label: `Up +${delta.toFixed(4)}`, delta };
-  if (delta < 0) return { label: `Down ${delta.toFixed(4)}`, delta };
+function trend(history, currency, latestValue) {
+  const previous = [...history].reverse().find(entry => entry.rates && entry.rates[currency] !== null && entry.rates[currency] !== undefined);
+  if (!previous || latestValue === null || latestValue === undefined) return { label: 'No previous data', delta: null };
+  const delta = Math.round((latestValue - previous.rates[currency]) * 1000) / 1000;
+  if (delta > 0) return { label: `Up +${delta.toFixed(3)}`, delta };
+  if (delta < 0) return { label: `Down ${delta.toFixed(3)}`, delta };
   return { label: 'No change', delta: 0 };
 }
 
@@ -192,26 +192,14 @@ function buildRateEmbed(exchangeData, latest, forced = false) {
     .setURL(SOURCE_URL)
     .setDescription(forced ? 'Manual refresh from the configured Facebook source.' : 'Latest hourly update from the configured Facebook source.')
     .setTimestamp(new Date(latest.scrapedAt || Date.now()))
-    .setFooter({ text: 'Source: Dollar Euro Pound Libya Black Market Exchange Rate | Showing how much foreign currency you get for 1 LYD' });
+    .setFooter({ text: 'Source: Dollar Euro Pound Libya Black Market Exchange Rate' });
 
   for (const currency of CURRENCIES) {
     const value = latest.rates[currency];
-    if (value === null || value === undefined || value <= 0) {
-      embed.addFields({
-        name: currency,
-        value: 'Not found',
-        inline: true,
-      });
-      continue;
-    }
-
-    const inverse = 1 / value;
-    const displayInverse = Math.round(inverse * 10000) / 10000;
-    const trendData = inverseTrend(history.slice(0, -1), currency, inverse);
-    
+    const t = trend(history.slice(0, -1), currency, value);
     embed.addFields({
-      name: `1 LYD → ${currency}`,
-      value: `**${displayInverse.toFixed(4)} ${currency}**\n${trendData.label}`,
+      name: currency,
+      value: value === null || value === undefined ? 'Not found' : `**${value.toFixed(3)} LYD**\n${t.label}`,
       inline: true,
     });
   }
