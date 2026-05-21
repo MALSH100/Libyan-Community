@@ -128,8 +128,8 @@ async function resolveFinalUrl(intermediateUrl) {
     }
 }
 
-// --- Fetch article details: image, description, etc. ---
-async function fetchArticleMetadata(articleUrl) {
+// --- Fetch article details: image, description, etc. (with retry and better timeout handling) ---
+async function fetchArticleMetadata(articleUrl, retries = 2) {
     let browser;
     try {
         browser = await chromium.launch({
@@ -137,8 +137,18 @@ async function fetchArticleMetadata(articleUrl) {
             args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
         });
         const page = await browser.newPage();
-        // Wait for network idle to ensure all images and meta tags are loaded
-        await page.goto(articleUrl, { waitUntil: 'networkidle', timeout: 30000 });
+        
+        // Use 'domcontentloaded' instead of 'networkidle' – much faster and less strict
+        // Also set a generous timeout but allow the page to load basic content
+        await page.goto(articleUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
+        
+        // Wait a bit for lazy-loaded images and meta tags (but don't wait forever)
+        await page.waitForTimeout(3000);
+        
+        // Additional wait for any dynamic content that might insert meta tags
+        await page.waitForFunction(() => {
+            return document.querySelector('meta[property="og:image"], meta[name="twitter:image"], img');
+        }, { timeout: 5000 }).catch(() => console.log(`[News] No image-related elements found quickly`));
 
         const metadata = await page.evaluate(() => {
             const getMeta = (name) => {
@@ -149,9 +159,9 @@ async function fetchArticleMetadata(articleUrl) {
             // Try Open Graph image first
             let image = getMeta('og:image') || getMeta('twitter:image');
             if (!image) {
-                // Fallback: find the first large image on the page (width > 200px)
+                // Fallback: find the first large image on the page (width > 100px to catch more)
                 const imgs = Array.from(document.querySelectorAll('img'));
-                const largeImg = imgs.find(img => img.width >= 200 || img.naturalWidth >= 200);
+                const largeImg = imgs.find(img => (img.width >= 100 || img.naturalWidth >= 100) && img.src && !img.src.includes('logo'));
                 if (largeImg) image = largeImg.src;
             }
 
@@ -160,8 +170,15 @@ async function fetchArticleMetadata(articleUrl) {
             if (!description) {
                 // Get the first paragraph with meaningful text
                 const firstPara = document.querySelector('p');
-                if (firstPara && firstPara.innerText.trim().length > 50) {
+                if (firstPara && firstPara.innerText.trim().length > 30) {
                     description = firstPara.innerText.trim().slice(0, 200);
+                } else {
+                    // fallback to any text from the article body
+                    const articleText = document.querySelector('article, .content, main, body');
+                    if (articleText) {
+                        const text = articleText.innerText.trim().slice(0, 200);
+                        if (text.length > 30) description = text;
+                    }
                 }
             }
 
@@ -175,7 +192,12 @@ async function fetchArticleMetadata(articleUrl) {
         console.log(`[News] Metadata extracted: image=${metadata.image ? 'yes' : 'no'}, description=${metadata.description ? 'yes' : 'no'}`);
         return metadata;
     } catch (err) {
-        console.error(`[News] Failed to fetch metadata: ${err.message}`);
+        console.error(`[News] Failed to fetch metadata (attempt ${3 - retries}): ${err.message}`);
+        if (retries > 0) {
+            console.log(`[News] Retrying...`);
+            if (browser) await browser.close().catch(() => {});
+            return fetchArticleMetadata(articleUrl, retries - 1);
+        }
         return { image: null, description: null, siteName: null };
     } finally {
         if (browser) await browser.close().catch(() => {});
