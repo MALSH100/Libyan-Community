@@ -421,7 +421,9 @@ module.exports = function initBlackMarketExchange({ client, db, saveData }) {
       }
     } catch (err) {
       console.error(`Exchange command failed (${commandName}):`, err);
-      return safeReply(interaction, { content: `Exchange feature error: ${err.message}`, flags: 64 });
+      // Truncate error message — Discord limit is 2000 chars
+      const shortErr = err.message?.slice(0, 200) || 'Unknown error';
+      return safeReply(interaction, { content: `❌ Exchange feature error: ${shortErr}`, flags: 64 });
     }
   });
 };
