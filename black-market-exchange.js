@@ -199,7 +199,7 @@ function buildRateEmbed(exchangeData, latest, forced = false) {
     const t = trend(history.slice(0, -1), currency, value);
     embed.addFields({
       name: currency,
-      value: value === null || value === undefined ? 'Not found' : `**${value.toFixed(3)} LYD**\n${t.label}`,
+      value: value === null || value === undefined ? 'Not found' : `**${value.toFixed(2)} LYD**\n${t.label}`,
       inline: true,
     });
   }
@@ -303,10 +303,16 @@ async function postUpdate(client, guildId, exchangeData, latest, forced = false)
   if (!channel || !channel.isTextBased()) return false;
 
   const files = [];
-  if ((exchangeData.history || []).length >= 2) files.push(chartAttachment(exchangeData));
+  let embed = buildRateEmbed(exchangeData, latest, forced);
+  
+  if ((exchangeData.history || []).length >= 2) {
+    const chartFile = chartAttachment(exchangeData);
+    files.push(chartFile);
+    embed.setImage('attachment://libya-exchange-chart.svg');
+  }
 
   await channel.send({
-    embeds: [buildRateEmbed(exchangeData, latest, forced)],
+    embeds: [embed],
     files,
   });
   return true;
