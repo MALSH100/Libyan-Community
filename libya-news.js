@@ -22,19 +22,60 @@ async function resolveFinalUrl(intermediateUrl) {
     }
 }
 
-// --- Scrape the latest Libya news ---
+// --- Scrape the latest Libya news with multiple selectors ---
 async function getLatestLibyaNews() {
     try {
-        const { data: html } = await axios.get(SOURCE_URL);
+        const { data: html } = await axios.get(SOURCE_URL, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            }
+        });
+        
+        // Debug: log first 500 chars to see structure
+        console.log('[News] HTML sample:', html.slice(0, 500));
+        
         const $ = cheerio.load(html);
+        
+        // Try multiple selectors in order of specificity
+        let headlineElement = null;
+        let selectors = [
+            'article .article-card__headline',
+            '.article-card__headline',
+            'a[href*="/A/"]',
+            '.article-title',
+            'h2 a',
+            '.list-layout a'
+        ];
+        
+        for (const selector of selectors) {
+            headlineElement = $(selector).first();
+            if (headlineElement.length && headlineElement.text().trim()) {
+                console.log(`[News] Found article with selector: ${selector}`);
+                break;
+            }
+        }
+        
+        if (!headlineElement || !headlineElement.length) {
+            // Log all links for debugging
+            const allLinks = $('a').map((i, el) => $(el).attr('href')).get().slice(0, 10);
+            console.log('[News] First 10 links found:', allLinks);
+            throw new Error('No article headlines found with any selector.');
+        }
 
-        const firstHeadline = $('article .article-card__headline').first();
-        if (!firstHeadline.length) throw new Error('No article headlines found.');
-
-        const title = firstHeadline.find('.article-title').text().trim();
-        const intermediateUrl = firstHeadline.attr('href');
-        if (!title || !intermediateUrl) throw new Error('Missing title or link.');
-
+        let title = headlineElement.text().trim();
+        let intermediateUrl = headlineElement.attr('href');
+        
+        // If title is empty, try deeper
+        if (!title) {
+            title = headlineElement.find('.article-title').text().trim() || headlineElement.text().trim();
+        }
+        
+        if (!title || !intermediateUrl) {
+            throw new Error('Missing title or link.');
+        }
+        
+        console.log(`[News] Found: "${title}" -> ${intermediateUrl}`);
+        
         const finalUrl = await resolveFinalUrl(intermediateUrl);
         return {
             title,
@@ -62,7 +103,7 @@ function getNewsData(db, guildId) {
     return db[guildId].__news;
 }
 
-// --- Post to Discord (receives newsState directly) ---
+// --- Post to Discord ---
 async function postNewsUpdate(client, newsState, latestArticle, forced = false) {
     if (!newsState.channelId) return false;
     const channel = await client.channels.fetch(newsState.channelId).catch(() => null);
@@ -139,7 +180,7 @@ const newsCommands = [
         .setDMPermission(false),
 ].map(cmd => cmd.toJSON());
 
-// --- Module initialisation (called from index.js) ---
+// --- Module initialisation ---
 module.exports = function initLibyaNews({ client, db, saveData }) {
     const timers = new Map();
 
