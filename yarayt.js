@@ -566,6 +566,30 @@ async function sendPreAnnouncement(guild, yrData, startTime) {
       return interaction.editReply({ content: '✅ Ya Rayt round started!' });
     }
 
+    // ── /yarayt-set-channel (admin only) ────────────────────────────────────
+    if (commandName === 'yarayt-set-channel') {
+      if (!interaction.memberPermissions?.has('Administrator')) {
+        return interaction.reply({ content: '❌ Admin only.', flags: 64 });
+      }
+      await interaction.deferReply({ flags: 64 });
+      
+      const channel = interaction.options.getChannel('channel');
+      if (!channel || !channel.isTextBased()) {
+        return interaction.editReply({ content: '❌ Please choose a text channel.', flags: 64 });
+      }
+      
+      const yrData = getYaraytData(db, guild.id);
+      yrData.channelId = channel.id;
+      saveData(guild.id);
+      
+      await interaction.editReply({
+        content: `✅ Ya Rayt channel set to ${channel}. New rounds will be played there!`,
+        flags: 64,
+      });
+    }
+
+    // ── Leaderboards ────────────────────────────────────────────────────────
+
     // ── Leaderboards ────────────────────────────────────────────────────────
     const leaderboardMap = {
       'top-yarayt':            { key: 'total',     title: 'Top Ya Rayt — All Reactions',       emoji: '⭐' },
