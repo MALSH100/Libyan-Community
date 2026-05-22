@@ -199,7 +199,7 @@ async function startRound(guild, forced = false) {
     const yrData = getYaraytData(db, guild.id);
     if (!yrData.currentRound) return;
 
-    const channel  = getYaraytChannel(guild);
+    const channel  = getYaraytChannel(guild, yrData);
     const wishes   = yrData.currentRound.wishes;
     const round    = yrData.currentRound;
 
@@ -424,13 +424,9 @@ async function sendPreAnnouncement(guild, yrData, startTime) {
       const guild = msg.guild;
       if (!guild) return;
 
-      // Only care about the Ya Rayt channel
-      const channelId = process.env.YARAYT_CHANNEL_ID;
-      if (!channelId || msg.channelId !== channelId) return;
-
-      // Only care about messages that are active Ya Rayt wishes
+            // Only care about messages that are active Ya Rayt wishes
       const yrData = getYaraytData(db, guild.id);
-      if (!yrData.currentRound) return;
+      if (!yrData.channelId || msg.channelId !== yrData.channelId) return;
 
       const wishEntry = Object.values(yrData.currentRound.wishes)
         .find(w => w.messageId === msg.id);
@@ -519,7 +515,7 @@ async function sendPreAnnouncement(guild, yrData, startTime) {
         return interaction.reply({ content: '❌ Your wish must be 280 characters or fewer.', flags: 64 });
       }
 
-      const channel = getYaraytChannel(guild);
+           const channel = getYaraytChannel(guild, yrData);
       if (!channel) {
         return interaction.reply({ content: '❌ Ya Rayt channel is not configured. Contact an admin.', flags: 64 });
       }
