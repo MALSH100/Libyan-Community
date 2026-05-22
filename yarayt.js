@@ -67,6 +67,12 @@ const yaraytCommands = [
     .setDescription('Force start a Ya Rayt round immediately — Admin only')
     .setDMPermission(false),
 
+  new SlashCommandBuilder()
+    .setName('yarayt-set-channel')
+    .setDescription('Set the channel where Ya Rayt rounds will be played (Admin only)')
+    .addChannelOption(o => o.setName('channel').setDescription('The text channel for Ya Rayt').setRequired(true))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .setDMPermission(false),
 ].map(c => c.toJSON());
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -75,6 +81,7 @@ function getYaraytData(db, guildId) {
   if (!db[guildId]) db[guildId] = {};
   if (!db[guildId].__yarayt) {
     db[guildId].__yarayt = {
+      channelId:    null,  // ← new: stored channel ID
       currentRound: null,  // { startedAt, wishes: { userId: { wish, messageId, submittedAt } } }
       users:        {},    // { userId: { relatable, funny, wholesome, bold, total, rounds } }
       lastRoundAt:  0,     // timestamp of last round start
@@ -96,17 +103,17 @@ function libyaTime() {
 }
 
 // Get next 6PM Libya time (UTC+2) from now — skips 2 days between rounds
-function nextRoundStart(lastRoundAt) {
-  const now        = Date.now();
-  const TWO_DAYS   = 2 * 24 * 60 * 60 * 1000;
-  const minNext    = Math.max(now, lastRoundAt + TWO_DAYS);
-
-  // Find next 6PM UTC+2 after minNext
-  const d     = new Date(minNext);
-  // Set to 6PM Libya (4PM UTC)
-  let target  = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 16, 0, 0, 0));
-  if (target.getTime() <= minNext) target.setUTCDate(target.getUTCDate() + 1);
-  return target.getTime();
+function getNext6PM() {
+  const now = new Date();
+  // Current time in Libya (UTC+2)
+  const libyaNow = new Date(now.getTime() + 2 * 60 * 60 * 1000);
+  let target = new Date(libyaNow);
+  target.setUTCHours(16, 0, 0, 0); // 6PM Libya = 16:00 UTC
+  if (target <= libyaNow) {
+    target.setUTCDate(target.getUTCDate() + 1);
+  }
+  // Convert back to UTC timestamp
+  return target.getTime() - (2 * 60 * 60 * 1000);
 }
 
 // Get 8PM Libya time on the same day as a given timestamp
@@ -132,65 +139,64 @@ module.exports = function initYarayt({ client, db, saveData, awardLP }) {
 
   // ─── Get the Ya Rayt channel ───────────────────────────────────────────────
 
-  function getYaraytChannel(guild) {
-    const channelId = process.env.YARAYT_CHANNEL_ID;
-    if (!channelId) return null;
-    return guild.channels.cache.get(channelId) || null;
-  }
+function getYaraytChannel(guild, yrData) {
+  if (!yrData.channelId) return null;
+  return guild.channels.cache.get(yrData.channelId) || null;
+}
 
   // ─── Start a round ─────────────────────────────────────────────────────────
 
-  async function startRound(guild, forced = false) {
-    const yrData = getYaraytData(db, guild.id);
+async function startRound(guild, forced = false) {
+  const yrData = getYaraytData(db, guild.id);
 
-    // Don't start if a round is already active
-    if (yrData.currentRound) {
-      if (!forced) return;
-      // If forced, close the existing round first
-      await closeRound(guild, true);
-    }
-
-    const channel = getYaraytChannel(guild);
-    if (!channel) {
-      console.warn('⚠️ Ya Rayt channel not set. Add YARAYT_CHANNEL_ID to Railway variables.');
-      return;
-    }
-
-    yrData.currentRound = {
-      startedAt: Date.now(),
-      wishes:    {},
-    };
-    yrData.lastRoundAt = Date.now();
-    saveData(guild.id);
-
-    const embed = new EmbedBuilder()
-      .setColor(0x00AA44)
-      .setTitle('🇱🇾 يا ريت... Ya Rayt!')
-      .setDescription(
-        'A new round has started! What do you wish for?\n\n' +
-        '**يا ريت** (Ya Rayt) means **"I wish"** in Libyan Arabic.\n\n' +
-        'Use `/yarayt <your wish>` to submit your wish.\n' +
-        '📌 **One wish per person per round — locked in, no edits!**\n\n' +
-        'Reactions on each wish:\n' +
-        '🇱🇾 Relatable · 😂 Funny · ❤️ Wholesome · 🔥 Bold\n\n' +
-        '⏰ Round closes at **8:00 PM Libya time**.'
-      )
-      .setFooter({ text: 'Earn Libyan Points (LP) for every reaction you receive!' });
-
-    await channel.send({ embeds: [embed] }).catch(e => console.error('Could not send Ya Rayt start message:', e.message));
-
-    console.log(`🇱🇾 Ya Rayt round started in ${guild.name}`);
-
-    // Schedule close at 8PM Libya time
-    const closeAt = forced ? Date.now() + 2 * 60 * 60 * 1000 : roundEndTime(yrData.lastRoundAt);
-    const msUntilClose = Math.max(1000, closeAt - Date.now());
-
-    if (closeTimer) clearTimeout(closeTimer);
-    closeTimer = setTimeout(() => closeRound(guild, false), msUntilClose);
-
-    // Schedule next round
-    scheduleNextRound(guild, yrData);
+  // Don't start if a round is already active
+  if (yrData.currentRound) {
+    if (!forced) return;
+    // If forced, close the existing round first
+    await closeRound(guild, true);
   }
+
+  const channel = getYaraytChannel(guild, yrData);
+  if (!channel) {
+    console.warn(`⚠️ Ya Rayt channel not set for guild ${guild.id}. Use /yarayt-set-channel.`);
+    return;
+  }
+
+  yrData.currentRound = {
+    startedAt: Date.now(),
+    wishes:    {},
+  };
+  yrData.lastRoundAt = Date.now();
+  saveData(guild.id);
+
+  const embed = new EmbedBuilder()
+    .setColor(0x00AA44)
+    .setTitle('🇱🇾 يا ريت... Ya Rayt!')
+    .setDescription(
+      'A new round has started! What do you wish for?\n\n' +
+      '**يا ريت** (Ya Rayt) means **"I wish"** in Libyan Arabic.\n\n' +
+      'Use `/yarayt <your wish>` to submit your wish.\n' +
+      '📌 **One wish per person per round — locked in, no edits!**\n\n' +
+      'Reactions on each wish:\n' +
+      '🇱🇾 Relatable · 😂 Funny · ❤️ Wholesome · 🔥 Bold\n\n' +
+      '⏰ Round closes at **8:00 PM Libya time**.'
+    )
+    .setFooter({ text: 'Earn Libyan Points (LP) for every reaction you receive!' });
+
+  await channel.send({ embeds: [embed] }).catch(e => console.error('Could not send Ya Rayt start message:', e.message));
+
+  console.log(`🇱🇾 Ya Rayt round started in ${guild.name}`);
+
+  // Schedule close at 8PM Libya time
+  const closeAt = forced ? Date.now() + 2 * 60 * 60 * 1000 : roundEndTime(yrData.lastRoundAt);
+  const msUntilClose = Math.max(1000, closeAt - Date.now());
+
+  if (closeTimer) clearTimeout(closeTimer);
+  closeTimer = setTimeout(() => closeRound(guild, false), msUntilClose);
+
+  // Schedule next round (daily)
+  scheduleNextRound(guild, yrData);
+}
 
   // ─── Close a round and post results ────────────────────────────────────────
 
@@ -280,13 +286,65 @@ module.exports = function initYarayt({ client, db, saveData, awardLP }) {
 
   // ─── Schedule next round ───────────────────────────────────────────────────
 
-  function scheduleNextRound(guild, yrData) {
-    if (roundTimer) clearTimeout(roundTimer);
-    const nextAt  = nextRoundStart(yrData.lastRoundAt || 0);
-    const msUntil = Math.max(1000, nextAt - Date.now());
-    console.log(`🇱🇾 Next Ya Rayt round scheduled in ${Math.round(msUntil / 1000 / 60)} minutes`);
-    roundTimer = setTimeout(() => startRound(guild, false), msUntil);
+async function scheduleNextRound(guild, yrData) {
+  if (roundTimer) clearTimeout(roundTimer);
+  const nextStart = getNext6PM(); // timestamp (UTC)
+  const msUntilStart = Math.max(1000, nextStart - Date.now());
+
+  // Schedule the pre‑announcement 5 minutes before start
+  const preAnnounceTime = nextStart - 5 * 60 * 1000;
+  const msUntilPre = Math.max(0, preAnnounceTime - Date.now());
+
+  if (msUntilPre > 0) {
+    setTimeout(() => {
+      sendPreAnnouncement(guild, yrData, nextStart);
+    }, msUntilPre);
+  } else {
+    // If we are already inside the 5‑minute window, send immediately
+    sendPreAnnouncement(guild, yrData, nextStart);
   }
+
+  console.log(`🇱🇾 Next Ya Rayt round scheduled in ${Math.round(msUntilStart / 1000 / 60)} minutes`);
+  roundTimer = setTimeout(() => startRound(guild, false), msUntilStart);
+}
+
+async function sendPreAnnouncement(guild, yrData, startTime) {
+  const channel = getYaraytChannel(guild, yrData);
+  if (!channel) return;
+
+  const startDate = new Date(startTime);
+  const endDate = new Date(startTime + 2 * 60 * 60 * 1000); // ends at 8PM Libya
+
+  // Send a message
+  const embed = new EmbedBuilder()
+    .setColor(0xFFA500)
+    .setTitle('⏰ Ya Rayt Round Starting Soon!')
+    .setDescription(
+      `The next Ya Rayt round begins in **5 minutes**!\n\n` +
+      `**Starts:** <t:${Math.floor(startTime / 1000)}:F>\n` +
+      `**Ends:** <t:${Math.floor(endDate.getTime() / 1000)}:F>\n\n` +
+      `Get your wishes ready — use \`/yarayt\` once the round starts!`
+    )
+    .setFooter({ text: 'Daily at 6PM Libya time' });
+
+  await channel.send({ embeds: [embed] }).catch(e => console.error('Pre‑announcement failed:', e.message));
+
+  // Create a Discord scheduled event for the round
+  try {
+    await guild.scheduledEvents.create({
+      name: '🇱🇾 Ya Rayt – I Wish!',
+      scheduledStartTime: startDate,
+      scheduledEndTime: endDate,
+      privacyLevel: 2,      // GUILD_ONLY
+      entityType: 3,        // EXTERNAL (with channel link)
+      entityMetadata: { location: `#${channel.name}` },
+      description: 'Submit your wish (يا ريت) and earn reactions! Round runs from 6PM to 8PM Libya time.',
+    });
+    console.log(`✅ Discord event created for Ya Rayt round`);
+  } catch (err) {
+    console.error('Failed to create Discord event:', err.message);
+  }
+}
 
   // ─── Leaderboard builder ───────────────────────────────────────────────────
 
