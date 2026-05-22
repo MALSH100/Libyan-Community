@@ -12,12 +12,7 @@
 // - Channel set via YARAYT_CHANNEL_ID environment variable
 // ═══════════════════════════════════════════════════════════════════════════════
 
-const {
-  SlashCommandBuilder,
-  EmbedBuilder,
-  REST,
-  Routes,
-} = require('discord.js');
+const { SlashCommandBuilder, EmbedBuilder, REST, Routes, PermissionFlagsBits } = require('discord.js');
 
 // ─── Reaction definitions ─────────────────────────────────────────────────────
 
