@@ -472,7 +472,7 @@ async function sendPreAnnouncement(guild, yrData, startTime) {
     if (!interaction.isChatInputCommand()) return;
     if (!interaction.guild) return;
 
-    const yaraytCommands = ['yarayt','top-yarayt','top-relatable-yarayt','top-funny-yarayt','top-wholesome-yarayt','top-bold-yarayt','yarayt-start'];
+       const yaraytCommands = ['yarayt','top-yarayt','top-relatable-yarayt','top-funny-yarayt','top-wholesome-yarayt','top-bold-yarayt','yarayt-start','yarayt-set-channel'];
     if (!yaraytCommands.includes(interaction.commandName)) return;
 
     const { commandName, user, guild } = interaction;
