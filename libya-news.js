@@ -22,23 +22,19 @@ async function resolveFinalUrl(intermediateUrl) {
         // Navigate to the intermediate page
         await page.goto(intermediateUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
 
-        // Log the initial URL
-        console.log(`[News] Initial URL after navigation: ${page.url()}`);
-
         // Strategy 1: Wait for URL to change (polling)
         let finalUrl = null;
         try {
             await page.waitForFunction(
                 () => window.location.href && !window.location.href.includes('newsnow.co.uk'),
-                { timeout: 20000, polling: 500 }
+                { timeout: 30000, polling: 500 }
             );
             finalUrl = page.url();
-            console.log(`[News] URL changed to: ${finalUrl}`);
         } catch (e) {
             console.log(`[News] URL did not change automatically: ${e.message}`);
         }
 
-        // Strategy 2: Look for a 'Continue' or 'Go to article' button and click it
+        // Strategy 2: Look for a 'Continue' button and click it (with longer timeout)
         if (!finalUrl || finalUrl.includes('newsnow.co.uk')) {
             try {
                 const buttonSelectors = [
@@ -46,39 +42,30 @@ async function resolveFinalUrl(intermediateUrl) {
                     'a:has-text("Continue")',
                     'button:has-text("Go to article")',
                     'a:has-text("Go to article")',
-                    'button:has-text("Read full article")',
-                    'a:has-text("Read full article")',
                     '.continue-button',
                     '.btn-continue',
-                    'a[href*="facebook"]', // Avoid Facebook links
+                    'a[href*="/A/"]', // sometimes the intermediate link itself is the continue button
                 ];
                 let clicked = false;
                 for (const selector of buttonSelectors) {
                     const button = await page.$(selector);
                     if (button) {
-                        const href = await button.getAttribute('href');
-                        // Skip Facebook links
-                        if (href && href.includes('facebook.com')) {
-                            console.log(`[News] Skipping Facebook button: ${href}`);
-                            continue;
-                        }
                         await button.click();
                         clicked = true;
-                        console.log(`[News] Clicked button: ${selector}`);
                         break;
                     }
                 }
                 if (clicked) {
-                    await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 10000 });
+                    // Increase timeout to 20 seconds for the navigation to complete
+                    await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20000 });
                     finalUrl = page.url();
-                    console.log(`[News] After click, URL: ${finalUrl}`);
                 }
             } catch (clickError) {
                 console.log(`[News] Could not click continue button: ${clickError.message}`);
             }
         }
 
-        // Strategy 3: Extract from meta refresh or find any external link (excluding Facebook)
+        // Strategy 3: Extract from meta refresh or find a SMART external link (not homepage)
         if (!finalUrl || finalUrl.includes('newsnow.co.uk')) {
             const metaRefresh = await page.evaluate(() => {
                 const meta = document.querySelector('meta[http-equiv="refresh"]');
@@ -89,40 +76,43 @@ async function resolveFinalUrl(intermediateUrl) {
                 }
                 return null;
             });
-            if (metaRefresh && !metaRefresh.includes('facebook.com')) {
+            if (metaRefresh) {
                 finalUrl = metaRefresh;
-                console.log(`[News] Found meta refresh URL: ${finalUrl}`);
             } else {
+                // Smarter fallback: find a link that looks like an article (not just domain root)
                 const articleLink = await page.evaluate(() => {
                     const links = Array.from(document.querySelectorAll('a[href^="http"]'));
-                    // Exclude Facebook, NewsNow, and social media
-                    const external = links.find(link => 
-                        !link.href.includes('newsnow.co.uk') && 
-                        !link.href.includes('facebook.com') &&
-                        !link.href.includes('twitter.com')
-                    );
+                    // Exclude links that are just the domain root (e.g., https://en.minbarlibya.org/ )
+                    const validLinks = links.filter(link => {
+                        const href = link.href;
+                        // Count slashes after domain – if only 3 slashes (https://domain/ ) it's the homepage
+                        const slashCount = (href.match(/\//g) || []).length;
+                        // Also exclude links with 'newsnow'
+                        return !href.includes('newsnow.co.uk') && slashCount >= 4;
+                    });
+                    // If no article-like link, fall back to any external link
+                    if (validLinks.length) return validLinks[0].href;
+                    const external = links.find(link => !link.href.includes('newsnow.co.uk'));
                     return external ? external.href : null;
                 });
-                if (articleLink) {
-                    finalUrl = articleLink;
-                    console.log(`[News] Found external link: ${finalUrl}`);
-                }
+                if (articleLink) finalUrl = articleLink;
+                else console.warn(`[News] No external link found`);
             }
         }
 
         // Validate and return the final URL
-        if (finalUrl && !finalUrl.includes('newsnow.co.uk') && !finalUrl.includes('facebook.com')) {
+        if (finalUrl && !finalUrl.includes('newsnow.co.uk')) {
             console.log(`[News] Successfully resolved redirect to: ${finalUrl}`);
             return finalUrl;
         } else {
-            console.warn(`[News] Could not resolve redirect to an article, using original URL: ${intermediateUrl}`);
+            console.warn(`[News] Could not resolve redirect, using original URL: ${intermediateUrl}`);
             return intermediateUrl;
         }
 
     } catch (error) {
         console.error(`[News] Playwright redirect failed: ${error.message}`);
         return intermediateUrl;
-       } finally {
+    } finally {
         if (page) await page.close().catch(() => {});
         if (browser) await browser.close().catch(() => {});
     }
