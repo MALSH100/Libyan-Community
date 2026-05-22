@@ -79,20 +79,63 @@ async function resolveFinalUrl(intermediateUrl) {
             if (metaRefresh) {
                 finalUrl = metaRefresh;
             } else {
-                // Smarter fallback: find a link that looks like an article (not just domain root)
+                // Smarter fallback: find a link that looks like a real article (not homepage, category, or tag page)
                 const articleLink = await page.evaluate(() => {
                     const links = Array.from(document.querySelectorAll('a[href^="http"]'));
-                    // Exclude links that are just the domain root (e.g., https://en.minbarlibya.org/ )
-                    const validLinks = links.filter(link => {
+                    
+                    // Helper: check if a URL looks like an article (not a category, tag, author, or homepage)
+                    function isArticleUrl(url) {
+                        try {
+                            const urlObj = new URL(url);
+                            const path = urlObj.pathname;
+                            // Exclude homepage (just '/')
+                            if (path === '/' || path === '') return false;
+                            // Exclude common non-article patterns
+                            const excludePatterns = [
+                                '/category/', '/tag/', '/author/', '/archive/', 
+                                '/page/', '/search', '/opinions/', '/news/category'
+                            ];
+                            for (const pattern of excludePatterns) {
+                                if (path.toLowerCase().includes(pattern)) return false;
+                            }
+                            // Prefer paths that contain a 4-digit year (e.g., /2026/)
+                            if (/\/(19|20)\d{2}\//.test(path)) return true;
+                            // Prefer paths that are longer than 30 characters and have multiple segments
+                            if (path.length > 30 && path.split('/').length >= 3) return true;
+                            return false;
+                        } catch { return false; }
+                    }
+                    
+                    // First, try to get canonical URL or og:url meta tags
+                    const canonical = document.querySelector('link[rel="canonical"]');
+                    if (canonical && canonical.href && !canonical.href.includes('newsnow')) {
+                        if (isArticleUrl(canonical.href)) return canonical.href;
+                    }
+                    const ogUrl = document.querySelector('meta[property="og:url"]');
+                    if (ogUrl && ogUrl.content && !ogUrl.content.includes('newsnow')) {
+                        if (isArticleUrl(ogUrl.content)) return ogUrl.content;
+                    }
+                    
+                    // Filter links that are article-like
+                    const articleCandidates = links.filter(link => {
                         const href = link.href;
-                        // Count slashes after domain – if only 3 slashes (https://domain/ ) it's the homepage
-                        const slashCount = (href.match(/\//g) || []).length;
-                        // Also exclude links with 'newsnow'
-                        return !href.includes('newsnow.co.uk') && slashCount >= 4;
+                        if (href.includes('newsnow.co.uk')) return false;
+                        return isArticleUrl(href);
                     });
-                    // If no article-like link, fall back to any external link
-                    if (validLinks.length) return validLinks[0].href;
-                    const external = links.find(link => !link.href.includes('newsnow.co.uk'));
+                    if (articleCandidates.length > 0) {
+                        // Return the first one (or could sort by path length)
+                        return articleCandidates[0].href;
+                    }
+                    
+                    // Fallback: any external link that is not the domain root
+                    const external = links.find(link => {
+                        const href = link.href;
+                        if (href.includes('newsnow.co.uk')) return false;
+                        try {
+                            const urlObj = new URL(href);
+                            return urlObj.pathname !== '/';
+                        } catch { return false; }
+                    });
                     return external ? external.href : null;
                 });
                 if (articleLink) finalUrl = articleLink;
