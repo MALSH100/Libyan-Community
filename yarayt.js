@@ -465,16 +465,13 @@ async function sendMidRoundReminder(guild, yrData) {
       const guild = msg.guild;
       if (!guild) return;
 
-      // Only care about messages that are active Ya Rayt wishes
+      // Only care about messages in the configured Ya Rayt channel
       const yrData = getYaraytData(db, guild.id);
       if (!yrData.channelId || msg.channelId !== yrData.channelId) return;
-      if (!yrData.currentRound) return;   // ← add this line
-
-      const wishEntry = Object.values(yrData.currentRound.wishes)
-        .find(w => w.messageId === msg.id);
-
       // If there is no active round, ignore
       if (!yrData.currentRound) return;
+
+      // Find if this message is a wish in the current round
       const wishEntry = Object.values(yrData.currentRound.wishes)
         .find(w => w.messageId === msg.id);
       if (!wishEntry) return;
