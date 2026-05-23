@@ -13,7 +13,7 @@ const {
 } = require('discord.js');
 
 const SOURCE_URL = 'https://www.facebook.com/p/Dollar-Euro-Pound-Libya-Black-Market-Exchange-Rate-100064752788893/';
-const SCRAPE_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
+const SCRAPE_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 const MAX_HISTORY = 120;
 const CHART_POINTS = 30;
 const CURRENCIES = ['USD', 'EUR', 'GBP'];
