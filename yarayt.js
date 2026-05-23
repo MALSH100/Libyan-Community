@@ -99,16 +99,13 @@ function libyaTime() {
 
 // Get next 6PM Libya time (UTC+2) from now — skips 2 days between rounds
 function getNext6PM() {
+  // 6PM Libya = 16:00 UTC (because Libya is UTC+2)
   const now = new Date();
-  // Current time in Libya (UTC+2)
-  const libyaNow = new Date(now.getTime() + 2 * 60 * 60 * 1000);
-  let target = new Date(libyaNow);
-  target.setUTCHours(16, 0, 0, 0); // 6PM Libya = 16:00 UTC
-  if (target <= libyaNow) {
+  let target = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 16, 0, 0, 0));
+  if (target <= now) {
     target.setUTCDate(target.getUTCDate() + 1);
   }
-  // Convert back to UTC timestamp
-  return target.getTime() - (2 * 60 * 60 * 1000);
+  return target.getTime();
 }
 
 // Get 8PM Libya time on the same day as a given timestamp
@@ -310,7 +307,7 @@ async function sendPreAnnouncement(guild, yrData, startTime) {
   const startDate = new Date(startTime);
   const endDate = new Date(startTime + 2 * 60 * 60 * 1000); // ends at 8PM Libya
 
-  // Send a message
+  // Pre‑announcement message
   const embed = new EmbedBuilder()
     .setColor(0xFFA500)
     .setTitle('⏰ Ya Rayt Round Starting Soon!')
@@ -324,21 +321,65 @@ async function sendPreAnnouncement(guild, yrData, startTime) {
 
   await channel.send({ embeds: [embed] }).catch(e => console.error('Pre‑announcement failed:', e.message));
 
-  // Create a Discord scheduled event for the round
+  // Create Discord event with detailed instructions
+  const eventDescription = 
+    '**How to participate:**\n' +
+    '1. During the round (6 PM – 8 PM Libya time), use `/yarayt <your wish>`\n' +
+    '2. Your wish will be posted in this channel with 4 reaction emojis:\n' +
+    '   • 🇱🇾 = Relatable\n' +
+    '   • 😂 = Funny\n' +
+    '   • ❤️ = Wholesome\n' +
+    '   • 🔥 = Bold\n' +
+    '3. **Vote on other users‘ wishes** – each reaction gives them 1 Libyan Point (LP).\n' +
+    '4. At 8 PM, the round ends and the wish with the most total reactions wins **+10 LP bonus**.\n' +
+    '5. You can only submit **one wish per round** – no edits!\n\n' +
+    'Start thinking of your wish now – يا ريت!';
+
   try {
     await guild.scheduledEvents.create({
       name: '🇱🇾 Ya Rayt – I Wish!',
       scheduledStartTime: startDate,
       scheduledEndTime: endDate,
-      privacyLevel: 2,      // GUILD_ONLY
-      entityType: 3,        // EXTERNAL (with channel link)
+      privacyLevel: 2,
+      entityType: 3,
       entityMetadata: { location: `#${channel.name}` },
-      description: 'Submit your wish (يا ريت) and earn reactions! Round runs from 6PM to 8PM Libya time.',
+      description: eventDescription,
     });
     console.log(`✅ Discord event created for Ya Rayt round`);
   } catch (err) {
     console.error('Failed to create Discord event:', err.message);
   }
+
+  // Schedule mid‑round reminder (1 hour after start, i.e., 7PM Libya)
+  const reminderTime = startTime + 60 * 60 * 1000;
+  const msUntilReminder = Math.max(0, reminderTime - Date.now());
+  if (msUntilReminder > 0) {
+    setTimeout(() => {
+      sendMidRoundReminder(guild, yrData);
+    }, msUntilReminder);
+  }
+}
+
+// New helper function for mid‑round reminder
+async function sendMidRoundReminder(guild, yrData) {
+  const channel = getYaraytChannel(guild, yrData);
+  if (!channel) return;
+
+  const embed = new EmbedBuilder()
+    .setColor(0x00AA44)
+    .setTitle('⏳ One Hour Left in Ya Rayt!')
+    .setDescription(
+      'The current Ya Rayt round ends in **1 hour** (at 8 PM Libya time).\n\n' +
+      '**How to participate:**\n' +
+      '• Submit your wish with `/yarayt <your wish>`\n' +
+      '• React to others’ wishes with 🇱🇾 (Relatable), 😂 (Funny), ❤️ (Wholesome) or 🔥 (Bold)\n' +
+      '• Each reaction you give or receive earns **Libyan Points (LP)**\n' +
+      '• The wish with the most total reactions at 8 PM wins a **+10 LP bonus**!\n\n' +
+      'Don’t miss out – submit and vote now!'
+    )
+    .setFooter({ text: 'Round closes at 8PM Libya time' });
+
+  await channel.send({ embeds: [embed] }).catch(e => console.error('Mid‑round reminder failed:', e.message));
 }
 
   // ─── Leaderboard builder ───────────────────────────────────────────────────
@@ -424,10 +465,16 @@ async function sendPreAnnouncement(guild, yrData, startTime) {
       const guild = msg.guild;
       if (!guild) return;
 
-            // Only care about messages that are active Ya Rayt wishes
+      // Only care about messages that are active Ya Rayt wishes
       const yrData = getYaraytData(db, guild.id);
       if (!yrData.channelId || msg.channelId !== yrData.channelId) return;
+      if (!yrData.currentRound) return;   // ← add this line
 
+      const wishEntry = Object.values(yrData.currentRound.wishes)
+        .find(w => w.messageId === msg.id);
+
+      // If there is no active round, ignore
+      if (!yrData.currentRound) return;
       const wishEntry = Object.values(yrData.currentRound.wishes)
         .find(w => w.messageId === msg.id);
       if (!wishEntry) return;
@@ -588,7 +635,7 @@ async function sendPreAnnouncement(guild, yrData, startTime) {
       });
     }
 
-    // ── Leaderboards ────────────────────────────────────────────────────────
+
 
     // ── Leaderboards ────────────────────────────────────────────────────────
     const leaderboardMap = {
