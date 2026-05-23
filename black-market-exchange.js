@@ -270,16 +270,15 @@ function buildChartSvg(history) {
 
   let min = Math.min(...allValues);
   let max = Math.max(...allValues);
-  // Add 5% padding
-  const padRange = (max - min) * 0.05;
+  // Add 10% padding for labels
+  const padRange = (max - min) * 0.1;
   min = Math.max(0, min - padRange);
   max = max + padRange;
   
-  // Generate nice Y‑axis ticks: aim for 5–7 ticks, round to 0.1 or 0.5
+  // Generate nice Y‑axis ticks
   const range = max - min;
   const tickCount = 5;
   let step = range / (tickCount - 1);
-  // Round step to a nice number: 0.1, 0.2, 0.5, 1, 2, 5...
   const stepMagnitude = Math.pow(10, Math.floor(Math.log10(step)));
   const stepNormalized = step / stepMagnitude;
   let niceStep;
@@ -287,7 +286,6 @@ function buildChartSvg(history) {
   else if (stepNormalized <= 3) niceStep = stepMagnitude * 2;
   else if (stepNormalized <= 7) niceStep = stepMagnitude * 5;
   else niceStep = stepMagnitude * 10;
-  // Recalculate min and max based on nice steps
   let niceMin = Math.floor(min / niceStep) * niceStep;
   let niceMax = Math.ceil(max / niceStep) * niceStep;
   const niceRange = niceMax - niceMin;
@@ -301,11 +299,11 @@ function buildChartSvg(history) {
   for (let i = 0; i <= steps; i++) {
     const value = niceMin + i * niceStep;
     const y = pad.top + (1 - ((value - niceMin) / niceRange)) * plotH;
-    grid.push(`<line x1="${pad.left}" y1="${y}" x2="${width - pad.right}" y2="${y}" stroke="#e5e7eb" stroke-width="1"/>`);
-    grid.push(`<text x="${pad.left - 10}" y="${y + 4}" text-anchor="end" font-size="12" fill="#475569">${value.toFixed(2)}</text>`);
+    grid.push(`<line x1="${pad.left}" y1="${y}" x2="${width - pad.right}" y2="${y}" stroke="#3c3f45" stroke-width="1"/>`);
+    grid.push(`<text x="${pad.left - 10}" y="${y + 4}" text-anchor="end" font-size="12" fill="#b9bbbe">${value.toFixed(2)}</text>`);
   }
   
-  // Draw paths (lines)
+  // Draw paths
   const paths = CURRENCIES.map(currency => {
     const points = rows
       .map((row, idx) => {
@@ -318,47 +316,70 @@ function buildChartSvg(history) {
     return `<polyline points="${points.join(' ')}" fill="none" stroke="${palette[currency]}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>`;
   }).join('\n');
   
-  // Draw data points
+  // Draw circles for all data points
   const dots = CURRENCIES.map(currency => rows.map((row, idx) => {
     const value = row.rates[currency];
     if (typeof value !== 'number') return '';
     const cx = xFor(idx).toFixed(1);
     const cy = yFor(value).toFixed(1);
-    // Add small white circle with border for better visibility
-    return `<circle cx="${cx}" cy="${cy}" r="4" fill="#ffffff" stroke="${palette[currency]}" stroke-width="2"/>`;
+    return `<circle cx="${cx}" cy="${cy}" r="3" fill="#2f3136" stroke="${palette[currency]}" stroke-width="1.5"/>`;
   }).join('\n')).join('\n');
+  
+  // Highlight the last point for each currency (larger, with label)
+  const highlights = [];
+  const lastIndex = rows.length - 1;
+  for (const currency of CURRENCIES) {
+    const lastRow = rows[lastIndex];
+    if (!lastRow) continue;
+    const value = lastRow.rates[currency];
+    if (typeof value !== 'number') continue;
+    const cx = xFor(lastIndex).toFixed(1);
+    const cy = yFor(value).toFixed(1);
+    // Larger circle
+    highlights.push(`<circle cx="${cx}" cy="${cy}" r="6" fill="${palette[currency]}" stroke="#ffffff" stroke-width="2"/>`);
+    // Dotted line from point to label
+    const labelX = parseFloat(cx) + 15;
+    const labelY = parseFloat(cy) - 10;
+    highlights.push(`<line x1="${cx}" y1="${cy}" x2="${labelX}" y2="${labelY}" stroke="${palette[currency]}" stroke-width="1.5" stroke-dasharray="3,3"/>`);
+    // Label background and text
+    highlights.push(`<rect x="${labelX - 5}" y="${labelY - 12}" width="70" height="20" rx="4" fill="#1e1f22" stroke="${palette[currency]}" stroke-width="1"/>`);
+    highlights.push(`<text x="${labelX}" y="${labelY - 2}" fill="#ffffff" font-size="11" font-weight="bold">${currency} ${value.toFixed(2)}</text>`);
+  }
   
   // X‑axis labels
   const labels = rows.map((row, idx) => {
-    // Show every 3rd label to avoid overcrowding
     if (idx !== 0 && idx !== rows.length - 1 && idx % 3 !== 0) return '';
     const date = new Date(row.scrapedAt || row.createdAt || Date.now());
     const label = `${date.getDate()}/${date.getMonth() + 1}\n${String(date.getHours()).padStart(2, '0')}:00`;
-    return `<text x="${xFor(idx).toFixed(1)}" y="${height - 45}" text-anchor="middle" font-size="11" fill="#475569">${svgEscape(label)}</text>`;
+    return `<text x="${xFor(idx).toFixed(1)}" y="${height - 45}" text-anchor="middle" font-size="10" fill="#b9bbbe">${svgEscape(label)}</text>`;
   }).join('\n');
   
-  // Legend
-  const legend = CURRENCIES.map((currency, idx) => {
-    const x = pad.left + idx * 120;
-    return `<rect x="${x}" y="${height - 38}" width="14" height="14" rx="3" fill="${palette[currency]}"/><text x="${x + 22}" y="${height - 26}" font-size="13" fill="#0f172a" font-weight="500">${currency}</text>`;
+  // Legend (moved to top right)
+  const legendX = width - 180;
+  const legendY = 50;
+  const legendItems = CURRENCIES.map((currency, idx) => {
+    const yOff = legendY + idx * 20;
+    return `<rect x="${legendX}" y="${yOff}" width="12" height="12" rx="2" fill="${palette[currency]}"/>
+            <text x="${legendX + 18}" y="${yOff + 10}" fill="#e3e5e8" font-size="12">${currency}</text>`;
   }).join('');
   
-  // Get latest rates for subtitle
+  // Latest rates for subtitle
   const latest = rows[rows.length - 1]?.rates || {};
   const latestText = CURRENCIES.map(c => `${c}: ${latest[c] ? latest[c].toFixed(2) : '?'} LYD`).join('  •  ');
   
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
-  <rect width="100%" height="100%" fill="#ffffff"/>
-  <text x="${pad.left}" y="24" font-size="18" font-weight="700" fill="#1e293b">Libyan Black Market Exchange Trend (LYD per 1 unit)</text>
-  <text x="${pad.left}" y="44" font-size="13" fill="#64748b">${svgEscape(latestText)}</text>
+  <rect width="100%" height="100%" fill="#2f3136"/>
+  <text x="${pad.left}" y="24" font-size="16" font-weight="700" fill="#e3e5e8">Libyan Black Market Exchange Trend (LYD per 1 unit)</text>
+  <text x="${pad.left}" y="44" font-size="11" fill="#b9bbbe">${svgEscape(latestText)}</text>
   ${grid.join('\n')}
-  <line x1="${pad.left}" y1="${pad.top}" x2="${pad.left}" y2="${pad.top + plotH}" stroke="#94a3b8" stroke-width="1.5"/>
-  <line x1="${pad.left}" y1="${pad.top + plotH}" x2="${width - pad.right}" y2="${pad.top + plotH}" stroke="#94a3b8" stroke-width="1.5"/>
+  <line x1="${pad.left}" y1="${pad.top}" x2="${pad.left}" y2="${pad.top + plotH}" stroke="#4e5058" stroke-width="1.5"/>
+  <line x1="${pad.left}" y1="${pad.top + plotH}" x2="${width - pad.right}" y2="${pad.top + plotH}" stroke="#4e5058" stroke-width="1.5"/>
   ${paths}
   ${dots}
+  ${highlights.join('\n')}
   ${labels}
-  ${legend}
+  ${legendItems}
 </svg>`;
 }
 
