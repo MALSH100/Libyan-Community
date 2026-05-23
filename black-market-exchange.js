@@ -326,8 +326,9 @@ function buildChartSvg(history) {
   
   // Callouts: only last 2 points per currency (latest and previous)
   const callouts = [];
-  const lastPoints = {}; // store for legend
+  const lastPoints = {};
   for (const currency of CURRENCIES) {
+    // Collect last 2 points
     const points = [];
     for (let idx = Math.max(0, rows.length - 2); idx < rows.length; idx++) {
       const row = rows[idx];
@@ -337,26 +338,30 @@ function buildChartSvg(history) {
       }
     }
     if (points.length === 0) continue;
-    // Store latest for legend
     lastPoints[currency] = points[points.length-1].value;
     
     for (const p of points) {
-      const isLast = (p.idx === rows.length-1);
-      const offsetX = isLast ? 20 : (p.idx % 2 === 0 ? -55 : 55);
-      let labelX = p.x + offsetX;
-      let labelY = p.y - 8;
-      // Prevent going out of bounds
-      if (labelX < pad.left + 10) labelX = p.x + 30;
-      if (labelX > width - pad.right - 50) labelX = p.x - 50;
-      if (labelY < pad.top + 5) labelY = p.y + 15;
-      if (labelY > height - pad.bottom - 5) labelY = p.y - 15;
+      const isLast = (p.idx === rows.length - 1);
+      // Place label above the point, offset sideways
+      const xOffset = isLast ? 40 : -55;   // further apart to avoid overlap
+      const yOffset = -28;                 // higher above the curve
+      let labelX = p.x + xOffset;
+      let labelY = p.y + yOffset;
+      // Bounds checking – keep inside the canvas
+      labelX = Math.min(Math.max(labelX, pad.left + 20), width - pad.right - 55);
+      labelY = Math.min(Math.max(labelY, pad.top + 15), height - pad.bottom - 20);
       
-      callouts.push(`<line x1="${p.x.toFixed(1)}" y1="${p.y.toFixed(1)}" x2="${labelX.toFixed(1)}" y2="${labelY.toFixed(1)}" stroke="${palette[currency]}" stroke-width="1" stroke-dasharray="2,2"/>`);
-      const boxW = 42;
-      const boxH = 18;
+      // Leader line: vertical segment then horizontal
+      const midY = p.y + yOffset/2;   // halfway up
+      callouts.push(`<line x1="${p.x.toFixed(1)}" y1="${p.y.toFixed(1)}" x2="${p.x.toFixed(1)}" y2="${midY.toFixed(1)}" stroke="${palette[currency]}" stroke-width="1" stroke-dasharray="2,2"/>`);
+      callouts.push(`<line x1="${p.x.toFixed(1)}" y1="${midY.toFixed(1)}" x2="${labelX.toFixed(1)}" y2="${midY.toFixed(1)}" stroke="${palette[currency]}" stroke-width="1" stroke-dasharray="2,2"/>`);
+      
+      // Box around the value
+      const boxW = 50;
+      const boxH = 20;
       const boxX = (labelX > p.x) ? labelX : labelX - boxW;
-      callouts.push(`<rect x="${boxX}" y="${labelY - 10}" width="${boxW}" height="${boxH}" rx="3" fill="#2f3136" stroke="${palette[currency]}" stroke-width="0.8"/>`);
-      callouts.push(`<text x="${boxX + boxW/2}" y="${labelY + 1}" text-anchor="middle" fill="#ffffff" font-size="10" font-weight="bold">${p.value.toFixed(2)}</text>`);
+      callouts.push(`<rect x="${boxX}" y="${labelY - 10}" width="${boxW}" height="${boxH}" rx="4" fill="#2f3136" stroke="${palette[currency]}" stroke-width="1"/>`);
+      callouts.push(`<text x="${boxX + boxW/2}" y="${labelY + 3}" text-anchor="middle" fill="#ffffff" font-size="11" font-weight="bold">${p.value.toFixed(2)}</text>`);
     }
   }
   
