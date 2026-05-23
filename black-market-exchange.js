@@ -260,7 +260,7 @@ function buildChartSvg(history) {
   const rows = (history || []).filter(entry => entry.rates).slice(-CHART_POINTS);
   const width = 900;
   const height = 480; // increased for legend and callouts
-  const pad = { left: 70, right: 40, top: 50, bottom: 90 };
+  const pad = { left: 70, right: 40, top: 70, bottom: 90 };
   const plotW = width - pad.left - pad.right;
   const plotH = height - pad.top - pad.bottom;
   const palette = { USD: '#16a34a', EUR: '#2563eb', GBP: '#dc2626' };
@@ -350,7 +350,8 @@ function buildChartSvg(history) {
     for (const p of points) {
       const isLast = (p.idx === rows.length-1);
       const offsetX = isLast ? 45 : -140;
-      const yOffset = -28;
+      // For previous point, use a positive Y offset (downward) so line doesn't cross the latest point's line
+      const yOffset = isLast ? -28 : 20;
       let labelX = p.x + offsetX;
       let labelY = p.y + yOffset;
       // Bounds checking
@@ -390,7 +391,7 @@ function buildChartSvg(history) {
   }).join('\n');
   
   // Horizontal legend below title
-  const legendY = 72;
+  const legendY = 46;
   const legendStartX = pad.left;
   const legendItems = CURRENCIES.map((currency, i) => {
     const x = legendStartX + i * 130;
@@ -398,14 +399,15 @@ function buildChartSvg(history) {
             <text x="${x + 18}" y="${legendY + 10}" fill="#e3e5e8" font-size="13">${currency} ${lastPoints[currency] ? lastPoints[currency].toFixed(2) : '?'}</text>`;
   }).join('');
   
-  // Title and subtitle
-  const latestText = CURRENCIES.map(c => `${c}: ${lastPoints[c] ? lastPoints[c].toFixed(2) : '?'} LYD`).join('  •  ');
+  // Remove the duplicate subtitle line; legend already shows latest values
+  // Increase top margin by setting pad.top = 70 instead of 50
+  // But we can't change pad.top here because it's used earlier. Instead, adjust the legend position and title y.
+  // We'll set title at y=24, legend at y=46.
   
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
   <rect width="100%" height="100%" fill="#36393f"/>
   <text x="${pad.left}" y="24" font-size="16" font-weight="700" fill="#ffffff">Libyan Black Market Exchange Trend (LYD per 1 unit)</text>
-  <text x="${pad.left}" y="46" font-size="11" fill="#b9bbbe">${svgEscape(latestText)}</text>
   ${legendItems}
   ${grid.join('\n')}
   <line x1="${pad.left}" y1="${pad.top}" x2="${pad.left}" y2="${pad.top + plotH}" stroke="#4e5058" stroke-width="1.5"/>
