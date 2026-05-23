@@ -254,32 +254,58 @@ function buildChartSvg(history) {
   const rows = (history || []).filter(entry => entry.rates).slice(-CHART_POINTS);
   const width = 900;
   const height = 430;
-  const pad = { left: 62, right: 24, top: 34, bottom: 72 };
+  const pad = { left: 70, right: 30, top: 40, bottom: 80 };
   const plotW = width - pad.left - pad.right;
   const plotH = height - pad.top - pad.bottom;
   const palette = { USD: '#16a34a', EUR: '#2563eb', GBP: '#dc2626' };
-  const allValues = [];
-
+  
+  // Collect all values to determine range
+  let allValues = [];
   for (const row of rows) {
     for (const c of CURRENCIES) {
       if (typeof row.rates[c] === 'number') allValues.push(row.rates[c]);
     }
   }
+  if (allValues.length === 0) return `<svg width="${width}" height="${height}"></svg>`;
 
-  const min = allValues.length ? Math.floor((Math.min(...allValues) - 0.1) * 10) / 10 : 0;
-  const max = allValues.length ? Math.ceil((Math.max(...allValues) + 0.1) * 10) / 10 : 1;
-  const span = Math.max(0.1, max - min);
+  let min = Math.min(...allValues);
+  let max = Math.max(...allValues);
+  // Add 5% padding
+  const padRange = (max - min) * 0.05;
+  min = Math.max(0, min - padRange);
+  max = max + padRange;
+  
+  // Generate nice Y‑axis ticks: aim for 5–7 ticks, round to 0.1 or 0.5
+  const range = max - min;
+  const tickCount = 5;
+  let step = range / (tickCount - 1);
+  // Round step to a nice number: 0.1, 0.2, 0.5, 1, 2, 5...
+  const stepMagnitude = Math.pow(10, Math.floor(Math.log10(step)));
+  const stepNormalized = step / stepMagnitude;
+  let niceStep;
+  if (stepNormalized <= 1.5) niceStep = stepMagnitude * 1;
+  else if (stepNormalized <= 3) niceStep = stepMagnitude * 2;
+  else if (stepNormalized <= 7) niceStep = stepMagnitude * 5;
+  else niceStep = stepMagnitude * 10;
+  // Recalculate min and max based on nice steps
+  let niceMin = Math.floor(min / niceStep) * niceStep;
+  let niceMax = Math.ceil(max / niceStep) * niceStep;
+  const niceRange = niceMax - niceMin;
+  const steps = Math.round(niceRange / niceStep);
+  
   const xFor = idx => pad.left + (rows.length <= 1 ? plotW / 2 : (idx / (rows.length - 1)) * plotW);
-  const yFor = value => pad.top + (1 - ((value - min) / span)) * plotH;
-
+  const yFor = value => pad.top + (1 - ((value - niceMin) / niceRange)) * plotH;
+  
+  // Build grid lines and Y‑axis labels
   const grid = [];
-  for (let i = 0; i <= 5; i++) {
-    const y = pad.top + (i / 5) * plotH;
-    const value = max - (i / 5) * span;
+  for (let i = 0; i <= steps; i++) {
+    const value = niceMin + i * niceStep;
+    const y = pad.top + (1 - ((value - niceMin) / niceRange)) * plotH;
     grid.push(`<line x1="${pad.left}" y1="${y}" x2="${width - pad.right}" y2="${y}" stroke="#e5e7eb" stroke-width="1"/>`);
-    grid.push(`<text x="${pad.left - 12}" y="${y + 4}" text-anchor="end" font-size="13" fill="#475569">${value.toFixed(2)}</text>`);
+    grid.push(`<text x="${pad.left - 10}" y="${y + 4}" text-anchor="end" font-size="12" fill="#475569">${value.toFixed(2)}</text>`);
   }
-
+  
+  // Draw paths (lines)
   const paths = CURRENCIES.map(currency => {
     const points = rows
       .map((row, idx) => {
@@ -289,32 +315,43 @@ function buildChartSvg(history) {
       })
       .filter(Boolean);
     if (points.length < 2) return '';
-    return `<polyline points="${points.join(' ')}" fill="none" stroke="${palette[currency]}" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>`;
+    return `<polyline points="${points.join(' ')}" fill="none" stroke="${palette[currency]}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>`;
   }).join('\n');
-
+  
+  // Draw data points
   const dots = CURRENCIES.map(currency => rows.map((row, idx) => {
     const value = row.rates[currency];
     if (typeof value !== 'number') return '';
-    return `<circle cx="${xFor(idx).toFixed(1)}" cy="${yFor(value).toFixed(1)}" r="4" fill="${palette[currency]}"/>`;
+    const cx = xFor(idx).toFixed(1);
+    const cy = yFor(value).toFixed(1);
+    // Add small white circle with border for better visibility
+    return `<circle cx="${cx}" cy="${cy}" r="4" fill="#ffffff" stroke="${palette[currency]}" stroke-width="2"/>`;
   }).join('\n')).join('\n');
-
+  
+  // X‑axis labels
   const labels = rows.map((row, idx) => {
-    if (idx !== 0 && idx !== rows.length - 1 && idx % Math.ceil(rows.length / 4) !== 0) return '';
+    // Show every 3rd label to avoid overcrowding
+    if (idx !== 0 && idx !== rows.length - 1 && idx % 3 !== 0) return '';
     const date = new Date(row.scrapedAt || row.createdAt || Date.now());
-    const label = `${date.getDate()}/${date.getMonth() + 1} ${String(date.getHours()).padStart(2, '0')}:00`;
-    return `<text x="${xFor(idx).toFixed(1)}" y="${height - 32}" text-anchor="middle" font-size="12" fill="#475569">${svgEscape(label)}</text>`;
+    const label = `${date.getDate()}/${date.getMonth() + 1}\n${String(date.getHours()).padStart(2, '0')}:00`;
+    return `<text x="${xFor(idx).toFixed(1)}" y="${height - 45}" text-anchor="middle" font-size="11" fill="#475569">${svgEscape(label)}</text>`;
   }).join('\n');
-
+  
+  // Legend
   const legend = CURRENCIES.map((currency, idx) => {
-    const x = pad.left + idx * 112;
-    return `<rect x="${x}" y="${height - 58}" width="14" height="14" rx="3" fill="${palette[currency]}"/><text x="${x + 22}" y="${height - 46}" font-size="14" fill="#0f172a">${currency}</text>`;
+    const x = pad.left + idx * 120;
+    return `<rect x="${x}" y="${height - 38}" width="14" height="14" rx="3" fill="${palette[currency]}"/><text x="${x + 22}" y="${height - 26}" font-size="13" fill="#0f172a" font-weight="500">${currency}</text>`;
   }).join('');
-
+  
+  // Get latest rates for subtitle
+  const latest = rows[rows.length - 1]?.rates || {};
+  const latestText = CURRENCIES.map(c => `${c}: ${latest[c] ? latest[c].toFixed(2) : '?'} LYD`).join('  •  ');
+  
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
   <rect width="100%" height="100%" fill="#ffffff"/>
-  <text x="${pad.left}" y="24" font-size="20" font-weight="700" fill="#0f172a">Libyan Black Market Exchange Trend</text>
-  <text x="${width - pad.right}" y="24" text-anchor="end" font-size="13" fill="#64748b">LYD per 1 currency unit</text>
+  <text x="${pad.left}" y="24" font-size="18" font-weight="700" fill="#1e293b">Libyan Black Market Exchange Trend (LYD per 1 unit)</text>
+  <text x="${pad.left}" y="44" font-size="13" fill="#64748b">${svgEscape(latestText)}</text>
   ${grid.join('\n')}
   <line x1="${pad.left}" y1="${pad.top}" x2="${pad.left}" y2="${pad.top + plotH}" stroke="#94a3b8" stroke-width="1.5"/>
   <line x1="${pad.left}" y1="${pad.top + plotH}" x2="${width - pad.right}" y2="${pad.top + plotH}" stroke="#94a3b8" stroke-width="1.5"/>
