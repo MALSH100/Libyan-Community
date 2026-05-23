@@ -13,7 +13,7 @@ const {
 } = require('discord.js');
 
 const SOURCE_URL = 'https://www.facebook.com/p/Dollar-Euro-Pound-Libya-Black-Market-Exchange-Rate-100064752788893/';
-const SCRAPE_INTERVAL_MS = 60 * 60 * 1000;
+const SCRAPE_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
 const MAX_HISTORY = 120;
 const CHART_POINTS = 30;
 const CURRENCIES = ['USD', 'EUR', 'GBP'];
@@ -85,46 +85,59 @@ function findRateNearKeyword(text, keywords) {
 }
 
 function parseRatesFromText(text) {
+  const cleaned = text
+    .replace(/\u00a0/g, ' ')
+    .replace(/[ÂĢâŽ$]/g, match => ` ${match} `)
+    .replace(/\s+/g, ' ');
+
   const rates = { USD: null, EUR: null, GBP: null };
-  
-  // Exact patterns based on Facebook example:
-  // "-dollar $1=08.32 LYD."
-  // "-Euro €1=9.61 LYD."
-  // "-Pound £1=10.98 LYD."
-  const patterns = {
-    USD: /dollar\s*\$?1\s*=\s*(\d{1,2}(?:[.,]\d{1,2})?)\s*LYD/i,
-    EUR: /euro\s*€?1\s*=\s*(\d{1,2}(?:[.,]\d{1,2})?)\s*LYD/i,
-    GBP: /pound\s*£?1\s*=\s*(\d{1,2}(?:[.,]\d{1,2})?)\s*LYD/i,
-  };
-  
-  for (const [currency, regex] of Object.entries(patterns)) {
-    const match = text.match(regex);
-    if (match) {
-      rates[currency] = num(match[1]);
-    }
+
+  // Try sequence patterns first (look for all three in order)
+  const compact = cleaned.toLowerCase();
+  const sequencePatterns = [
+    {
+      order: ['USD', 'EUR', 'GBP'],
+      re: /(?:usd|dollar|dolar|ØŊŲŲØ§Øą)\D{0,40}(\d{1,2}(?:[.,]\d{1,4})?)\D{0,80}(?:eur|euro|ŲŲØąŲ)\D{0,40}(\d{1,2}(?:[.,]\d{1,4})?)\D{0,80}(?:gbp|pound|sterling|ØĻØ§ŲŲØŊ|ØŽŲŲŲ|Ø§ØģØŠØąŲŲŲŲ)\D{0,40}(\d{1,2}(?:[.,]\d{1,4})?)/i,
+    },
+    {
+      order: ['USD', 'GBP', 'EUR'],
+      re: /(?:usd|dollar|dolar|ØŊŲŲØ§Øą)\D{0,40}(\d{1,2}(?:[.,]\d{1,4})?)\D{0,80}(?:gbp|pound|sterling|ØĻØ§ŲŲØŊ|ØŽŲŲŲ|Ø§ØģØŠØąŲŲŲŲ)\D{0,40}(\d{1,2}(?:[.,]\d{1,4})?)\D{0,80}(?:eur|euro|ŲŲØąŲ)\D{0,40}(\d{1,2}(?:[.,]\d{1,4})?)/i,
+    },
+  ];
+
+  for (const pattern of sequencePatterns) {
+    const match = compact.match(pattern.re);
+    if (!match) continue;
+    pattern.order.forEach((currency, idx) => {
+      rates[currency] = num(match[idx + 1]);
+    });
+    break;
   }
-  
-  // Fallback: look for "$1=8.32" without the word "dollar"
+
+  // Fall back to keyword proximity if sequences didn't work
+  if (rates.USD === null) rates.USD = findRateNearKeyword(text, ['usd', 'dollar', 'dolar', '$', 'ØŊŲŲØ§Øą']);
+  if (rates.EUR === null) rates.EUR = findRateNearKeyword(text, ['eur', 'euro', 'âŽ', 'ŲŲØąŲ']);
+  if (rates.GBP === null) rates.GBP = findRateNearKeyword(text, ['gbp', 'pound', 'sterling', 'ÂĢ', 'ØĻØ§ŲŲØŊ', 'ØŽŲŲŲ', 'Ø§ØģØŠØąŲŲŲŲ']);
+
+  // Additional fallback: look for patterns like "$1=8.32 LYD"
   if (rates.USD === null) {
-    const fallback = text.match(/\$1\s*=\s*(\d{1,2}(?:[.,]\d{1,2})?)/i);
-    if (fallback) rates.USD = num(fallback[1]);
+    const match = text.match(/\$1\s*=\s*(\d{1,2}(?:[.,]\d{1,2})?)\s*LYD/i);
+    if (match) rates.USD = num(match[1]);
   }
   if (rates.EUR === null) {
-    const fallback = text.match(/€1\s*=\s*(\d{1,2}(?:[.,]\d{1,2})?)/i);
-    if (fallback) rates.EUR = num(fallback[1]);
+    const match = text.match(/€1\s*=\s*(\d{1,2}(?:[.,]\d{1,2})?)\s*LYD/i);
+    if (match) rates.EUR = num(match[1]);
   }
   if (rates.GBP === null) {
-    const fallback = text.match(/£1\s*=\s*(\d{1,2}(?:[.,]\d{1,2})?)/i);
-    if (fallback) rates.GBP = num(fallback[1]);
+    const match = text.match(/£1\s*=\s*(\d{1,2}(?:[.,]\d{1,2})?)\s*LYD/i);
+    if (match) rates.GBP = num(match[1]);
   }
-  
-  // If still missing, try the old generic extraction (keep your original complex logic as a final fallback)
-  // But for brevity, if null, return null
+
   if (CURRENCIES.every(c => rates[c] === null)) {
-    console.warn('New pattern matching failed, returning null');
+    // Log a sample of the text to help debug
+    console.error('Parsing failed. Text sample (first 500 chars):', text.slice(0, 500));
     return null;
   }
-  
   return rates;
 }
 
@@ -158,7 +171,10 @@ async function scrapeFacebookRates() {
 
     const text = await page.locator('body').innerText({ timeout: 15000 });
     const rates = parseRatesFromText(text);
-    if (!rates) throw new Error('Could not find USD/EUR/GBP rates in the Facebook page text.');
+    if (!rates) {
+      console.error('Facebook page text (first 1000 chars):', text.slice(0, 1000));
+      throw new Error('Could not find USD/EUR/GBP rates in the Facebook page text.');
+    }
 
     return {
       rates,
