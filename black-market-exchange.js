@@ -85,41 +85,24 @@ function findRateNearKeyword(text, keywords) {
 }
 
 function parseRatesFromText(text) {
-  const cleaned = text
-    .replace(/\u00a0/g, ' ')
-    .replace(/[ÂĢâŽ$]/g, match => ` ${match} `)
-    .replace(/\s+/g, ' ');
-
   const rates = { USD: null, EUR: null, GBP: null };
 
-  // Try sequence patterns first (look for all three in order)
-  const compact = cleaned.toLowerCase();
-  const sequencePatterns = [
-    {
-      order: ['USD', 'EUR', 'GBP'],
-      re: /(?:usd|dollar|dolar|ØŊŲŲØ§Øą)\D{0,40}(\d{1,2}(?:[.,]\d{1,4})?)\D{0,80}(?:eur|euro|ŲŲØąŲ)\D{0,40}(\d{1,2}(?:[.,]\d{1,4})?)\D{0,80}(?:gbp|pound|sterling|ØĻØ§ŲŲØŊ|ØŽŲŲŲ|Ø§ØģØŠØąŲŲŲŲ)\D{0,40}(\d{1,2}(?:[.,]\d{1,4})?)/i,
-    },
-    {
-      order: ['USD', 'GBP', 'EUR'],
-      re: /(?:usd|dollar|dolar|ØŊŲŲØ§Øą)\D{0,40}(\d{1,2}(?:[.,]\d{1,4})?)\D{0,80}(?:gbp|pound|sterling|ØĻØ§ŲŲØŊ|ØŽŲŲŲ|Ø§ØģØŠØąŲŲŲŲ)\D{0,40}(\d{1,2}(?:[.,]\d{1,4})?)\D{0,80}(?:eur|euro|ŲŲØąŲ)\D{0,40}(\d{1,2}(?:[.,]\d{1,4})?)/i,
-    },
+  // New: Direct patterns for the current Facebook post format:
+  // "-dollar $1=08.39 LYD."
+  // "-Euro €1=9.69 LYD."
+  // "-Pound £1=10.93 LYD."
+  const hyphenPatterns = [
+    { currency: 'USD', regex: /-dollar\s*\$1\s*=\s*(\d{1,2}(?:[.,]\d{1,2})?)\s*LYD\.?/i },
+    { currency: 'EUR', regex: /-Euro\s*€1\s*=\s*(\d{1,2}(?:[.,]\d{1,2})?)\s*LYD\.?/i },
+    { currency: 'GBP', regex: /-Pound\s*£1\s*=\s*(\d{1,2}(?:[.,]\d{1,2})?)\s*LYD\.?/i },
   ];
 
-  for (const pattern of sequencePatterns) {
-    const match = compact.match(pattern.re);
-    if (!match) continue;
-    pattern.order.forEach((currency, idx) => {
-      rates[currency] = num(match[idx + 1]);
-    });
-    break;
+  for (const p of hyphenPatterns) {
+    const match = text.match(p.regex);
+    if (match) rates[p.currency] = num(match[1]);
   }
 
-  // Fall back to keyword proximity if sequences didn't work
-  if (rates.USD === null) rates.USD = findRateNearKeyword(text, ['usd', 'dollar', 'dolar', '$', 'ØŊŲŲØ§Øą']);
-  if (rates.EUR === null) rates.EUR = findRateNearKeyword(text, ['eur', 'euro', 'âŽ', 'ŲŲØąŲ']);
-  if (rates.GBP === null) rates.GBP = findRateNearKeyword(text, ['gbp', 'pound', 'sterling', 'ÂĢ', 'ØĻØ§ŲŲØŊ', 'ØŽŲŲŲ', 'Ø§ØģØŠØąŲŲŲŲ']);
-
-  // Additional fallback: look for patterns like "$1=8.32 LYD"
+  // If still missing, try generic patterns (without hyphen)
   if (rates.USD === null) {
     const match = text.match(/\$1\s*=\s*(\d{1,2}(?:[.,]\d{1,2})?)\s*LYD/i);
     if (match) rates.USD = num(match[1]);
@@ -133,11 +116,46 @@ function parseRatesFromText(text) {
     if (match) rates.GBP = num(match[1]);
   }
 
+  // Use keyword proximity as a final fallback
+  if (rates.USD === null) rates.USD = findRateNearKeyword(text, ['usd', 'dollar', 'dolar', '$']);
+  if (rates.EUR === null) rates.EUR = findRateNearKeyword(text, ['eur', 'euro', '€']);
+  if (rates.GBP === null) rates.GBP = findRateNearKeyword(text, ['gbp', 'pound', 'sterling', '£']);
+
+  // Ultra fallback: scan each line for any number near a currency symbol
+  if (rates.USD === null) {
+    const lines = text.split(/\n/);
+    for (const line of lines) {
+      if (/\$/.test(line) || /dollar/i.test(line)) {
+        const match = line.match(/\b(\d{1,2}(?:[.,]\d{1,2})?)\b/);
+        if (match) { rates.USD = num(match[1]); break; }
+      }
+    }
+  }
+  if (rates.EUR === null) {
+    const lines = text.split(/\n/);
+    for (const line of lines) {
+      if (/€/.test(line) || /euro/i.test(line)) {
+        const match = line.match(/\b(\d{1,2}(?:[.,]\d{1,2})?)\b/);
+        if (match) { rates.EUR = num(match[1]); break; }
+      }
+    }
+  }
+  if (rates.GBP === null) {
+    const lines = text.split(/\n/);
+    for (const line of lines) {
+      if (/£/.test(line) || /pound|sterling/i.test(line)) {
+        const match = line.match(/\b(\d{1,2}(?:[.,]\d{1,2})?)\b/);
+        if (match) { rates.GBP = num(match[1]); break; }
+      }
+    }
+  }
+
   if (CURRENCIES.every(c => rates[c] === null)) {
-    // Log a sample of the text to help debug
-    console.error('Parsing failed. Text sample (first 500 chars):', text.slice(0, 500));
+    console.error('❌ All parsing methods failed. Text sample (first 500 chars):', text.slice(0, 500));
     return null;
   }
+
+  console.log(`✅ Parsed rates: USD=${rates.USD}, EUR=${rates.EUR}, GBP=${rates.GBP}`);
   return rates;
 }
 
