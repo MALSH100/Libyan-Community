@@ -348,8 +348,8 @@ function buildChartSvg(history) {
     
     for (const p of points) {
 const isLast = (p.idx === rows.length-1);
-// For the previous point, use a larger offset to the left
-const offsetX = isLast ? 35 : -75; // further apart to avoid overlap
+// Much wider gap: latest to the right, previous far to the left
+const offsetX = isLast ? 45 : -140;
       const yOffset = -28;                 // higher above the curve
       let labelX = p.x + offsetX;
       let labelY = p.y + yOffset;
