@@ -333,6 +333,7 @@ function buildChartSvg(history) {
   // Callouts: only last 2 points per currency (latest and previous)
   const callouts = [];
   const lastPoints = {};
+  const currencySymbols = { USD: '$', EUR: '€', GBP: '£' };
   for (const currency of CURRENCIES) {
     // Collect last 2 points
     const points = [];
@@ -356,22 +357,27 @@ function buildChartSvg(history) {
       labelX = Math.min(Math.max(labelX, pad.left + 20), width - pad.right - 55);
       labelY = Math.min(Math.max(labelY, pad.top + 15), height - pad.bottom - 20);
       
-      // Fix: Use the *adjusted* labelX for the horizontal line end.
-      // The previous code used labelX after bounds check, which is correct – but the issue may be that the line was drawn to the original labelX before bounds adjustment.
-      // To ensure connection, we must recompute the midY based on the original point and use the final labelX.
-      const midY = p.y + yOffset/2;
-      // Draw vertical line from point to midY
-      callouts.push(`<line x1="${p.x.toFixed(1)}" y1="${p.y.toFixed(1)}" x2="${p.x.toFixed(1)}" y2="${midY.toFixed(1)}" stroke="${isLast ? palette[currency] : '#888888'}" stroke-width="1" stroke-dasharray="2,2"/>`);
-      // Draw horizontal line from midY to labelX (use the final labelX)
-      callouts.push(`<line x1="${p.x.toFixed(1)}" y1="${midY.toFixed(1)}" x2="${labelX.toFixed(1)}" y2="${midY.toFixed(1)}" stroke="${isLast ? palette[currency] : '#888888'}" stroke-width="1" stroke-dasharray="2,2"/>`);
-      
-      const boxW = 50;
+      // Box dimensions
+      const boxW = 55;  // slightly wider to fit "$8.31"
       const boxH = 20;
+      // Determine box left edge: if label is to the right, box starts at labelX; if left, box ends at labelX
       const boxX = (labelX > p.x) ? labelX : labelX - boxW;
-      // Use gray stroke and fill for previous points, currency color for latest
+      const boxCenterX = boxX + boxW/2;
+      const boxCenterY = labelY;  // because box's y is labelY-10, height 20 → center y = labelY
+      
+      // Line colour
+      const lineColor = isLast ? palette[currency] : '#888888';
+      // Draw vertical line from point to box center Y (not midY)
+      callouts.push(`<line x1="${p.x.toFixed(1)}" y1="${p.y.toFixed(1)}" x2="${p.x.toFixed(1)}" y2="${boxCenterY.toFixed(1)}" stroke="${lineColor}" stroke-width="1" stroke-dasharray="2,2"/>`);
+      // Draw horizontal line from point's x to box center X
+      callouts.push(`<line x1="${p.x.toFixed(1)}" y1="${boxCenterY.toFixed(1)}" x2="${boxCenterX.toFixed(1)}" y2="${boxCenterY.toFixed(1)}" stroke="${lineColor}" stroke-width="1" stroke-dasharray="2,2"/>`);
+      
+      // Box stroke colour
       const strokeColor = isLast ? palette[currency] : '#888888';
       callouts.push(`<rect x="${boxX}" y="${labelY - 10}" width="${boxW}" height="${boxH}" rx="4" fill="#2f3136" stroke="${strokeColor}" stroke-width="1"/>`);
-      callouts.push(`<text x="${boxX + boxW/2}" y="${labelY + 3}" text-anchor="middle" fill="#ffffff" font-size="11" font-weight="bold">${p.value.toFixed(2)}</text>`);
+      // Text with currency symbol
+      const symbol = currencySymbols[currency] || '';
+      callouts.push(`<text x="${boxCenterX}" y="${labelY + 3}" text-anchor="middle" fill="#ffffff" font-size="11" font-weight="bold">${symbol}${p.value.toFixed(2)}</text>`);
     }
   }
   
