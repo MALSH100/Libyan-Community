@@ -351,7 +351,7 @@ const isLast = (p.idx === rows.length-1);
 // For the previous point, use a larger offset to the left
 const offsetX = isLast ? 35 : -75; // further apart to avoid overlap
       const yOffset = -28;                 // higher above the curve
-      let labelX = p.x + xOffset;
+      let labelX = p.x + offsetX;
       let labelY = p.y + yOffset;
       // Bounds checking – keep inside the canvas
       labelX = Math.min(Math.max(labelX, pad.left + 20), width - pad.right - 55);
