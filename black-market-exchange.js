@@ -253,8 +253,8 @@ function svgEscape(value) {
 function buildChartSvg(history) {
   const rows = (history || []).filter(entry => entry.rates).slice(-CHART_POINTS);
   const width = 900;
-  const height = 460; // slightly taller to accommodate labels
-  const pad = { left: 70, right: 40, top: 40, bottom: 90 };
+  const height = 480; // increased for legend and callouts
+  const pad = { left: 70, right: 40, top: 50, bottom: 90 };
   const plotW = width - pad.left - pad.right;
   const plotH = height - pad.top - pad.bottom;
   const palette = { USD: '#16a34a', EUR: '#2563eb', GBP: '#dc2626' };
@@ -270,12 +270,11 @@ function buildChartSvg(history) {
 
   let min = Math.min(...allValues);
   let max = Math.max(...allValues);
-  // Add 15% vertical padding to make room for callouts
   const padRange = (max - min) * 0.15;
   min = Math.max(0, min - padRange);
   max = max + padRange;
   
-  // Nice Y‑axis ticks
+  // Y-axis ticks
   const range = max - min;
   const tickCount = 5;
   let step = range / (tickCount - 1);
@@ -294,7 +293,7 @@ function buildChartSvg(history) {
   const xFor = idx => pad.left + (rows.length <= 1 ? plotW / 2 : (idx / (rows.length - 1)) * plotW);
   const yFor = value => pad.top + (1 - ((value - niceMin) / niceRange)) * plotH;
   
-  // Grid & Y‑axis (lighter grey)
+  // Grid & Y-axis
   const grid = [];
   for (let i = 0; i <= steps; i++) {
     const value = niceMin + i * niceStep;
@@ -303,7 +302,7 @@ function buildChartSvg(history) {
     grid.push(`<text x="${pad.left - 10}" y="${y + 4}" text-anchor="end" font-size="12" fill="#b9bbbe">${value.toFixed(2)}</text>`);
   }
   
-  // Paths
+  // Lines
   const paths = CURRENCIES.map(currency => {
     const points = rows
       .map((row, idx) => {
@@ -316,7 +315,7 @@ function buildChartSvg(history) {
     return `<polyline points="${points.join(' ')}" fill="none" stroke="${palette[currency]}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>`;
   }).join('\n');
   
-  // Data points (small circles)
+  // Small circles for all points
   const dots = CURRENCIES.map(currency => rows.map((row, idx) => {
     const value = row.rates[currency];
     if (typeof value !== 'number') return '';
@@ -325,37 +324,43 @@ function buildChartSvg(history) {
     return `<circle cx="${cx}" cy="${cy}" r="3" fill="#36393f" stroke="${palette[currency]}" stroke-width="1.5"/>`;
   }).join('\n')).join('\n');
   
-  // Data callouts: show the last 5 points for each currency (or all if fewer)
+  // Callouts: only last 2 points per currency (latest and previous)
   const callouts = [];
-  const maxPointsToShow = 5;
+  const lastPoints = {}; // store for legend
   for (const currency of CURRENCIES) {
-    const relevantIndices = rows.map((_, idx) => idx).slice(-maxPointsToShow);
-    for (const idx of relevantIndices) {
+    const points = [];
+    for (let idx = Math.max(0, rows.length - 2); idx < rows.length; idx++) {
       const row = rows[idx];
       const value = row.rates[currency];
-      if (typeof value !== 'number') continue;
-      const cx = xFor(idx).toFixed(1);
-      const cy = yFor(value).toFixed(1);
-      // Skip if too close to bottom or top to avoid overlap
-      if (parseFloat(cy) < pad.top + 15 || parseFloat(cy) > pad.top + plotH - 15) continue;
+      if (typeof value === 'number') {
+        points.push({ idx, value, x: xFor(idx), y: yFor(value) });
+      }
+    }
+    if (points.length === 0) continue;
+    // Store latest for legend
+    lastPoints[currency] = points[points.length-1].value;
+    
+    for (const p of points) {
+      const isLast = (p.idx === rows.length-1);
+      const offsetX = isLast ? 20 : (p.idx % 2 === 0 ? -55 : 55);
+      let labelX = p.x + offsetX;
+      let labelY = p.y - 8;
+      // Prevent going out of bounds
+      if (labelX < pad.left + 10) labelX = p.x + 30;
+      if (labelX > width - pad.right - 50) labelX = p.x - 50;
+      if (labelY < pad.top + 5) labelY = p.y + 15;
+      if (labelY > height - pad.bottom - 5) labelY = p.y - 15;
       
-      // Determine label position (left or right of point)
-      const isLast = (idx === rows.length - 1);
-      const offsetX = isLast ? 20 : (idx % 2 === 0 ? -55 : 55);
-      const labelX = parseFloat(cx) + offsetX;
-      const labelY = parseFloat(cy) - 8;
-      // Leader line
-      callouts.push(`<line x1="${cx}" y1="${cy}" x2="${labelX}" y2="${labelY}" stroke="${palette[currency]}" stroke-width="1" stroke-dasharray="2,2"/>`);
-      // Label box (semi‑transparent background)
-      const boxW = 40;
+      callouts.push(`<line x1="${p.x.toFixed(1)}" y1="${p.y.toFixed(1)}" x2="${labelX.toFixed(1)}" y2="${labelY.toFixed(1)}" stroke="${palette[currency]}" stroke-width="1" stroke-dasharray="2,2"/>`);
+      const boxW = 42;
       const boxH = 18;
-      const boxX = offsetX > 0 ? labelX : labelX - boxW;
-      callouts.push(`<rect x="${boxX}" y="${labelY - 12}" width="${boxW}" height="${boxH}" rx="3" fill="#2f3136" stroke="${palette[currency]}" stroke-width="0.8"/>`);
-      callouts.push(`<text x="${boxX + boxW/2}" y="${labelY - 1}" text-anchor="middle" fill="#ffffff" font-size="10" font-weight="bold">${value.toFixed(2)}</text>`);
+      const boxX = (labelX > p.x) ? labelX : labelX - boxW;
+      callouts.push(`<rect x="${boxX}" y="${labelY - 10}" width="${boxW}" height="${boxH}" rx="3" fill="#2f3136" stroke="${palette[currency]}" stroke-width="0.8"/>`);
+      callouts.push(`<text x="${boxX + boxW/2}" y="${labelY + 1}" text-anchor="middle" fill="#ffffff" font-size="10" font-weight="bold">${p.value.toFixed(2)}</text>`);
     }
   }
   
-  // X‑axis labels (every other point)
+  // X-axis labels (every 2nd point)
   const labels = rows.map((row, idx) => {
     if (idx !== 0 && idx !== rows.length - 1 && idx % 2 !== 0) return '';
     const date = new Date(row.scrapedAt || row.createdAt || Date.now());
@@ -363,25 +368,24 @@ function buildChartSvg(history) {
     return `<text x="${xFor(idx).toFixed(1)}" y="${height - 55}" text-anchor="middle" font-size="10" fill="#b9bbbe">${svgEscape(label)}</text>`;
   }).join('\n');
   
-  // Legend (inline at top right)
-  const legendX = width - 160;
-  const legendY = 50;
+  // Horizontal legend below title
+  const legendY = 72;
+  const legendStartX = pad.left;
   const legendItems = CURRENCIES.map((currency, i) => {
-    const yOff = legendY + i * 22;
-    const latestVal = rows[rows.length-1]?.rates[currency];
-    return `<rect x="${legendX}" y="${yOff}" width="12" height="12" rx="2" fill="${palette[currency]}"/>
-            <text x="${legendX + 18}" y="${yOff + 10}" fill="#e3e5e8" font-size="12">${currency} ${latestVal ? latestVal.toFixed(2) : '?'}</text>`;
+    const x = legendStartX + i * 130;
+    return `<rect x="${x}" y="${legendY}" width="12" height="12" rx="2" fill="${palette[currency]}"/>
+            <text x="${x + 18}" y="${legendY + 10}" fill="#e3e5e8" font-size="13">${currency} ${lastPoints[currency] ? lastPoints[currency].toFixed(2) : '?'}</text>`;
   }).join('');
   
-  // Title and subtitle (light background)
-  const latest = rows[rows.length-1]?.rates || {};
-  const latestText = CURRENCIES.map(c => `${c}: ${latest[c] ? latest[c].toFixed(2) : '?'} LYD`).join('  •  ');
+  // Title and subtitle
+  const latestText = CURRENCIES.map(c => `${c}: ${lastPoints[c] ? lastPoints[c].toFixed(2) : '?'} LYD`).join('  •  ');
   
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
   <rect width="100%" height="100%" fill="#36393f"/>
   <text x="${pad.left}" y="24" font-size="16" font-weight="700" fill="#ffffff">Libyan Black Market Exchange Trend (LYD per 1 unit)</text>
-  <text x="${pad.left}" y="44" font-size="11" fill="#b9bbbe">${svgEscape(latestText)}</text>
+  <text x="${pad.left}" y="46" font-size="11" fill="#b9bbbe">${svgEscape(latestText)}</text>
+  ${legendItems}
   ${grid.join('\n')}
   <line x1="${pad.left}" y1="${pad.top}" x2="${pad.left}" y2="${pad.top + plotH}" stroke="#4e5058" stroke-width="1.5"/>
   <line x1="${pad.left}" y1="${pad.top + plotH}" x2="${width - pad.right}" y2="${pad.top + plotH}" stroke="#4e5058" stroke-width="1.5"/>
@@ -389,7 +393,6 @@ function buildChartSvg(history) {
   ${dots}
   ${callouts.join('\n')}
   ${labels}
-  ${legendItems}
 </svg>`;
 }
 
