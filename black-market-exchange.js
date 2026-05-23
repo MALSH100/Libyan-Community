@@ -36,6 +36,12 @@ const exchangeCommands = [
     .setDescription('Admin: scrape Facebook now and post the latest exchange rate')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
     .setDMPermission(false),
+  
+  new SlashCommandBuilder()
+  .setName('exchange-debug')
+  .setDescription('Admin: show last 5 exchange rate entries (for debugging)')
+  .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+  .setDMPermission(false),
 
   new SlashCommandBuilder()
     .setName('exchange-chart')
@@ -341,9 +347,9 @@ function buildChartSvg(history) {
     lastPoints[currency] = points[points.length-1].value;
     
     for (const p of points) {
-      const isLast = (p.idx === rows.length - 1);
-      // Place label above the point, offset sideways
-      const xOffset = isLast ? 40 : -55;   // further apart to avoid overlap
+const isLast = (p.idx === rows.length-1);
+// For the previous point, use a larger offset to the left
+const offsetX = isLast ? 35 : -75; // further apart to avoid overlap
       const yOffset = -28;                 // higher above the curve
       let labelX = p.x + xOffset;
       let labelY = p.y + yOffset;
@@ -560,6 +566,22 @@ module.exports = function initBlackMarketExchange({ client, db, saveData }) {
         const postedText = result.posted ? 'Posted to the configured channel.' : 'Saved, but no exchange channel is configured yet.';
         return safeReply(interaction, { content: `Exchange rates refreshed. ${postedText}` });
       }
+
+      if (commandName === 'exchange-debug') {
+        if (!isAdmin(interaction)) return safeReply(interaction, { content: 'Admin only.', flags: 64 });
+        const exchangeData = getExchangeData(db, guild.id);
+        const lastFew = exchangeData.history.slice(-5);
+        if (!lastFew.length) return safeReply(interaction, { content: 'No data yet.', flags: 64 });
+        let msg = '**Last 5 exchange rates (oldest → newest):**\n';
+        lastFew.forEach((entry, i) => {
+          const d = new Date(entry.scrapedAt);
+          msg += `\n${i+1}. ${d.toLocaleString()}: USD=${entry.rates.USD}, EUR=${entry.rates.EUR}, GBP=${entry.rates.GBP}`;
+        });
+        return safeReply(interaction, { content: msg, flags: 64 });
+      }
+
+
+      
     } catch (err) {
       console.error(`Exchange command failed (${commandName}):`, err);
       // Truncate error message — Discord limit is 2000 chars
