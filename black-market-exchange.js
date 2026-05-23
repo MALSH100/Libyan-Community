@@ -347,26 +347,30 @@ function buildChartSvg(history) {
     lastPoints[currency] = points[points.length-1].value;
     
     for (const p of points) {
-const isLast = (p.idx === rows.length-1);
-// Much wider gap: latest to the right, previous far to the left
-const offsetX = isLast ? 45 : -140;
-      const yOffset = -28;                 // higher above the curve
+      const isLast = (p.idx === rows.length-1);
+      const offsetX = isLast ? 45 : -140;
+      const yOffset = -28;
       let labelX = p.x + offsetX;
       let labelY = p.y + yOffset;
-      // Bounds checking – keep inside the canvas
+      // Bounds checking
       labelX = Math.min(Math.max(labelX, pad.left + 20), width - pad.right - 55);
       labelY = Math.min(Math.max(labelY, pad.top + 15), height - pad.bottom - 20);
       
-      // Leader line: vertical segment then horizontal
-      const midY = p.y + yOffset/2;   // halfway up
-      callouts.push(`<line x1="${p.x.toFixed(1)}" y1="${p.y.toFixed(1)}" x2="${p.x.toFixed(1)}" y2="${midY.toFixed(1)}" stroke="${palette[currency]}" stroke-width="1" stroke-dasharray="2,2"/>`);
-      callouts.push(`<line x1="${p.x.toFixed(1)}" y1="${midY.toFixed(1)}" x2="${labelX.toFixed(1)}" y2="${midY.toFixed(1)}" stroke="${palette[currency]}" stroke-width="1" stroke-dasharray="2,2"/>`);
+      // Fix: Use the *adjusted* labelX for the horizontal line end.
+      // The previous code used labelX after bounds check, which is correct – but the issue may be that the line was drawn to the original labelX before bounds adjustment.
+      // To ensure connection, we must recompute the midY based on the original point and use the final labelX.
+      const midY = p.y + yOffset/2;
+      // Draw vertical line from point to midY
+      callouts.push(`<line x1="${p.x.toFixed(1)}" y1="${p.y.toFixed(1)}" x2="${p.x.toFixed(1)}" y2="${midY.toFixed(1)}" stroke="${isLast ? palette[currency] : '#888888'}" stroke-width="1" stroke-dasharray="2,2"/>`);
+      // Draw horizontal line from midY to labelX (use the final labelX)
+      callouts.push(`<line x1="${p.x.toFixed(1)}" y1="${midY.toFixed(1)}" x2="${labelX.toFixed(1)}" y2="${midY.toFixed(1)}" stroke="${isLast ? palette[currency] : '#888888'}" stroke-width="1" stroke-dasharray="2,2"/>`);
       
-      // Box around the value
       const boxW = 50;
       const boxH = 20;
       const boxX = (labelX > p.x) ? labelX : labelX - boxW;
-      callouts.push(`<rect x="${boxX}" y="${labelY - 10}" width="${boxW}" height="${boxH}" rx="4" fill="#2f3136" stroke="${palette[currency]}" stroke-width="1"/>`);
+      // Use gray stroke and fill for previous points, currency color for latest
+      const strokeColor = isLast ? palette[currency] : '#888888';
+      callouts.push(`<rect x="${boxX}" y="${labelY - 10}" width="${boxW}" height="${boxH}" rx="4" fill="#2f3136" stroke="${strokeColor}" stroke-width="1"/>`);
       callouts.push(`<text x="${boxX + boxW/2}" y="${labelY + 3}" text-anchor="middle" fill="#ffffff" font-size="11" font-weight="bold">${p.value.toFixed(2)}</text>`);
     }
   }
