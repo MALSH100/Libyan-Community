@@ -2,6 +2,7 @@
 const { SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits } = require('discord.js');
 const Parser = require('rss-parser');
 const parser = new Parser();
+const { chromium } = require('playwright'); // Add this line
 
 // === CONFIGURATION ===
 // Replace this URL with your Telegram RSS feed URL
@@ -39,6 +40,30 @@ async function getLatestLibyaNews() {
     }
 }
 
+// === Fetch article image (og:image) from the article page ===
+async function fetchArticleImage(articleUrl) {
+    let browser;
+    try {
+        browser = await chromium.launch({
+            headless: true,
+            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+        });
+        const page = await browser.newPage();
+        await page.goto(articleUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+        const image = await page.evaluate(() => {
+            const ogImage = document.querySelector('meta[property="og:image"]');
+            return ogImage ? ogImage.getAttribute('content') : null;
+        });
+        return image;
+    } catch (err) {
+        console.error('[News] Failed to fetch article image:', err.message);
+        return null;
+    } finally {
+        if (browser) await browser.close().catch(() => {});
+    }
+}
+
+
 // === Persistent data helpers (unchanged) ===
 function getNewsData(db, guildId) {
     if (!db[guildId]) db[guildId] = {};
@@ -59,8 +84,10 @@ async function postNewsUpdate(client, newsState, latestArticle, forced = false) 
     const channel = await client.channels.fetch(newsState.channelId).catch(() => null);
     if (!channel || !channel.isTextBased()) return false;
 
-    // Use the description from the article, or fallback
     const description = latestArticle.description || 'Click the title to read the full article.';
+    
+    // Fetch the article image (og:image)
+    const imageUrl = await fetchArticleImage(latestArticle.url);
     
     const embed = new EmbedBuilder()
         .setColor(0x4285F4)
@@ -71,7 +98,9 @@ async function postNewsUpdate(client, newsState, latestArticle, forced = false) 
         .setFooter({ text: 'Source: Google News', iconURL: 'https://www.google.com/favicon.ico' })
         .setAuthor({ name: '📰 Latest Libya News' });
 
-    // No thumbnail – cleaner and avoids broken image
+    if (imageUrl) {
+        embed.setImage(imageUrl);
+    }
 
     await channel.send({ embeds: [embed] });
     return true;
