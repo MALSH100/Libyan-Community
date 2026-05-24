@@ -1,0 +1,6 @@
+services:
+  tg2rss:
+    image: zojl/tg2rss:dev
+    ports:
+      - "8080:80"
+    restart: unless-stopped
