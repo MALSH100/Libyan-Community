@@ -23,14 +23,27 @@ async function getLatestLibyaNews() {
             return new Date(b.pubDate) - new Date(a.pubDate);
         });
         const latest = feed.items[0];
-        // Extract a clean description (remove HTML if any)
-        let description = latest.contentSnippet || latest.description || '';
-        // Trim and limit length (max 200 chars)
-        if (description.length > 200) description = description.slice(0, 197) + '...';
+        // Extract description – try multiple fields
+        let description = latest.contentSnippet || latest.summary || latest.description || '';
+        // Remove HTML tags
+        description = description.replace(/<[^>]*>/g, '');
+        // Trim and limit length
+        if (description.length > 250) description = description.slice(0, 247) + '...';
+        // If description is empty or same as title, use fallback
+        if (!description || description === latest.title) {
+            description = 'Click the title to read the full article on the source website.';
+        }
+        // Extract source domain from the article URL
+        let sourceDomain = '';
+        try {
+            const urlObj = new URL(latest.link);
+            sourceDomain = urlObj.hostname.replace(/^www\./, '');
+        } catch (e) {}
         return {
             title: latest.title,
             url: latest.link,
             description: description,
+            sourceDomain: sourceDomain,
             scrapedAt: new Date().toISOString(),
             sourceUrl: RSS_FEED_URL,
         };
@@ -121,13 +134,19 @@ async function postNewsUpdate(client, newsState, latestArticle, forced = false) 
     // Fetch the article image (og:image)
     const imageUrl = await fetchArticleImage(latestArticle.url);
     
+    // Use actual source domain, fallback to Google News
+    const sourceText = latestArticle.sourceDomain ? `Source: ${latestArticle.sourceDomain}` : 'Source: Google News';
+    const faviconUrl = latestArticle.sourceDomain 
+        ? `https://www.google.com/s2/favicons?domain=${latestArticle.sourceDomain}&sz=32` 
+        : 'https://www.google.com/favicon.ico';
+    
     const embed = new EmbedBuilder()
         .setColor(0x4285F4)
         .setTitle(latestArticle.title)
         .setURL(latestArticle.url)
         .setDescription(description)
         .setTimestamp(new Date(latestArticle.scrapedAt))
-        .setFooter({ text: 'Source: Google News', iconURL: 'https://www.google.com/favicon.ico' })
+        .setFooter({ text: sourceText, iconURL: faviconUrl })
         .setAuthor({ name: '📰 Latest Libya News' });
 
     if (imageUrl) {
