@@ -6,7 +6,7 @@ const parser = new Parser();
 // === CONFIGURATION ===
 // Replace this URL with your Telegram RSS feed URL
 // You can get it by running tg2rss (or use a public RSS service like rss.app)
-const RSS_FEED_URL = process.env.TELEGRAM_RSS_FEED_URL || 'http://localhost:3000/your_channel_username';
+const RSS_FEED_URL = 'http://host.docker.internal:8080/LibyanIntelll';
 const CHECK_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
 const MAX_HISTORY = 50;
 
