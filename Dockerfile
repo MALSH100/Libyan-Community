@@ -4,9 +4,10 @@ WORKDIR /app
 
 COPY package*.json ./
 
-RUN npm install --omit=dev
+# Install all dependencies (including rss-parser)
+RUN npm install
 
-# Install axios and cheerio for the Libya news scraper
+# Install additional packages (keep for compatibility)
 RUN npm install axios cheerio
 
 COPY . .
