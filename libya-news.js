@@ -63,7 +63,7 @@ async function postNewsUpdate(client, newsState, latestArticle, forced = false) 
     const description = latestArticle.description || 'Click the title to read the full article.';
     
     const embed = new EmbedBuilder()
-        .setColor(0x4285F4) // Google blue
+        .setColor(0x4285F4)
         .setTitle(latestArticle.title)
         .setURL(latestArticle.url)
         .setDescription(description)
@@ -71,8 +71,7 @@ async function postNewsUpdate(client, newsState, latestArticle, forced = false) 
         .setFooter({ text: 'Source: Google News', iconURL: 'https://www.google.com/favicon.ico' })
         .setAuthor({ name: '📰 Latest Libya News' });
 
-    // Optional: add a small thumbnail image (Google News logo)
-    embed.setThumbnail('https://www.google.com/favicon.ico');
+    // No thumbnail – cleaner and avoids broken image
 
     await channel.send({ embeds: [embed] });
     return true;
