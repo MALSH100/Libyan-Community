@@ -50,10 +50,42 @@ async function fetchArticleImage(articleUrl) {
         });
         const page = await browser.newPage();
         await page.goto(articleUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+        
+        // Wait a bit for lazy-loaded images
+        await page.waitForTimeout(3000);
+        
         const image = await page.evaluate(() => {
-            const ogImage = document.querySelector('meta[property="og:image"]');
-            return ogImage ? ogImage.getAttribute('content') : null;
+            // Try multiple methods
+            // 1. Open Graph image
+            let img = document.querySelector('meta[property="og:image"]')?.getAttribute('content');
+            if (img) return img;
+            // 2. Twitter card image
+            img = document.querySelector('meta[name="twitter:image"]')?.getAttribute('content');
+            if (img) return img;
+            // 3. First large image in the article (not logo/icon)
+            const images = Array.from(document.querySelectorAll('img'));
+            const mainImg = images.find(img => {
+                const src = img.src || '';
+                const width = img.width || img.naturalWidth || 0;
+                const alt = (img.alt || '').toLowerCase();
+                return width >= 200 && 
+                       !src.includes('logo') && 
+                       !src.includes('icon') &&
+                       !src.includes('avatar') &&
+                       !alt.includes('logo') &&
+                       !alt.includes('icon');
+            });
+            if (mainImg) {
+                // Resolve relative URLs
+                if (mainImg.src.startsWith('/')) {
+                    return new URL(mainImg.src, window.location.origin).href;
+                }
+                return mainImg.src;
+            }
+            return null;
         });
+        
+        console.log(`[News] Extracted image: ${image ? 'yes' : 'no'}`);
         return image;
     } catch (err) {
         console.error('[News] Failed to fetch article image:', err.message);
