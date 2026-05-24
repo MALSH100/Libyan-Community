@@ -663,7 +663,7 @@ async function triggerSpawn(channel, db, saveData, getGuildClans, getUserClan) {
     });
 
     collector.on('collect', async i => {
-      await handleSpawnInteraction(i, spawn, channel, db, saveData, getGuildClans, getUserClan, collector);
+      await handleSpawnInteraction(i, spawn, channel, db, saveData, getGuildClans, getUserClan, collector, awardLP);
     });
 
     collector.on('end', () => {
@@ -676,7 +676,7 @@ async function triggerSpawn(channel, db, saveData, getGuildClans, getUserClan) {
   }
 }
 
-async function handleSpawnInteraction(i, spawn, channel, db, saveData, getGuildClans, getUserClan, collector) {
+async function handleSpawnInteraction(i, spawn, channel, db, saveData, getGuildClans, getUserClan, collector, awardLP) {
   try {
     await i.deferUpdate();
 
@@ -800,9 +800,11 @@ async function handleSpawnInteraction(i, spawn, channel, db, saveData, getGuildC
         `\n\n${i.user.displayName} used **${isHeavy ? '💥 Heavy Strike' : '⚔️ Attack'}**! Dealt **${damage}** damage!${effectStr}${firstHitMsg}`
       );
 
+      const freshMemberData = getMemberPokemon(db, guildId, userId);
+      const rows = catchRows(userBalls, freshMemberData);
       await spawn.message.edit({
         embeds: [updatedEmbed],
-        components: [catchButtons(userBalls)],
+        components: rows,
       }).catch(() => {});
 
       return;
