@@ -41,9 +41,7 @@ async function getLatestLibyaNews() {
         } catch (e) {}
         return {
             title: latest.title,
-            url: latest.link,
-            description: description,
-            sourceDomain: sourceDomain,
+            rssUrl: latest.link, // original Google News redirect URL
             scrapedAt: new Date().toISOString(),
             sourceUrl: RSS_FEED_URL,
         };
@@ -54,7 +52,9 @@ async function getLatestLibyaNews() {
 }
 
 // === Fetch article image (og:image) from the article page ===
-async function fetchArticleImage(articleUrl) {
+// Resolve Google News redirect to actual article URL
+async function resolveNewsUrl(articleUrl) {
+    if (!articleUrl.includes('news.google.com')) return articleUrl;
     let browser;
     try {
         browser = await chromium.launch({
@@ -63,46 +63,76 @@ async function fetchArticleImage(articleUrl) {
         });
         const page = await browser.newPage();
         await page.goto(articleUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+        // Wait for any redirect to complete
+        await page.waitForTimeout(2000);
+        const finalUrl = page.url();
+        return finalUrl;
+    } catch (err) {
+        console.error('[News] Failed to resolve URL:', err.message);
+        return articleUrl;
+    } finally {
+        if (browser) await browser.close().catch(() => {});
+    }
+}
+
+// Fetch image AND description from the article page
+async function fetchArticleMetadata(articleUrl) {
+    let browser;
+    let resolvedUrl = await resolveNewsUrl(articleUrl);
+    try {
+        browser = await chromium.launch({
+            headless: true,
+            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+        });
+        const page = await browser.newPage();
+        await page.goto(resolvedUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
         
-        // Wait a bit for lazy-loaded images
+        // Wait for content
         await page.waitForTimeout(3000);
         
-        const image = await page.evaluate(() => {
-            // Try multiple methods
-            // 1. Open Graph image
-            let img = document.querySelector('meta[property="og:image"]')?.getAttribute('content');
-            if (img) return img;
-            // 2. Twitter card image
-            img = document.querySelector('meta[name="twitter:image"]')?.getAttribute('content');
-            if (img) return img;
-            // 3. First large image in the article (not logo/icon)
-            const images = Array.from(document.querySelectorAll('img'));
-            const mainImg = images.find(img => {
-                const src = img.src || '';
-                const width = img.width || img.naturalWidth || 0;
-                const alt = (img.alt || '').toLowerCase();
-                return width >= 200 && 
-                       !src.includes('logo') && 
-                       !src.includes('icon') &&
-                       !src.includes('avatar') &&
-                       !alt.includes('logo') &&
-                       !alt.includes('icon');
-            });
-            if (mainImg) {
-                // Resolve relative URLs
-                if (mainImg.src.startsWith('/')) {
-                    return new URL(mainImg.src, window.location.origin).href;
-                }
-                return mainImg.src;
+        const metadata = await page.evaluate(() => {
+            // Get Open Graph / meta description
+            let description = document.querySelector('meta[property="og:description"]')?.getAttribute('content');
+            if (!description) description = document.querySelector('meta[name="description"]')?.getAttribute('content');
+            if (!description) {
+                // Fallback: first paragraph with substantial text
+                const paras = Array.from(document.querySelectorAll('p'));
+                const goodPara = paras.find(p => p.innerText.trim().length > 100);
+                if (goodPara) description = goodPara.innerText.trim();
             }
-            return null;
+            if (description && description.length > 250) description = description.slice(0, 247) + '...';
+            
+            // Get image
+            let image = document.querySelector('meta[property="og:image"]')?.getAttribute('content');
+            if (!image) image = document.querySelector('meta[name="twitter:image"]')?.getAttribute('content');
+            if (!image) {
+                const images = Array.from(document.querySelectorAll('img'));
+                const mainImg = images.find(img => {
+                    const src = img.src || '';
+                    const width = img.width || img.naturalWidth || 0;
+                    const alt = (img.alt || '').toLowerCase();
+                    return width >= 200 && 
+                           !src.includes('logo') && 
+                           !src.includes('icon') &&
+                           !alt.includes('logo');
+                });
+                if (mainImg) {
+                    if (mainImg.src.startsWith('/')) {
+                        image = new URL(mainImg.src, window.location.origin).href;
+                    } else {
+                        image = mainImg.src;
+                    }
+                }
+            }
+            
+            return { description, image };
         });
         
-        console.log(`[News] Extracted image: ${image ? 'yes' : 'no'}`);
-        return image;
+        console.log(`[News] Metadata: description=${metadata.description ? 'yes' : 'no'}, image=${metadata.image ? 'yes' : 'no'}`);
+        return { description: metadata.description, image: metadata.image, resolvedUrl };
     } catch (err) {
-        console.error('[News] Failed to fetch article image:', err.message);
-        return null;
+        console.error('[News] Failed to fetch metadata:', err.message);
+        return { description: null, image: null, resolvedUrl };
     } finally {
         if (browser) await browser.close().catch(() => {});
     }
@@ -129,21 +159,29 @@ async function postNewsUpdate(client, newsState, latestArticle, forced = false) 
     const channel = await client.channels.fetch(newsState.channelId).catch(() => null);
     if (!channel || !channel.isTextBased()) return false;
 
-    const description = latestArticle.description || 'Click the title to read the full article.';
+    // Fetch metadata (description, image, final URL) from the article page
+    const metadata = await fetchArticleMetadata(latestArticle.rssUrl);
     
-    // Fetch the article image (og:image)
-    const imageUrl = await fetchArticleImage(latestArticle.url);
+    const finalUrl = metadata.resolvedUrl || latestArticle.rssUrl;
+    const description = metadata.description || 'Click the title to read the full article.';
+    const imageUrl = metadata.image;
     
-    // Use actual source domain, fallback to Google News
-    const sourceText = latestArticle.sourceDomain ? `Source: ${latestArticle.sourceDomain}` : 'Source: Google News';
-    const faviconUrl = latestArticle.sourceDomain 
-        ? `https://www.google.com/s2/favicons?domain=${latestArticle.sourceDomain}&sz=32` 
+    // Extract source domain from final URL
+    let sourceDomain = '';
+    try {
+        const urlObj = new URL(finalUrl);
+        sourceDomain = urlObj.hostname.replace(/^www\./, '');
+    } catch (e) {}
+    
+    const sourceText = sourceDomain ? `Source: ${sourceDomain}` : 'Source: Google News';
+    const faviconUrl = sourceDomain 
+        ? `https://www.google.com/s2/favicons?domain=${sourceDomain}&sz=32` 
         : 'https://www.google.com/favicon.ico';
     
     const embed = new EmbedBuilder()
         .setColor(0x4285F4)
         .setTitle(latestArticle.title)
-        .setURL(latestArticle.url)
+        .setURL(finalUrl)
         .setDescription(description)
         .setTimestamp(new Date(latestArticle.scrapedAt))
         .setFooter({ text: sourceText, iconURL: faviconUrl })
