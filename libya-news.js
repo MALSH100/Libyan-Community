@@ -1,335 +1,36 @@
 // libya-news.js
 const { SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits } = require('discord.js');
-const axios = require('axios');
-const cheerio = require('cheerio');
-const { chromium } = require('playwright'); // Add this line
+const Parser = require('rss-parser');
+const parser = new Parser();
 
-const SOURCE_URL = 'https://www.newsnow.co.uk/h/World+News/Africa/Libya?type=ln';
-const CHECK_INTERVAL_MS = 15 * 60 * 1000;
+// === CONFIGURATION ===
+// Replace this URL with your Telegram RSS feed URL
+// You can get it by running tg2rss (or use a public RSS service like rss.app)
+const RSS_FEED_URL = process.env.TELEGRAM_RSS_FEED_URL || 'http://localhost:3000/your_channel_username';
+const CHECK_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
 const MAX_HISTORY = 50;
 
-// --- Resolve final URL using Playwright (handles modern JavaScript redirects) ---
-async function resolveFinalUrl(intermediateUrl) {
-    let browser;
-    let page;
-    try {
-        browser = await chromium.launch({
-            headless: true,
-            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
-        });
-        page = await browser.newPage();
-
-        // Navigate to the intermediate page
-        await page.goto(intermediateUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
-
-        // Strategy 1: Wait for URL to change (polling)
-        let finalUrl = null;
-        try {
-            await page.waitForFunction(
-                () => window.location.href && !window.location.href.includes('newsnow.co.uk'),
-                { timeout: 30000, polling: 500 }
-            );
-            finalUrl = page.url();
-        } catch (e) {
-            console.log(`[News] URL did not change automatically: ${e.message}`);
-        }
-
-        // Strategy 2: Look for a 'Continue' button and click it (with longer timeout)
-        if (!finalUrl || finalUrl.includes('newsnow.co.uk')) {
-            try {
-                const buttonSelectors = [
-                    'button:has-text("Continue")',
-                    'a:has-text("Continue")',
-                    'button:has-text("Go to article")',
-                    'a:has-text("Go to article")',
-                    '.continue-button',
-                    '.btn-continue',
-                    'a[href*="/A/"]', // sometimes the intermediate link itself is the continue button
-                ];
-                let clicked = false;
-                for (const selector of buttonSelectors) {
-                    const button = await page.$(selector);
-                    if (button) {
-                        await button.click();
-                        clicked = true;
-                        break;
-                    }
-                }
-                if (clicked) {
-                    // Increase timeout to 20 seconds for the navigation to complete
-                    await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20000 });
-                    finalUrl = page.url();
-                }
-            } catch (clickError) {
-                console.log(`[News] Could not click continue button: ${clickError.message}`);
-            }
-        }
-
-        // Strategy 3: Extract from meta refresh or find a SMART external link (not homepage)
-        if (!finalUrl || finalUrl.includes('newsnow.co.uk')) {
-            const metaRefresh = await page.evaluate(() => {
-                const meta = document.querySelector('meta[http-equiv="refresh"]');
-                if (meta) {
-                    const content = meta.getAttribute('content');
-                    const match = content.match(/url=(.*)$/i);
-                    if (match) return match[1];
-                }
-                return null;
-            });
-            if (metaRefresh) {
-                finalUrl = metaRefresh;
-            } else {
-                // Smarter fallback: find a link that looks like a real article (not homepage, category, or tag page)
-                const articleLink = await page.evaluate(() => {
-                    const links = Array.from(document.querySelectorAll('a[href^="http"]'));
-                    
-                    // Helper: check if a URL looks like an article (not a category, tag, author, or homepage)
-                    function isArticleUrl(url) {
-                        try {
-                            const urlObj = new URL(url);
-                            const path = urlObj.pathname;
-                            // Exclude homepage (just '/')
-                            if (path === '/' || path === '') return false;
-                            // Exclude common non-article patterns
-                            const excludePatterns = [
-                                '/category/', '/tag/', '/author/', '/archive/', 
-                                '/page/', '/search', '/opinions/', '/news/category'
-                            ];
-                            for (const pattern of excludePatterns) {
-                                if (path.toLowerCase().includes(pattern)) return false;
-                            }
-                            // Prefer paths that contain a 4-digit year (e.g., /2026/)
-                            if (/\/(19|20)\d{2}\//.test(path)) return true;
-                            // Prefer paths that are longer than 30 characters and have multiple segments
-                            if (path.length > 30 && path.split('/').length >= 3) return true;
-                            return false;
-                        } catch { return false; }
-                    }
-                    
-                    // First, try to get canonical URL or og:url meta tags
-                    const canonical = document.querySelector('link[rel="canonical"]');
-                    if (canonical && canonical.href && !canonical.href.includes('newsnow')) {
-                        if (isArticleUrl(canonical.href)) return canonical.href;
-                    }
-                    const ogUrl = document.querySelector('meta[property="og:url"]');
-                    if (ogUrl && ogUrl.content && !ogUrl.content.includes('newsnow')) {
-                        if (isArticleUrl(ogUrl.content)) return ogUrl.content;
-                    }
-                    
-                    // Filter links that are article-like
-                    const articleCandidates = links.filter(link => {
-                        const href = link.href;
-                        if (href.includes('newsnow.co.uk')) return false;
-                        return isArticleUrl(href);
-                    });
-                    if (articleCandidates.length > 0) {
-                        // Return the first one (or could sort by path length)
-                        return articleCandidates[0].href;
-                    }
-                    
-                    // Fallback: any external link that is not the domain root
-                    const external = links.find(link => {
-                        const href = link.href;
-                        if (href.includes('newsnow.co.uk')) return false;
-                        try {
-                            const urlObj = new URL(href);
-                            return urlObj.pathname !== '/';
-                        } catch { return false; }
-                    });
-                    return external ? external.href : null;
-                });
-                if (articleLink) finalUrl = articleLink;
-                else console.warn(`[News] No external link found`);
-            }
-        }
-
-        // Validate and return the final URL
-        if (finalUrl && !finalUrl.includes('newsnow.co.uk')) {
-            console.log(`[News] Successfully resolved redirect to: ${finalUrl}`);
-            return finalUrl;
-        } else {
-            console.warn(`[News] Could not resolve redirect, using original URL: ${intermediateUrl}`);
-            return intermediateUrl;
-        }
-
-    } catch (error) {
-        console.error(`[News] Playwright redirect failed: ${error.message}`);
-        return intermediateUrl;
-    } finally {
-        if (page) await page.close().catch(() => {});
-        if (browser) await browser.close().catch(() => {});
-    }
-}
-
-// --- Fetch article details: image, description, etc. (stealth mode for security pages) ---
-async function fetchArticleMetadata(articleUrl, retries = 2) {
-    let browser;
-    try {
-        browser = await chromium.launch({
-            headless: true,
-            args: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-blink-features=AutomationControlled',
-                '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-            ],
-        });
-        const page = await browser.newPage();
-        
-        // Set a realistic viewport and locale
-        await page.setViewportSize({ width: 1280, height: 800 });
-        await page.setExtraHTTPHeaders({
-            'Accept-Language': 'en-US,en;q=0.9',
-        });
-
-        // Navigate and wait for the page to fully load (including security checks)
-        await page.goto(articleUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-        
-        // Wait for the security challenge to resolve (look for article content)
-        console.log(`[News] Waiting for security challenge to pass...`);
-        try {
-            await page.waitForFunction(() => {
-                // If we see an article title or main content, the security check passed
-                const hasArticle = document.querySelector('article, h1, .node-title, .field--name-title');
-                const hasSecurity = document.body.innerText.includes('security service') || 
-                                    document.body.innerText.includes('captcha') ||
-                                    document.body.innerText.includes('verify you are not a bot');
-                return hasArticle && !hasSecurity;
-            }, { timeout: 60000, polling: 2000 });
-            console.log(`[News] Security challenge passed, content loaded.`);
-        } catch (e) {
-            console.log(`[News] Security challenge may still be present or page took too long: ${e.message}`);
-            // Continue anyway – we'll try to extract whatever is there
-        }
-        
-        // Wait a bit more for lazy-loaded images
-        await page.waitForTimeout(4000);
-        
-        const metadata = await page.evaluate(() => {
-            const getMeta = (name) => {
-                const el = document.querySelector(`meta[property="${name}"], meta[name="${name}"]`);
-                return el ? el.getAttribute('content') : null;
-            };
-
-            // Try Open Graph image first
-            let image = getMeta('og:image') || getMeta('twitter:image');
-            if (!image) {
-                // Fallback: find the first large image that isn't a logo or icon
-                const imgs = Array.from(document.querySelectorAll('img'));
-                const validImg = imgs.find(img => {
-                    const src = img.src || '';
-                    const width = img.width || img.naturalWidth || 0;
-                    return width >= 100 && 
-                           !src.includes('logo') && 
-                           !src.includes('icon') &&
-                           !src.includes('avatar') &&
-                           !src.includes('advertisement');
-                });
-                if (validImg) image = validImg.src;
-            }
-
-            // Description fallback
-            let description = getMeta('og:description') || getMeta('description') || getMeta('twitter:description');
-            if (!description) {
-                // Try to get the first substantial paragraph
-                const paragraphs = Array.from(document.querySelectorAll('p'));
-                const goodPara = paragraphs.find(p => p.innerText.trim().length > 80);
-                if (goodPara) description = goodPara.innerText.trim().slice(0, 200);
-                else if (paragraphs[0]) description = paragraphs[0].innerText.trim().slice(0, 200);
-            }
-
-            // Ensure description is not the security message
-            if (description && (description.includes('security service') || description.includes('verify you are not a bot'))) {
-                description = null;
-            }
-
-            return {
-                image,
-                description,
-                siteName: getMeta('og:site_name'),
-            };
-        });
-
-        console.log(`[News] Metadata extracted: image=${metadata.image ? 'yes' : 'no'}, description=${metadata.description ? 'yes' : 'no'}`);
-        return metadata;
-    } catch (err) {
-        console.error(`[News] Failed to fetch metadata (attempt ${3 - retries}): ${err.message}`);
-        if (retries > 0) {
-            console.log(`[News] Retrying...`);
-            if (browser) await browser.close().catch(() => {});
-            return fetchArticleMetadata(articleUrl, retries - 1);
-        }
-        return { image: null, description: null, siteName: null };
-    } finally {
-        if (browser) await browser.close().catch(() => {});
-    }
-}
-
-// --- Scrape the latest Libya news with multiple selectors ---
+// === Core: fetch latest news from RSS feed ===
 async function getLatestLibyaNews() {
     try {
-        const { data: html } = await axios.get(SOURCE_URL, {
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-            }
-        });
-        
-        const $ = cheerio.load(html);
-        
-        // Try multiple selectors in order of specificity
-        let headlineElement = null;
-        let selectors = [
-            'article .article-card__headline',
-            '.article-card__headline',
-            'a[href*="/A/"]',
-            '.article-title',
-            'h2 a',
-            '.list-layout a'
-        ];
-        
-        for (const selector of selectors) {
-            headlineElement = $(selector).first();
-            if (headlineElement.length && headlineElement.text().trim()) {
-                console.log(`[News] Found article with selector: ${selector}`);
-                break;
-            }
+        const feed = await parser.parseURL(RSS_FEED_URL);
+        if (!feed.items || feed.items.length === 0) {
+            throw new Error('No items in RSS feed.');
         }
-        
-        if (!headlineElement || !headlineElement.length) {
-            throw new Error('No article headlines found with any selector.');
-        }
-
-        let title = headlineElement.text().trim();
-        let intermediateUrl = headlineElement.attr('href');
-        
-        // If title is empty, try deeper
-        if (!title) {
-            title = headlineElement.find('.article-title').text().trim() || headlineElement.text().trim();
-        }
-        
-        if (!title || !intermediateUrl) {
-            throw new Error('Missing title or link.');
-        }
-        
-        console.log(`[News] Found: "${title}" -> ${intermediateUrl}`);
-        
-        // Resolve the redirect to get the final article URL
-        const finalUrl = await resolveFinalUrl(intermediateUrl);
-        
+        const latest = feed.items[0];
         return {
-            title,
-            url: finalUrl,
+            title: latest.title,
+            url: latest.link,
             scrapedAt: new Date().toISOString(),
-            sourceUrl: SOURCE_URL,
+            sourceUrl: RSS_FEED_URL,
         };
-    } catch (error) {
-        console.error('[News] Scraping error:', error.message);
-        throw new Error('Could not fetch the latest news from NewsNow.');
+    } catch (err) {
+        console.error('[News] RSS fetch error:', err.message);
+        throw new Error('Could not fetch latest news from RSS feed.');
     }
 }
 
-// --- Persistent data helpers ---
+// === Persistent data helpers (unchanged) ===
 function getNewsData(db, guildId) {
     if (!db[guildId]) db[guildId] = {};
     if (!db[guildId].__news) {
@@ -343,32 +44,25 @@ function getNewsData(db, guildId) {
     return db[guildId].__news;
 }
 
-// --- Post to Discord with rich embed (including image) ---
+// === Post to Discord ===
 async function postNewsUpdate(client, newsState, latestArticle, forced = false) {
     if (!newsState.channelId) return false;
     const channel = await client.channels.fetch(newsState.channelId).catch(() => null);
     if (!channel || !channel.isTextBased()) return false;
 
-    // Fetch the article's image and description
-    const metadata = await fetchArticleMetadata(latestArticle.url);
-
     const embed = new EmbedBuilder()
-        .setColor(0xE67E22) // Libyan gold/orange
+        .setColor(0xE67E22)
         .setTitle(`📰 ${latestArticle.title}`)
         .setURL(latestArticle.url)
-        .setDescription(metadata.description || 'Click the title to read the full article.')
+        .setDescription('Click the title to read the full article.')
         .setTimestamp(new Date(latestArticle.scrapedAt))
-        .setFooter({ text: `Source: NewsNow Libya${metadata.siteName ? ` · ${metadata.siteName}` : ''}` });
-
-    if (metadata.image) {
-        embed.setImage(metadata.image);
-    }
+        .setFooter({ text: 'Source: Telegram Channel' });
 
     await channel.send({ embeds: [embed] });
     return true;
 }
 
-// --- Main update function ---
+// === Main update function ===
 async function updateNews({ client, db, saveData, guildId, forcePost = false }) {
     const newsState = getNewsData(db, guildId);
     newsState.lastCheckedAt = new Date().toISOString();
@@ -376,7 +70,6 @@ async function updateNews({ client, db, saveData, guildId, forcePost = false }) 
     const latestArticle = await getLatestLibyaNews();
     const isNew = latestArticle.url !== newsState.lastPostedUrl;
 
-        // Debug: log whether this is considered new and what the URLs are
     console.log(`[News] Auto check for guild ${guildId}: isNew=${isNew}, lastUrl=${newsState.lastPostedUrl}, currentUrl=${latestArticle.url}`);
 
     newsState.history = newsState.history || [];
@@ -392,7 +85,7 @@ async function updateNews({ client, db, saveData, guildId, forcePost = false }) 
     return { latestArticle, posted, isNew };
 }
 
-// --- Admin & safe reply helpers ---
+// === Admin helpers ===
 function isAdmin(interaction) {
     return interaction.memberPermissions?.has(PermissionFlagsBits.Administrator);
 }
@@ -415,7 +108,7 @@ async function safeDefer(interaction, opts = {}) {
     }
 }
 
-// --- Slash command definitions ---
+// === Slash commands ===
 const newsCommands = [
     new SlashCommandBuilder()
         .setName('news-set-channel')
@@ -431,7 +124,7 @@ const newsCommands = [
         .setDMPermission(false),
 ].map(cmd => cmd.toJSON());
 
-// --- Module initialisation ---
+// === Module initialisation ===
 module.exports = function initLibyaNews({ client, db, saveData }) {
     const timers = new Map();
 
@@ -473,7 +166,7 @@ module.exports = function initLibyaNews({ client, db, saveData }) {
                 saveData(guild.id);
                 scheduleGuild(guild.id);
 
-                await safeReply(interaction, { content: `📰 News updates will post in ${channel} every hour. Fetching the latest news now...`, flags: 64 });
+                await safeReply(interaction, { content: `📰 News updates will post in ${channel}. Fetching latest news...`, flags: 64 });
                 await updateNews({ client, db, saveData, guildId: guild.id, forcePost: true });
                 return;
             }
@@ -482,12 +175,12 @@ module.exports = function initLibyaNews({ client, db, saveData }) {
                 if (!isAdmin(interaction)) return safeReply(interaction, { content: '❌ Only admins can refresh news.', flags: 64 });
                 await safeDefer(interaction, { flags: 64 });
                 const result = await updateNews({ client, db, saveData, guildId: guild.id, forcePost: true });
-                const statusText = result.posted ? '✅ Posted to the configured channel.' : 'ℹ️ No new article found (or no channel set).';
+                const statusText = result.posted ? '✅ Posted to configured channel.' : 'ℹ️ No new article found (or no channel set).';
                 return safeReply(interaction, { content: `📰 News refresh complete. ${statusText}` });
             }
         } catch (err) {
             console.error(`News command error (${commandName}):`, err);
-            return safeReply(interaction, { content: `❌ News feature error: ${err.message.slice(0, 200)}`, flags: 64 });
+            return safeReply(interaction, { content: `❌ News error: ${err.message.slice(0, 200)}`, flags: 64 });
         }
     });
 };
