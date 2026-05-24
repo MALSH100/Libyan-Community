@@ -22,9 +22,14 @@ async function getLatestLibyaNews() {
             return new Date(b.pubDate) - new Date(a.pubDate);
         });
         const latest = feed.items[0];
+        // Extract a clean description (remove HTML if any)
+        let description = latest.contentSnippet || latest.description || '';
+        // Trim and limit length (max 200 chars)
+        if (description.length > 200) description = description.slice(0, 197) + '...';
         return {
             title: latest.title,
             url: latest.link,
+            description: description,
             scrapedAt: new Date().toISOString(),
             sourceUrl: RSS_FEED_URL,
         };
@@ -54,13 +59,20 @@ async function postNewsUpdate(client, newsState, latestArticle, forced = false) 
     const channel = await client.channels.fetch(newsState.channelId).catch(() => null);
     if (!channel || !channel.isTextBased()) return false;
 
+    // Use the description from the article, or fallback
+    const description = latestArticle.description || 'Click the title to read the full article.';
+    
     const embed = new EmbedBuilder()
-        .setColor(0xE67E22)
-        .setTitle(`📰 ${latestArticle.title}`)
+        .setColor(0x4285F4) // Google blue
+        .setTitle(latestArticle.title)
         .setURL(latestArticle.url)
-        .setDescription('Click the title to read the full article.')
+        .setDescription(description)
         .setTimestamp(new Date(latestArticle.scrapedAt))
-        .setFooter({ text: 'Source: Telegram Channel' });
+        .setFooter({ text: 'Source: Google News', iconURL: 'https://www.google.com/favicon.ico' })
+        .setAuthor({ name: '📰 Latest Libya News' });
+
+    // Optional: add a small thumbnail image (Google News logo)
+    embed.setThumbnail('https://www.google.com/favicon.ico');
 
     await channel.send({ embeds: [embed] });
     return true;
