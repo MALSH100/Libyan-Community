@@ -6,7 +6,7 @@ const parser = new Parser();
 // === CONFIGURATION ===
 // Replace this URL with your Telegram RSS feed URL
 // You can get it by running tg2rss (or use a public RSS service like rss.app)
-const RSS_FEED_URL = 'http://host.docker.internal:8080/LibyanIntelll';
+const RSS_FEED_URL = 'https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en&q=Libya&tbs=sbd:1';
 const CHECK_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
 const MAX_HISTORY = 50;
 
@@ -17,6 +17,10 @@ async function getLatestLibyaNews() {
         if (!feed.items || feed.items.length === 0) {
             throw new Error('No items in RSS feed.');
         }
+        // Sort items by publication date (newest first)
+        feed.items.sort((a, b) => {
+            return new Date(b.pubDate) - new Date(a.pubDate);
+        });
         const latest = feed.items[0];
         return {
             title: latest.title,
