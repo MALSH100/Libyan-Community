@@ -533,13 +533,13 @@ async function awardBattleXp(pokemon, won) {
 
 function scheduleNextSpawn(channel, db, saveData, getGuildClans, getUserClan) {
   if (spawnTimers[channel.id]) clearTimeout(spawnTimers[channel.id]);
-  spawnTimers[channel.id] = setTimeout(
-    () => triggerSpawn(channel, db, saveData, getGuildClans, getUserClan),
+    spawnTimers[channel.id] = setTimeout(
+    () => triggerSpawn(channel, db, saveData, getGuildClans, getUserClan, awardLP),
     SPAWN_INTERVAL_MS
   );
 }
 
-async function triggerSpawn(channel, db, saveData, getGuildClans, getUserClan) {
+async function triggerSpawn(channel, db, saveData, getGuildClans, getUserClan, awardLP) {
   // Don't spawn if one is already active here
   if (activeSpawns[channel.id]) {
     scheduleNextSpawn(channel, db, saveData, getGuildClans, getUserClan);
@@ -1506,7 +1506,7 @@ module.exports = function initPokemon({ client, db, saveData, getGuildClans, get
 
       // Clear any existing timer and spawn immediately
       if (spawnTimers[targetChannel.id]) clearTimeout(spawnTimers[targetChannel.id]);
-      await triggerSpawn(targetChannel, db, saveData, getGuildClans, getUserClan);
+            await triggerSpawn(targetChannel, db, saveData, getGuildClans, getUserClan, awardLP);
       return;
     }
     if (commandName === 'pokemon-server') {
