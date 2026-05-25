@@ -3,7 +3,7 @@ const { SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits } = require('disc
 const axios = require('axios');
 
 // === CONFIGURATION ===
-const CHECK_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
+const CHECK_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
 const MAX_HISTORY = 50;
 
 // ----------------------------------------------------------------------
