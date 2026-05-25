@@ -48,13 +48,12 @@ async function fetchOpenSooqJobs() {
             timeout: 30000
         });
         
-        // Wait for any element that contains a time pattern (e.g., "23 minutes ago")
+        // Wait for any time indicator
         await page.waitForFunction(() => {
             return document.body.innerText.match(/\d+\s+(minute|hour|day|week)s?\s+ago/i);
         }, { timeout: 15000 });
         
         const jobs = await page.evaluate(() => {
-            // Find all elements that contain a time pattern
             const timePattern = /\b(\d+)\s+(minute|hour|day|week)s?\s+ago\b/i;
             const containers = Array.from(document.querySelectorAll('div, li, article')).filter(el => {
                 return timePattern.test(el.innerText);
@@ -62,7 +61,7 @@ async function fetchOpenSooqJobs() {
             
             const jobItems = [];
             for (const container of containers) {
-                // Extract time value
+                // Extract time
                 const match = container.innerText.match(timePattern);
                 if (!match) continue;
                 const value = parseInt(match[1]);
@@ -75,21 +74,61 @@ async function fetchOpenSooqJobs() {
                 else if (unit === 'week') date = new Date(now - value * 604800000);
                 else date = now;
                 
-                // Look for job link (prioritize /job-posters/ over /job-vacancies/)
+                // Find job link (prefer /job-posters/)
                 let link = container.querySelector('a[href*="/job-posters/"]');
                 if (!link) link = container.querySelector('a[href*="/job-vacancies/"]');
                 if (!link) continue;
                 
-                const title = link.innerText.trim();
-                const url = link.href;
-                jobItems.push({ title, url, date });
+                // Extract clean title – remove extra text after " - "
+                let rawTitle = link.innerText.trim();
+                let cleanTitle = rawTitle.split(' - ')[0]; // e.g., "Pharmaceutical Pharmacist"
+                
+                // Extract location (look for a line that contains a city name)
+                const lines = container.innerText.split('\n').map(l => l.trim()).filter(l => l);
+                let location = 'Libya';
+                for (const line of lines) {
+                    if (line.includes('Tripoli') || line.includes('Benghazi') || line.includes('Misrata')) {
+                        location = line;
+                        break;
+                    }
+                }
+                
+                // Extract details (contract, days, salary, benefits)
+                let contractType = 'Not specified';
+                let workingDays = 'Not specified';
+                let salary = 'Not specified';
+                let benefits = 'None';
+                
+                for (const line of lines) {
+                    const lower = line.toLowerCase();
+                    if (lower.includes('contract type')) contractType = line.split(':')[1]?.trim() || contractType;
+                    if (lower.includes('working days')) workingDays = line.split(':')[1]?.trim() || workingDays;
+                    if (lower.includes('expected salary')) salary = line.split(':')[1]?.trim() || salary;
+                    if (lower.includes('benefits')) benefits = line.split(':')[1]?.trim() || benefits;
+                }
+                
+                // Build a clean description from the details
+                const descriptionParts = [];
+                if (contractType !== 'Not specified') descriptionParts.push(`**Contract:** ${contractType}`);
+                if (workingDays !== 'Not specified') descriptionParts.push(`**Working Days:** ${workingDays}`);
+                if (salary !== 'Not specified') descriptionParts.push(`**Salary:** ${salary}`);
+                if (benefits !== 'None') descriptionParts.push(`**Benefits:** ${benefits}`);
+                const cleanDescription = descriptionParts.join('\n') || 'Click the link for more details.';
+                
+                jobItems.push({
+                    title: cleanTitle,
+                    url: link.href,
+                    location,
+                    description: cleanDescription,
+                    date
+                });
             }
             return jobItems;
         });
         
         // Sort by date (newest first)
         jobs.sort((a, b) => b.date - a.date);
-        console.log(`[Jobs] OpenSooq found ${jobs.length} jobs with time, newest: ${jobs[0]?.title}`);
+        console.log(`[Jobs] OpenSooq found ${jobs.length} jobs, newest: ${jobs[0]?.title}`);
         await browser.close();
         
         if (jobs.length === 0) return [];
@@ -97,9 +136,8 @@ async function fetchOpenSooqJobs() {
         return [{
             id: `opensooq_${latest.url.split('/').pop() || Date.now()}`,
             title: latest.title,
-            company: 'Not specified',
-            location: 'Libya',
-            description: 'Click the link to view the full job description.',
+            location: latest.location,
+            description: latest.description,
             url: latest.url,
             postedAt: latest.date,
             source: 'opensooq'
@@ -154,14 +192,13 @@ async function postJobsUpdate(client, jobsState, job, forced = false) {
     if (!channel || !channel.isTextBased()) return false;
 
     const embed = new EmbedBuilder()
-        .setColor(0x2B5B84)    // professional blue
+        .setColor(0x2B5B84)
         .setTitle(`💼 ${job.title}`)
         .setURL(job.url)
         .addFields(
-            { name: '🏢 Company', value: job.company || 'Not specified', inline: true },
             { name: '📍 Location', value: job.location || 'Libya', inline: true },
             { name: '📅 Posted', value: `<t:${Math.floor(job.postedAt.getTime() / 1000)}:R>`, inline: true },
-            { name: '📝 Description', value: job.description || 'Click the link to view the full job posting.' }
+            { name: '📝 Details', value: job.description || 'Click the link to view the full job posting.', inline: false }
         )
         .setFooter({ text: `Source: ${job.source} • Jobs updated every 30 minutes` })
         .setTimestamp();
@@ -169,7 +206,6 @@ async function postJobsUpdate(client, jobsState, job, forced = false) {
     await channel.send({ embeds: [embed] });
     return true;
 }
-
 // ----------------------------------------------------------------------
 // Main update function (called by timer or /jobs-refresh)
 // ----------------------------------------------------------------------
