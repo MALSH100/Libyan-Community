@@ -39,9 +39,9 @@ async function getLatestLibyaNews() {
             const urlObj = new URL(latest.link);
             sourceDomain = urlObj.hostname.replace(/^www\./, '');
         } catch (e) {}
-        return {
+               return {
             title: latest.title,
-            rssUrl: latest.link, // original Google News redirect URL
+            url: latest.link,          // renamed from rssUrl
             scrapedAt: new Date().toISOString(),
             sourceUrl: RSS_FEED_URL,
         };
@@ -82,36 +82,16 @@ async function fetchArticleMetadata(articleUrl) {
     try {
         browser = await chromium.launch({
             headless: true,
-            args: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-blink-features=AutomationControlled'
-            ],
+            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
         });
         const page = await browser.newPage();
-        
-        // Set a realistic viewport and wait for networkidle to ensure images load
-        await page.setViewportSize({ width: 1280, height: 800 });
         await page.goto(resolvedUrl, { waitUntil: 'networkidle', timeout: 30000 });
         
-        // Additional wait for lazy-loaded images
+        // Wait longer for lazy-loaded images and meta tags
         await page.waitForTimeout(5000);
         
-        // Scroll to trigger lazy-loaded images
-        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight * 0.5));
-        await page.waitForTimeout(2000);
-        
         const metadata = await page.evaluate(() => {
-            // Helper to resolve relative URLs
-            function resolveUrl(url) {
-                if (!url) return null;
-                if (url.startsWith('//')) return 'https:' + url;
-                if (url.startsWith('/')) return new URL(url, window.location.origin).href;
-                return url;
-            }
-            
-            // Get description (same as before)
+            // Get description
             let description = document.querySelector('meta[property="og:description"]')?.getAttribute('content');
             if (!description) description = document.querySelector('meta[name="description"]')?.getAttribute('content');
             if (!description) {
@@ -121,77 +101,25 @@ async function fetchArticleMetadata(articleUrl) {
             }
             if (description && description.length > 250) description = description.slice(0, 247) + '...';
             
-            // Get image - try multiple sources
-            let image = null;
-            
-            // 1. Open Graph image
-            image = document.querySelector('meta[property="og:image"]')?.getAttribute('content');
-            if (image) image = resolveUrl(image);
-            
-            // 2. Twitter image
+            // Get image – try multiple methods
+            let image = document.querySelector('meta[property="og:image"]')?.getAttribute('content');
+            if (!image) image = document.querySelector('meta[name="twitter:image"]')?.getAttribute('content');
             if (!image) {
-                image = document.querySelector('meta[name="twitter:image"]')?.getAttribute('content');
-                if (image) image = resolveUrl(image);
-            }
-            
-            // 3. Schema.org image
-            if (!image) {
-                const schemaImg = document.querySelector('meta[itemprop="image"]')?.getAttribute('content');
-                if (schemaImg) image = resolveUrl(schemaImg);
-            }
-            
-            // 4. First large image in article or main content area
-            if (!image) {
-                // Look for article or main content containers first
-                const contentSelectors = [
-                    'article img', '.article-content img', '.post-content img',
-                    '.entry-content img', '.story-content img', '.node-content img',
-                    'main img', '.content img', '.story-body img'
-                ];
-                let foundImg = null;
-                for (const selector of contentSelectors) {
-                    const imgElement = document.querySelector(selector);
-                    if (imgElement && imgElement.src) {
-                        foundImg = imgElement;
-                        break;
+                // Look for the largest image on the page (excluding tiny icons)
+                const images = Array.from(document.querySelectorAll('img'));
+                const sorted = images.sort((a, b) => (b.width || b.naturalWidth || 0) - (a.width || a.naturalWidth || 0));
+                const mainImg = sorted.find(img => {
+                    const src = img.src || '';
+                    const width = img.width || img.naturalWidth || 0;
+                    return width >= 200 && !src.includes('logo') && !src.includes('icon') && !src.includes('avatar');
+                });
+                if (mainImg) {
+                    if (mainImg.src.startsWith('/')) {
+                        image = new URL(mainImg.src, window.location.origin).href;
+                    } else {
+                        image = mainImg.src;
                     }
                 }
-                // Fallback to any large image
-                if (!foundImg) {
-                    const allImages = Array.from(document.querySelectorAll('img'));
-                    foundImg = allImages.find(img => {
-                        const src = img.src || '';
-                        const width = img.width || img.naturalWidth || 0;
-                        const alt = (img.alt || '').toLowerCase();
-                        return width >= 200 && 
-                               !src.includes('logo') && 
-                               !src.includes('icon') &&
-                               !src.includes('avatar') &&
-                               !src.includes('advertisement') &&
-                               !alt.includes('logo') &&
-                               !alt.includes('icon');
-                    });
-                }
-                if (foundImg && foundImg.src) {
-                    image = resolveUrl(foundImg.src);
-                }
-            }
-            
-            // 5. If still no image, try background-image in an article element
-            if (!image) {
-                const articleBg = document.querySelector('article, .article, [class*="article"]');
-                if (articleBg) {
-                    const bgStyle = window.getComputedStyle(articleBg).backgroundImage;
-                    const match = bgStyle.match(/url\(["']?([^"')]+)["']?\)/);
-                    if (match && match[1]) {
-                        image = resolveUrl(match[1]);
-                    }
-                }
-            }
-            
-            // Filter out tiny or placeholder images
-            if (image && (image.includes('data:image') || image.includes('pixel') || image.includes('placeholder'))) {
-                image = null;
             }
             
             return { description, image };
@@ -229,7 +157,7 @@ async function postNewsUpdate(client, newsState, latestArticle, forced = false) 
     if (!channel || !channel.isTextBased()) return false;
 
     // Fetch metadata (description, image, final URL) from the article page
-    const metadata = await fetchArticleMetadata(latestArticle.rssUrl);
+        const metadata = await fetchArticleMetadata(latestArticle.url);
     
     const finalUrl = metadata.resolvedUrl || latestArticle.rssUrl;
     const description = metadata.description || 'Click the title to read the full article.';
