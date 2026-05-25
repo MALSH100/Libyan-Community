@@ -209,15 +209,24 @@ function svgEscape(value) {
 }
 
 function buildChartSvg(history, mainCurrency = 'USD') {
-  // Use up to 30 days for a dense, data‑rich chart
-  let rows = (history || [])
+  // Group by date (take the last entry of each day)
+  const dailyMap = new Map();
+  (history || [])
     .filter(entry => entry.rates && typeof entry.rates[mainCurrency] === 'number')
+    .forEach(entry => {
+      const dateKey = entry.scrapedAt.slice(0, 10); // YYYY-MM-DD
+      if (!dailyMap.has(dateKey) || new Date(entry.scrapedAt) > new Date(dailyMap.get(dateKey).scrapedAt)) {
+        dailyMap.set(dateKey, entry);
+      }
+    });
+  
+  let rows = Array.from(dailyMap.values())
     .sort((a, b) => new Date(a.scrapedAt) - new Date(b.scrapedAt))
-    .slice(-30);
+    .slice(-30); // last 30 days
   
   if (rows.length === 0) return `<svg width="900" height="480"></svg>`;
 
-  // Build candlesticks (open = previous close)
+  // Build candlesticks
   const candles = [];
   for (let i = 0; i < rows.length; i++) {
     const close = rows[i].rates[mainCurrency];
@@ -225,11 +234,11 @@ function buildChartSvg(history, mainCurrency = 'USD') {
     const high = Math.max(open, close);
     const low = Math.min(open, close);
     const date = new Date(rows[i].scrapedAt);
-    const color = close < open ? '#26a69a' : (close > open ? '#ef5350' : '#888888');
+    const color = close < open ? '#4caf50' : (close > open ? '#ef5350' : '#888888'); // brighter green
     candles.push({ date, open, high, low, close, color });
   }
 
-  // Y‑axis range with minimal padding (0.5%) – magnifies small movements
+  // Y‑axis range with minimal padding
   let allHighs = candles.map(c => c.high);
   let allLows = candles.map(c => c.low);
   let min = Math.min(...allLows);
@@ -239,7 +248,6 @@ function buildChartSvg(history, mainCurrency = 'USD') {
   max = max + padRange;
   if (min < 0) min = 0;
 
-  // 5 evenly spaced Y‑ticks with 4 decimal places
   const tickCount = 5;
   const step = (max - min) / (tickCount - 1);
   const tickValues = [];
@@ -253,11 +261,10 @@ function buildChartSvg(history, mainCurrency = 'USD') {
 
   const yFor = (value) => pad.top + (1 - ((value - min) / (max - min))) * plotH;
   const xFor = (idx) => pad.left + (idx / (candles.length - 1)) * plotW;
-  // Smaller candles for a denser look
-  const candleWidth = Math.max(3, Math.min(6, plotW / candles.length * 0.5));
+  const candleWidth = Math.max(3, Math.min(8, plotW / candles.length * 0.6));
   const halfWidth = candleWidth / 2;
 
-  // Grid and Y‑axis labels (4 decimals)
+  // Grid
   const grid = [];
   for (const val of tickValues) {
     const y = yFor(val);
@@ -278,20 +285,17 @@ function buildChartSvg(history, mainCurrency = 'USD') {
     const bodyTop = Math.min(openY, closeY);
     const bodyBottom = Math.max(openY, closeY);
     const bodyHeight = Math.max(1, bodyBottom - bodyTop);
-    // Wick (only if high != low)
     if (c.high !== c.low) {
       candlesSvg.push(`<line x1="${x}" y1="${highY}" x2="${x}" y2="${lowY}" stroke="${c.color}" stroke-width="1"/>`);
     }
-    // Body
     candlesSvg.push(`<rect x="${x - halfWidth}" y="${bodyTop}" width="${candleWidth}" height="${bodyHeight}" fill="${c.color}" stroke="${c.color}" stroke-width="0.5"/>`);
   }
 
-  // Latest price callout with horizontal guide line
+  // Latest price callout
   const last = candles[candles.length-1];
   const lastX = xFor(candles.length-1);
   const lastY = yFor(last.close);
-  const guideY = lastY;
-  const guideLine = `<line x1="${pad.left}" y1="${guideY.toFixed(1)}" x2="${width - pad.right - 10}" y2="${guideY.toFixed(1)}" stroke="#888888" stroke-width="1" stroke-dasharray="4,4"/>`;
+  const guideLine = `<line x1="${pad.left}" y1="${lastY.toFixed(1)}" x2="${width - pad.right - 10}" y2="${lastY.toFixed(1)}" stroke="#888888" stroke-width="1" stroke-dasharray="4,4"/>`;
 
   const offsetX = 35, yOffset = -28;
   let labelX = lastX + offsetX, labelY = lastY + yOffset;
@@ -311,20 +315,14 @@ function buildChartSvg(history, mainCurrency = 'USD') {
     `<text x="${boxCenterX}" y="${labelY + 4}" text-anchor="middle" fill="#ffffff" font-size="11" font-weight="bold">${symbol}${last.close.toFixed(4)}</text>`
   ];
 
-  // X‑axis labels: evenly spaced to avoid gaps
+  // X‑axis labels: one per unique date, placed at the candle's x
   const xLabels = [];
-  const labelInterval = Math.max(1, Math.floor(candles.length / 8));
-  for (let i = 0; i < candles.length; i += labelInterval) {
+  for (let i = 0; i < candles.length; i++) {
     const date = candles[i].date;
     const dateKey = `${date.getDate()}/${date.getMonth() + 1}`;
     const x = xFor(i);
+    // Show every label (if too crowded, you can adjust, but with 30 days it's fine)
     xLabels.push(`<text x="${x.toFixed(1)}" y="${height - 25}" text-anchor="middle" font-size="10" fill="#b9bbbe">${svgEscape(dateKey)}</text>`);
-  }
-  // Ensure last date is shown
-  const lastDate = candles[candles.length-1].date;
-  const lastDateKey = `${lastDate.getDate()}/${lastDate.getMonth() + 1}`;
-  if (!xLabels.some(lbl => lbl.includes(lastDateKey))) {
-    xLabels.push(`<text x="${lastX.toFixed(1)}" y="${height - 25}" text-anchor="middle" font-size="10" fill="#b9bbbe">${svgEscape(lastDateKey)}</text>`);
   }
   const labels = xLabels.join('\n');
 
