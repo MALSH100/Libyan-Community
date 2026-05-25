@@ -10,6 +10,9 @@ const {
   EmbedBuilder,
   AttachmentBuilder,
   PermissionFlagsBits,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
 } = require('discord.js');
 
 const SOURCE_URL = 'https://www.facebook.com/p/Dollar-Euro-Pound-Libya-Black-Market-Exchange-Rate-100064752788893/';
@@ -581,13 +584,13 @@ if (commandName === 'exchange-chart') {
   }
   
   // Create buttons
-  const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('chart_usd').setLabel('$ USD').setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId('chart_eur').setLabel('€ EUR').setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId('chart_gbp').setLabel('£ GBP').setStyle(ButtonStyle.Primary),
   );
   
+  // Generate initial chart for USD
   const initialChart = await chartAttachment(exchangeData, 'USD');
   await interaction.reply({
     content: '📈 Select a currency to view its exchange rate trend:',
