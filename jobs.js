@@ -28,7 +28,7 @@ async function fetchOpenSooqJobs() {
         }, { timeout: 15000 });
         
         const jobData = await page.evaluate(() => {
-            // Find the first card that contains a job link and a time indicator
+            // Find the first card that has both a job link and a time indicator
             const cards = Array.from(document.querySelectorAll('div, li, article')).filter(el => {
                 const hasLink = el.querySelector('a[href*="/job-posters/"]');
                 const hasTime = /\d+\s+(minute|hour|day|week)s?\s+ago/i.test(el.innerText);
@@ -58,31 +58,13 @@ async function fetchOpenSooqJobs() {
             else if (unit === 'week') date = new Date(now - value * 604800000);
             else date = now;
             
-            // Extract location – find the element that contains the address
-            // Look for a span or div with a class like "location", "region", "job-location"
+            // Extract location using the specific element you provided
             let location = 'Libya';
-            const locationEl = card.querySelector('.location, .region, .job-location, [class*="loc"], [class*="region"]');
-            if (locationEl) {
-                location = locationEl.innerText.trim();
-            } else {
-                // Fallback: scan lines for a pattern that looks like a city/neighborhood
-                const lines = card.innerText.split('\n').map(l => l.trim()).filter(l => l);
-                for (const line of lines) {
-                    // Skip lines that are too long or contain job details
-                    if (line.length > 60) continue;
-                    if (line.match(/Tripoli|Benghazi|Misrata|Arada|Tajoura|Zawiya|Sabha|Bayda|Derna|Sirte/i)) {
-                        location = line;
-                        break;
-                    }
-                    if (line.includes(',') && !line.match(/Contract|Working|Salary|Benefits/i)) {
-                        location = line;
-                        break;
-                    }
-                }
+            const locDiv = card.querySelector('div.flex.alignItems.bold.font-14');
+            if (locDiv) {
+                const span = locDiv.querySelector('span');
+                if (span) location = span.innerText.trim();
             }
-            
-            // Remove any extra text like "Job Seekers" if it accidentally got in
-            if (location.includes('Job Seekers')) location = 'Libya';
             
             return {
                 title,
