@@ -24,101 +24,9 @@ async function fetchHiringCafeJobs() {
 
 // --- Job Fetcher: Careerjet (official API) ---
 async function fetchCareerjetJobs() {
-    const API_KEY = process.env.CAREERJET_API_KEY || '73f7f75049a63e4dbbeaad53d1b5f11d';
-    if (!API_KEY) {
-        console.warn('[Jobs] CAREERJET_API_KEY not set');
-        return [];
-    }
-    try {
-// --- Helper: Get your Railway server's public IP ---
-async function getServerIP() {
-    try {
-        const res = await axios.get('https://api.ipify.org?format=json', { timeout: 5000 });
-        return res.data.ip;
-    } catch (err) {
-        console.error('[Jobs] Could not fetch public IP:', err.message);
-        return '152.55.176.203'; // fallback to the IP seen in the 403 error
-    }
-}
-
-// --- Corrected Careerjet fetcher ---
-async function fetchCareerjetJobs() {
-    const API_KEY = process.env.CAREERJET_API_KEY || '73f7f75049a63e4dbbeaad53d1b5f11d';
-    if (!API_KEY) {
-        console.warn('[Jobs] CAREERJET_API_KEY not set');
-        return [];
-    }
-
-    try {
-        // 1. Get a real IP address for the required `user_ip` parameter
-        const realIP = await getServerIP();
-
-        const params = new URLSearchParams({
-            locale_code: 'en_GB',               // English, Great Britain
-            keywords: 'Libya',
-            sort: 'date',
-            pagesize: 5,
-            user_ip: realIP,                    // ✅ Actual, usable IP
-            user_agent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
-        });
-
-        const auth = Buffer.from(`${API_KEY}:`).toString('base64');
-        const response = await axios.get(`https://search.api.careerjet.net/v4/query?${params}`, {
-            headers: {
-                'Authorization': `Basic ${auth}`,
-                'Referer': 'https://libyan-community-production.up.railway.app'   // ✅ Your exact Railway domain
-            },
-            timeout: 15000
-        });
-
-        const jobs = response.data.jobs || [];
-        return jobs.map(job => ({
-            id: `careerjet_${job.url || job.title}`,
-            title: job.title,
-            company: job.company || 'Not specified',
-            location: (typeof job.locations === 'string' ? job.locations : 'Libya'),
-            description: (job.description || '').slice(0, 200),
-            url: job.url,
-            postedAt: job.date ? new Date(job.date) : new Date(),
-            source: 'careerjet'
-        }));
-    } catch (err) {
-        console.error('[Jobs] careerjet API error:', err.message);
-        if (err.response) console.error('[Jobs] API response:', err.response.status, err.response.data);
-        return [];
-    }
-}
-
-        const url = `https://search.api.careerjet.net/v4/query?${params}`;
-        // Basic authentication: username = API key, password = empty string
-        const auth = Buffer.from(`${API_KEY}:`).toString('base64');
-        
-        const res = await axios.get(url, {
-            headers: {
-                'Authorization': `Basic ${auth}`,
-                'Referer': 'https://libyan-community-production.up.railway.app'
-            },
-            timeout: 15000
-        });
-
-        const jobs = res.data.jobs || [];
-        return jobs.map(job => ({
-            id: `careerjet_${job.url || job.title}`,
-            title: job.title,
-            company: job.company || 'Not specified',
-            location: (typeof job.locations === 'string' ? job.locations : 'Libya'),
-            description: (job.description || '').slice(0, 200),
-            url: job.url,
-            postedAt: job.date ? new Date(job.date) : new Date(),
-            source: 'careerjet'
-        }));
-    } catch (err) {
-        console.error('[Jobs] careerjet API error:', err.message);
-        if (err.response) {
-            console.error('[Jobs] careerjet API response:', err.response.status, err.response.data);
-        }
-        return [];
-    }
+    // TODO: whitelist the IP in Careerjet dashboard
+    console.log('[Jobs] Careerjet disabled – waiting for IP whitelist');
+    return [];
 }
 
 
@@ -139,35 +47,48 @@ async function fetchOpenSooqJobs() {
             waitUntil: 'networkidle',
             timeout: 30000
         });
-        // Wait for job cards to appear (the page uses lazy loading)
-        await page.waitForSelector('.ListingCell, .job-item, .ad-item', { timeout: 15000 }).catch(() => {});
+        
+        // Wait for any job link to appear
+        await page.waitForSelector('a[href*="/job-vacancies/"]', { timeout: 15000 });
+        
         const jobs = await page.evaluate(() => {
-            const items = Array.from(document.querySelectorAll('.ListingCell, .job-item, .ad-item, .post-item'));
-            return items.slice(0, 5).map(el => {
-                // Extract title and URL – common patterns
-                const titleLink = el.querySelector('h3 a, .title a, a[href*="/job-vacancies/"]');
-                const title = titleLink?.innerText?.trim() || '';
-                const url = titleLink?.href || '';
-                // Extract company and location
-                const companyEl = el.querySelector('.company-name, .user-name, .details span:first-child');
-                const locationEl = el.querySelector('.location, .region, .details span:last-child');
-                const company = companyEl?.innerText?.trim() || 'Not specified';
-                const location = locationEl?.innerText?.trim() || 'Libya';
-                // Extract description
-                const descEl = el.querySelector('.description, .job-description, p');
-                const description = descEl?.innerText?.trim()?.slice(0, 200) || '';
-                return { title, url, company, location, description };
+            // Find all links that look like job listings
+            const links = Array.from(document.querySelectorAll('a[href*="/en/jobs/job-vacancies/"]'));
+            return links.slice(0, 5).map(link => {
+                const title = link.innerText.trim();
+                const url = link.href;
+                // Try to get company and location from the nearest parent container
+                let company = 'Not specified';
+                let location = 'Libya';
+                const parent = link.closest('div, li, article');
+                if (parent) {
+                    const text = parent.innerText;
+                    const lines = text.split('\n');
+                    for (const line of lines) {
+                        const lower = line.toLowerCase();
+                        if (lower.includes('company') || lower.includes('by ')) {
+                            company = line.replace(/company|by/gi, '').trim();
+                        }
+                        if (lower.includes('tripoli') || lower.includes('benghazi') || lower.includes('misrata')) {
+                            location = line.trim();
+                        }
+                    }
+                }
+                return { title, url, company, location };
             }).filter(job => job.title && job.url);
         });
+        
+        console.log(`[Jobs] OpenSooq found ${jobs.length} jobs`);
         await browser.close();
+        
         return jobs.map(job => ({
             id: `opensooq_${job.url.split('/').pop() || Date.now()}`,
             title: job.title,
             company: job.company,
             location: job.location,
-            description: job.description || 'Click the link for more details.',
-            url: job.url.startsWith('http') ? job.url : `https://ly.opensooq.com${job.url}`,
-            postedAt: new Date(), // OpenSooq doesn't give reliable dates, use current time
+            description: 'Click the link to view the full job details.',
+            url: job.url,
+            postedAt: new Date(),
             source: 'opensooq'
         }));
     } catch (err) {
