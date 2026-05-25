@@ -30,15 +30,64 @@ async function fetchCareerjetJobs() {
         return [];
     }
     try {
-        // Required parameters per Careerjet API documentation
+// --- Helper: Get your Railway server's public IP ---
+async function getServerIP() {
+    try {
+        const res = await axios.get('https://api.ipify.org?format=json', { timeout: 5000 });
+        return res.data.ip;
+    } catch (err) {
+        console.error('[Jobs] Could not fetch public IP:', err.message);
+        return '152.55.176.203'; // fallback to the IP seen in the 403 error
+    }
+}
+
+// --- Corrected Careerjet fetcher ---
+async function fetchCareerjetJobs() {
+    const API_KEY = process.env.CAREERJET_API_KEY || '73f7f75049a63e4dbbeaad53d1b5f11d';
+    if (!API_KEY) {
+        console.warn('[Jobs] CAREERJET_API_KEY not set');
+        return [];
+    }
+
+    try {
+        // 1. Get a real IP address for the required `user_ip` parameter
+        const realIP = await getServerIP();
+
         const params = new URLSearchParams({
-            locale_code: 'en_GB',           // English, Great Britain
-            keywords: 'Libya',               // Search term
-            sort: 'date',                   // Newest first
-            pagesize: 5,                    // Fetch up to 5 jobs
-            user_ip: 'auto',                // Let Careerjet detect IP
-            user_agent: 'Mozilla/5.0 (compatible; DiscordBot/1.0)'
+            locale_code: 'en_GB',               // English, Great Britain
+            keywords: 'Libya',
+            sort: 'date',
+            pagesize: 5,
+            user_ip: realIP,                    // ✅ Actual, usable IP
+            user_agent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
         });
+
+        const auth = Buffer.from(`${API_KEY}:`).toString('base64');
+        const response = await axios.get(`https://search.api.careerjet.net/v4/query?${params}`, {
+            headers: {
+                'Authorization': `Basic ${auth}`,
+                'Referer': 'https://libyan-community-production.up.railway.app'   // ✅ Your exact Railway domain
+            },
+            timeout: 15000
+        });
+
+        const jobs = response.data.jobs || [];
+        return jobs.map(job => ({
+            id: `careerjet_${job.url || job.title}`,
+            title: job.title,
+            company: job.company || 'Not specified',
+            location: (typeof job.locations === 'string' ? job.locations : 'Libya'),
+            description: (job.description || '').slice(0, 200),
+            url: job.url,
+            postedAt: job.date ? new Date(job.date) : new Date(),
+            source: 'careerjet'
+        }));
+    } catch (err) {
+        console.error('[Jobs] careerjet API error:', err.message);
+        if (err.response) console.error('[Jobs] API response:', err.response.status, err.response.data);
+        return [];
+    }
+}
 
         const url = `https://search.api.careerjet.net/v4/query?${params}`;
         // Basic authentication: username = API key, password = empty string
