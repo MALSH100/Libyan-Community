@@ -316,7 +316,14 @@ async function postUpdate(client, guildId, exchangeData, latest, forced = false)
         if (i.customId === 'chart_eur') currency = 'EUR';
         if (i.customId === 'chart_gbp') currency = 'GBP';
         const newChart = await chartAttachment(exchangeData, currency);
-        await i.update({ files: [newChart], components: [row] });
+        // Clone the original embed and update its image URL to match the new attachment
+        const updatedEmbed = EmbedBuilder.from(embed)
+          .setImage(`attachment://libya-exchange-chart-${currency}.png`);
+        await i.update({
+          embeds: [updatedEmbed],
+          files: [newChart],
+          components: [row],
+        });
       } catch (err) {
         console.error('[Exchange] Button error:', err);
         await i.reply({ content: 'Failed to update chart.', ephemeral: true });
