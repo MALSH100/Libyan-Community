@@ -48,34 +48,60 @@ async function fetchOpenSooqJobs() {
             timeout: 30000
         });
         
-        // Wait for any job link
-        await page.waitForSelector('a[href*="/job-vacancies/"]', { timeout: 15000, state: 'attached' });
+        // Wait for any element that contains a time pattern (e.g., "23 minutes ago")
+        await page.waitForFunction(() => {
+            return document.body.innerText.match(/\d+\s+(minute|hour|day|week)s?\s+ago/i);
+        }, { timeout: 15000 });
         
-        // Get the first 5 job links and their texts
-        const links = await page.evaluate(() => {
-            const allLinks = Array.from(document.querySelectorAll('a[href*="/job-vacancies/"]'));
-            return allLinks.slice(0, 5).map(link => ({
-                href: link.href,
-                text: link.innerText.trim()
-            }));
+        const jobs = await page.evaluate(() => {
+            // Find all elements that contain a time pattern
+            const timePattern = /\b(\d+)\s+(minute|hour|day|week)s?\s+ago\b/i;
+            const containers = Array.from(document.querySelectorAll('div, li, article')).filter(el => {
+                return timePattern.test(el.innerText);
+            });
+            
+            const jobItems = [];
+            for (const container of containers) {
+                // Extract time value
+                const match = container.innerText.match(timePattern);
+                if (!match) continue;
+                const value = parseInt(match[1]);
+                const unit = match[2].toLowerCase();
+                const now = new Date();
+                let date;
+                if (unit === 'minute') date = new Date(now - value * 60000);
+                else if (unit === 'hour') date = new Date(now - value * 3600000);
+                else if (unit === 'day') date = new Date(now - value * 86400000);
+                else if (unit === 'week') date = new Date(now - value * 604800000);
+                else date = now;
+                
+                // Look for job link (prioritize /job-posters/ over /job-vacancies/)
+                let link = container.querySelector('a[href*="/job-posters/"]');
+                if (!link) link = container.querySelector('a[href*="/job-vacancies/"]');
+                if (!link) continue;
+                
+                const title = link.innerText.trim();
+                const url = link.href;
+                jobItems.push({ title, url, date });
+            }
+            return jobItems;
         });
         
-        console.log('[Jobs] OpenSooq first 5 job links:');
-        links.forEach((link, i) => console.log(`  ${i+1}. ${link.text} -> ${link.href}`));
-        
+        // Sort by date (newest first)
+        jobs.sort((a, b) => b.date - a.date);
+        console.log(`[Jobs] OpenSooq found ${jobs.length} jobs with time, newest: ${jobs[0]?.title}`);
         await browser.close();
         
-        // Return the first one as the latest
-        if (links.length === 0) return [];
-        const first = links[0];
+        if (jobs.length === 0) return [];
+        const latest = jobs[0];
         return [{
-            id: `opensooq_${first.href.split('/').pop() || Date.now()}`,
-            title: first.text,
+            id: `opensooq_${latest.url.split('/').pop() || Date.now()}`,
+            title: latest.title,
             company: 'Not specified',
             location: 'Libya',
-            description: 'Click the link to view the full job details.',
-            url: first.href,
-            postedAt: new Date(),
+            description: 'Click the link to view the full job description.',
+            url: latest.url,
+            postedAt: latest.date,
             source: 'opensooq'
         }];
     } catch (err) {
