@@ -198,26 +198,55 @@ function svgEscape(value) {
 }
 
 function buildChartSvg(history, mainCurrency = 'USD') {
-  let rows = (history || []).filter(entry => entry.rates && typeof entry.rates[mainCurrency] === 'number')
-    .sort((a, b) => new Date(a.scrapedAt) - new Date(b.scrapedAt)).slice(-CHART_POINTS);
+  // Filter entries with valid rate for the selected currency, sort by date
+  let rows = (history || [])
+    .filter(entry => entry.rates && typeof entry.rates[mainCurrency] === 'number')
+    .sort((a, b) => new Date(a.scrapedAt) - new Date(b.scrapedAt));
+  
   if (rows.length === 0) return `<svg width="900" height="480"></svg>`;
-  const width = 900, height = 480, pad = { left: 70, right: 40, top: 50, bottom: 70 };
-  const plotW = width - pad.left - pad.right, plotH = height - pad.top - pad.bottom;
-  const palette = { USD: '#16a34a', EUR: '#2563eb', GBP: '#dc2626' };
-  const currencySymbols = { USD: '$', EUR: '€', GBP: '£' };
-  const color = palette[mainCurrency];
-  let allValues = rows.map(r => r.rates[mainCurrency]);
-  let min = Math.min(...allValues), max = Math.max(...allValues);
+
+  const width = 900;
+  const height = 480;
+  const pad = { left: 70, right: 40, top: 50, bottom: 70 };
+  const plotW = width - pad.left - pad.right;
+  const plotH = height - pad.top - pad.bottom;
+  
+  // Build candlestick data (open = previous close, high/low derived)
+  const candles = [];
+  for (let i = 0; i < rows.length; i++) {
+    const close = rows[i].rates[mainCurrency];
+    const open = i === 0 ? close : rows[i-1].rates[mainCurrency];
+    const high = Math.max(open, close);
+    const low = Math.min(open, close);
+    const date = new Date(rows[i].scrapedAt);
+    // Color: green if close < open (dinar strengthens), red if close > open (dinar weakens)
+    const color = close < open ? '#26a69a' : (close > open ? '#ef5350' : '#888888');
+    candles.push({ date, open, high, low, close, color });
+  }
+  
+  // Y‑axis range with padding
+  let allValues = candles.flatMap(c => [c.high, c.low]);
+  let min = Math.min(...allValues);
+  let max = Math.max(...allValues);
   const padVal = (max - min) * 0.1;
-  min = Math.max(0, min - padVal), max = max + padVal;
+  min = Math.max(0, min - padVal);
+  max = max + padVal;
+  
+  // Nice Y‑axis ticks
   const step = (max - min) / 4;
   let niceStep = Math.ceil(step / 0.5) * 0.5;
   if (niceStep < 0.1) niceStep = 0.1;
-  let niceMin = Math.floor(min / niceStep) * niceStep, niceMax = Math.ceil(max / niceStep) * niceStep;
+  let niceMin = Math.floor(min / niceStep) * niceStep;
+  let niceMax = Math.ceil(max / niceStep) * niceStep;
   const tickValues = [];
   for (let i = niceMin; i <= niceMax + 0.001; i += niceStep) tickValues.push(i);
-  const yFor = value => pad.top + (1 - ((value - niceMin) / (niceMax - niceMin))) * plotH;
-  const xFor = idx => pad.left + (idx / (rows.length - 1)) * plotW;
+  
+  const yFor = (value) => pad.top + (1 - ((value - niceMin) / (niceMax - niceMin))) * plotH;
+  const xFor = (idx) => pad.left + (idx / (candles.length - 1)) * plotW;
+  const candleWidth = Math.max(3, Math.min(10, plotW / candles.length * 0.6));
+  const halfWidth = candleWidth / 2;
+  
+  // Grid and Y‑axis labels
   const grid = [];
   for (const val of tickValues) {
     const y = yFor(val);
@@ -225,43 +254,70 @@ function buildChartSvg(history, mainCurrency = 'USD') {
     grid.push(`<line x1="${pad.left}" y1="${y}" x2="${width - pad.right}" y2="${y}" stroke="#4e5058" stroke-width="1"/>`);
     grid.push(`<text x="${pad.left - 10}" y="${y + 4}" text-anchor="end" font-size="12" fill="#b9bbbe">${val.toFixed(2)}</text>`);
   }
-  const points = rows.map((row, idx) => `${xFor(idx).toFixed(1)},${yFor(row.rates[mainCurrency]).toFixed(1)}`);
-  const line = `<polyline points="${points.join(' ')}" fill="none" stroke="${color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>`;
-  const dots = points.map(p => { const [x, y] = p.split(','); return `<circle cx="${x}" cy="${y}" r="3" fill="#36393f" stroke="${color}" stroke-width="1.5"/>`; }).join('\n');
-  const lastRow = rows[rows.length - 1], lastVal = lastRow.rates[mainCurrency], lastX = xFor(rows.length - 1), lastY = yFor(lastVal);
-  let labelX = lastX + 35, labelY = lastY - 28;
+  
+  // Draw candlesticks
+  const candlesSvg = [];
+  for (let i = 0; i < candles.length; i++) {
+    const c = candles[i];
+    const x = xFor(i);
+    const highY = yFor(c.high);
+    const lowY = yFor(c.low);
+    const openY = yFor(c.open);
+    const closeY = yFor(c.close);
+    const bodyTop = Math.min(openY, closeY);
+    const bodyBottom = Math.max(openY, closeY);
+    const bodyHeight = Math.max(1, bodyBottom - bodyTop);
+    // Wick
+    candlesSvg.push(`<line x1="${x}" y1="${highY}" x2="${x}" y2="${lowY}" stroke="${c.color}" stroke-width="1.5"/>`);
+    // Candle body
+    candlesSvg.push(`<rect x="${x - halfWidth}" y="${bodyTop}" width="${candleWidth}" height="${bodyHeight}" fill="${c.color}" stroke="${c.color}" stroke-width="1"/>`);
+  }
+  
+  // Callout for the latest closing value
+  const lastCandle = candles[candles.length - 1];
+  const lastX = xFor(candles.length - 1);
+  const lastY = yFor(lastCandle.close);
+  const offsetX = 35, yOffset = -28;
+  let labelX = lastX + offsetX;
+  let labelY = lastY + yOffset;
   labelX = Math.min(Math.max(labelX, pad.left + 20), width - pad.right - 55);
   labelY = Math.min(Math.max(labelY, pad.top + 15), height - pad.bottom - 20);
   const boxW = 55, boxH = 20;
   const boxX = labelX > lastX ? labelX : labelX - boxW;
-  const boxCenterX = boxX + boxW/2, boxCenterY = labelY;
+  const boxCenterX = boxX + boxW/2;
+  const boxCenterY = labelY;
+  const currencySymbols = { USD: '$', EUR: '€', GBP: '£' };
+  const symbol = currencySymbols[mainCurrency] || '';
   const callouts = [
-    `<line x1="${lastX.toFixed(1)}" y1="${lastY.toFixed(1)}" x2="${lastX.toFixed(1)}" y2="${boxCenterY.toFixed(1)}" stroke="${color}" stroke-width="1" stroke-dasharray="2,2"/>`,
-    `<line x1="${lastX.toFixed(1)}" y1="${boxCenterY.toFixed(1)}" x2="${boxCenterX.toFixed(1)}" y2="${boxCenterY.toFixed(1)}" stroke="${color}" stroke-width="1" stroke-dasharray="2,2"/>`,
-    `<rect x="${boxX}" y="${labelY - 10}" width="${boxW}" height="${boxH}" rx="4" fill="#2f3136" stroke="${color}" stroke-width="1"/>`,
-    `<text x="${boxCenterX}" y="${labelY + 3}" text-anchor="middle" fill="#ffffff" font-size="11" font-weight="bold">${currencySymbols[mainCurrency]}${lastVal.toFixed(2)}</text>`
+    `<line x1="${lastX.toFixed(1)}" y1="${lastY.toFixed(1)}" x2="${lastX.toFixed(1)}" y2="${boxCenterY.toFixed(1)}" stroke="#888888" stroke-width="1" stroke-dasharray="2,2"/>`,
+    `<line x1="${lastX.toFixed(1)}" y1="${boxCenterY.toFixed(1)}" x2="${boxCenterX.toFixed(1)}" y2="${boxCenterY.toFixed(1)}" stroke="#888888" stroke-width="1" stroke-dasharray="2,2"/>`,
+    `<rect x="${boxX}" y="${labelY - 10}" width="${boxW}" height="${boxH}" rx="4" fill="#2f3136" stroke="#888888" stroke-width="1"/>`,
+    `<text x="${boxCenterX}" y="${labelY + 3}" text-anchor="middle" fill="#ffffff" font-size="11" font-weight="bold">${symbol}${lastCandle.close.toFixed(2)}</text>`
   ];
+  
+  // X‑axis labels: one per unique date
   const xLabels = [];
   const seenDates = new Set();
-  for (let i = 0; i < rows.length; i++) {
-    const date = new Date(rows[i].scrapedAt);
+  for (let i = 0; i < candles.length; i++) {
+    const date = candles[i].date;
     const dateKey = `${date.getDate()}/${date.getMonth() + 1}`;
     if (!seenDates.has(dateKey)) {
       seenDates.add(dateKey);
       xLabels.push(`<text x="${xFor(i).toFixed(1)}" y="${height - 30}" text-anchor="middle" font-size="10" fill="#b9bbbe">${svgEscape(dateKey)}</text>`);
     }
   }
+  const labels = xLabels.join('\n');
+  
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
   <rect width="100%" height="100%" fill="#36393f"/>
-  <text x="${pad.left}" y="24" font-size="16" font-weight="700" fill="#ffffff">Libyan Black Market Exchange Trend – ${mainCurrency} (LYD per 1 unit)</text>
+  <text x="${pad.left}" y="24" font-size="16" font-weight="700" fill="#ffffff">Libyan Dinar Strength – ${mainCurrency}/LYD (Green = Dinar Strengthens, Red = Weakens)</text>
   ${grid.join('\n')}
   <line x1="${pad.left}" y1="${pad.top}" x2="${pad.left}" y2="${pad.top + plotH}" stroke="#4e5058" stroke-width="1.5"/>
   <line x1="${pad.left}" y1="${pad.top + plotH}" x2="${width - pad.right}" y2="${pad.top + plotH}" stroke="#4e5058" stroke-width="1.5"/>
-  ${line}
-  ${dots}
+  ${candlesSvg.join('\n')}
   ${callouts.join('\n')}
-  ${xLabels.join('\n')}
+  ${labels}
 </svg>`;
 }
 
