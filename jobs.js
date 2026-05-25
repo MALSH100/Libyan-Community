@@ -18,36 +18,38 @@ async function fetchOpenSooqJobs() {
             args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
         });
         const page = await browser.newPage();
-        
-        // Set a timeout for the whole navigation
         await page.goto('https://ly.opensooq.com/en/jobs/job-vacancies?search=true&sort_code=recent', {
             waitUntil: 'domcontentloaded',
             timeout: 30000
         });
         
-        // Wait for the first job card with a time indicator
+        // Wait for at least one time indicator
         await page.waitForFunction(() => {
             return document.body.innerText.match(/\d+\s+(minute|hour|day|week)s?\s+ago/i);
         }, { timeout: 15000 });
         
-        const jobs = await page.evaluate(() => {
-            // Find the first element that contains both a job link and a time indicator
+        const jobData = await page.evaluate(() => {
+            // Find all elements that contain both a job link and a time string
             const cards = Array.from(document.querySelectorAll('div, li, article')).filter(el => {
-                return el.querySelector('a[href*="/job-posters/"]') && /\d+\s+(minute|hour|day|week)s?\s+ago/i.test(el.innerText);
+                const hasLink = el.querySelector('a[href*="/job-posters/"]');
+                const hasTime = /\d+\s+(minute|hour|day|week)s?\s+ago/i.test(el.innerText);
+                return hasLink && hasTime;
             });
-            if (cards.length === 0) return [];
+            if (cards.length === 0) return null;
             
-            // Take only the first card (newest job)
+            // Take the first card (newest)
             const card = cards[0];
             const link = card.querySelector('a[href*="/job-posters/"]');
-            if (!link) return [];
+            if (!link) return null;
             
-            // Clean title – remove any leading time text
-            let title = link.innerText.trim();
-            title = title.replace(/^\d+\s+(minute|hour|day|week)s?\s+ago\s*/i, '').trim();
+            // Clean title – remove any trailing " - ..." and remove time prefix if present
+            let rawTitle = link.innerText.trim();
+            rawTitle = rawTitle.replace(/^\d+\s+(minute|hour|day|week)s?\s+ago\s*/i, '');
+            let title = rawTitle.split(' - ')[0].trim();
             
             // Extract time
             const timeMatch = card.innerText.match(/\b(\d+)\s+(minute|hour|day|week)s?\s+ago\b/i);
+            if (!timeMatch) return null;
             const value = parseInt(timeMatch[1]);
             const unit = timeMatch[2].toLowerCase();
             const now = new Date();
@@ -58,7 +60,7 @@ async function fetchOpenSooqJobs() {
             else if (unit === 'week') date = new Date(now - value * 604800000);
             else date = now;
             
-            // Extract location
+            // Extract location: find a line that contains a city name or a comma (address)
             const lines = card.innerText.split('\n').map(l => l.trim()).filter(l => l);
             let location = 'Libya';
             for (const line of lines) {
@@ -76,10 +78,9 @@ async function fetchOpenSooqJobs() {
                 }
             }
             
-            // Extract details
+            // Extract details (contract, working days, benefits) – ignore salary
             let contractType = 'Not specified';
             let workingDays = 'Not specified';
-            let salary = 'Not specified';
             let benefits = 'None';
             for (const line of lines) {
                 const lower = line.toLowerCase();
@@ -91,52 +92,37 @@ async function fetchOpenSooqJobs() {
                     const parts = line.split(':');
                     if (parts[1]) workingDays = parts[1].trim();
                 }
-                if (lower.includes('expected salary')) {
-                    const parts = line.split(':');
-                    if (parts[1]) {
-                        let sal = parts[1].trim();
-                        const numMatch = sal.match(/\d+(?:\.\d+)?/);
-                        if (numMatch) {
-                            const amount = parseFloat(numMatch[0]);
-                            if (amount >= 1 && amount <= 5000) salary = `${amount} LYD`;
-                            else salary = 'Not specified';
-                        } else {
-                            salary = sal;
-                        }
-                    }
-                }
                 if (lower.includes('benefits')) {
                     const parts = line.split(':');
                     if (parts[1]) benefits = parts[1].trim();
                 }
             }
             
+            // Build description
             const descParts = [];
             if (contractType !== 'Not specified') descParts.push(`**Contract:** ${contractType}`);
             if (workingDays !== 'Not specified') descParts.push(`**Working Days:** ${workingDays}`);
-            if (salary !== 'Not specified') descParts.push(`**Salary:** ${salary}`);
             if (benefits !== 'None') descParts.push(`**Benefits:** ${benefits}`);
             const description = descParts.join('\n') || 'Click the link for more details.';
             
-            return [{
+            return {
                 title,
                 url: link.href,
                 location,
                 description,
-                date
-            }];
+                postedAt: date.getTime()
+            };
         });
         
         await browser.close();
-        if (jobs.length === 0) return [];
-        const job = jobs[0];
+        if (!jobData) return [];
         return [{
-            id: `opensooq_${job.url.split('/').pop() || Date.now()}`,
-            title: job.title,
-            location: job.location,
-            description: job.description,
-            url: job.url,
-            postedAt: job.date,
+            id: `opensooq_${jobData.url.split('/').pop() || Date.now()}`,
+            title: jobData.title,
+            location: jobData.location,
+            description: jobData.description,
+            url: jobData.url,
+            postedAt: new Date(jobData.postedAt),
             source: 'opensooq'
         }];
     } catch (err) {
