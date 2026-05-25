@@ -79,21 +79,35 @@ async function fetchOpenSooqJobs() {
                 if (!link) link = container.querySelector('a[href*="/job-vacancies/"]');
                 if (!link) continue;
                 
-                // Extract clean title – remove extra text after " - "
+                // Clean title: take everything before " - " or before the first dash
                 let rawTitle = link.innerText.trim();
-                let cleanTitle = rawTitle.split(' - ')[0]; // e.g., "Pharmaceutical Pharmacist"
+                let cleanTitle = rawTitle.split(' - ')[0];
+                // Remove any trailing contract type like "Full Time", "Part Time", "Freelance"
+                cleanTitle = cleanTitle.replace(/\s+(Full Time|Part Time|Freelance|Contract)$/i, '').trim();
                 
-                // Extract location (look for a line that contains a city name)
                 const lines = container.innerText.split('\n').map(l => l.trim()).filter(l => l);
+                
+                // Extract location: find a line that contains a city name AND a comma (e.g., "Arada, Tripoli")
                 let location = 'Libya';
                 for (const line of lines) {
-                    if (line.includes('Tripoli') || line.includes('Benghazi') || line.includes('Misrata')) {
+                    const lower = line.toLowerCase();
+                    if ((lower.includes('tripoli') || lower.includes('benghazi') || lower.includes('misrata')) && line.includes(',')) {
                         location = line;
                         break;
                     }
                 }
+                // Fallback to any line with a city name
+                if (location === 'Libya') {
+                    for (const line of lines) {
+                        const lower = line.toLowerCase();
+                        if (lower.includes('tripoli') || lower.includes('benghazi') || lower.includes('misrata')) {
+                            location = line;
+                            break;
+                        }
+                    }
+                }
                 
-                // Extract details (contract, days, salary, benefits)
+                // Extract details with better parsing
                 let contractType = 'Not specified';
                 let workingDays = 'Not specified';
                 let salary = 'Not specified';
@@ -101,13 +115,31 @@ async function fetchOpenSooqJobs() {
                 
                 for (const line of lines) {
                     const lower = line.toLowerCase();
-                    if (lower.includes('contract type')) contractType = line.split(':')[1]?.trim() || contractType;
-                    if (lower.includes('working days')) workingDays = line.split(':')[1]?.trim() || workingDays;
-                    if (lower.includes('expected salary')) salary = line.split(':')[1]?.trim() || salary;
-                    if (lower.includes('benefits')) benefits = line.split(':')[1]?.trim() || benefits;
+                    if (lower.includes('contract type')) {
+                        const parts = line.split(':');
+                        if (parts[1]) contractType = parts[1].trim();
+                    }
+                    if (lower.includes('working days')) {
+                        const parts = line.split(':');
+                        if (parts[1]) workingDays = parts[1].trim();
+                    }
+                    if (lower.includes('expected salary')) {
+                        // Extract number and currency, ignoring absurdly high values (> 10000)
+                        const salaryMatch = line.match(/expected salary[:\s]*([\d\.,]+)\s*(LYD|USD|EUR)?/i);
+                        if (salaryMatch) {
+                            const amount = parseFloat(salaryMatch[1].replace(',', '.'));
+                            if (amount <= 10000) {
+                                salary = `${amount} ${salaryMatch[2] || 'LYD'}`;
+                            }
+                        }
+                    }
+                    if (lower.includes('benefits')) {
+                        const parts = line.split(':');
+                        if (parts[1]) benefits = parts[1].trim();
+                    }
                 }
                 
-                // Build a clean description from the details
+                // Build description
                 const descriptionParts = [];
                 if (contractType !== 'Not specified') descriptionParts.push(`**Contract:** ${contractType}`);
                 if (workingDays !== 'Not specified') descriptionParts.push(`**Working Days:** ${workingDays}`);
@@ -128,7 +160,7 @@ async function fetchOpenSooqJobs() {
         
         // Sort by date (newest first)
         jobs.sort((a, b) => b.date - a.date);
-        console.log(`[Jobs] OpenSooq found ${jobs.length} jobs, newest: ${jobs[0]?.title}`);
+        console.log(`[Jobs] OpenSooq found ${jobs.length} jobs, newest: ${jobs[0]?.title} at ${jobs[0]?.date}`);
         await browser.close();
         
         if (jobs.length === 0) return [];
@@ -191,17 +223,17 @@ async function postJobsUpdate(client, jobsState, job, forced = false) {
     const channel = await client.channels.fetch(jobsState.channelId).catch(() => null);
     if (!channel || !channel.isTextBased()) return false;
 
-    const embed = new EmbedBuilder()
-        .setColor(0x2B5B84)
-        .setTitle(`💼 ${job.title}`)
-        .setURL(job.url)
-        .addFields(
-            { name: '📍 Location', value: job.location || 'Libya', inline: true },
-            { name: '📅 Posted', value: `<t:${Math.floor(job.postedAt.getTime() / 1000)}:R>`, inline: true },
-            { name: '📝 Details', value: job.description || 'Click the link to view the full job posting.', inline: false }
-        )
-        .setFooter({ text: `Source: ${job.source} • Jobs updated every 30 minutes` })
-        .setTimestamp();
+const embed = new EmbedBuilder()
+    .setColor(0x2B5B84)
+    .setTitle(`💼 ${job.title}`)
+    .setURL(job.url)
+    .addFields(
+        { name: '📍 Location', value: job.location || 'Libya', inline: true },
+        { name: '⏱️ Posted', value: `<t:${Math.floor(job.postedAt.getTime() / 1000)}:R>`, inline: true },
+        { name: '📋 Details', value: job.description || 'Click the link to view the full job posting.', inline: false }
+    )
+    .setFooter({ text: `${job.source} • Jobs updated every 30 minutes` })
+    .setTimestamp();
 
     await channel.send({ embeds: [embed] });
     return true;
