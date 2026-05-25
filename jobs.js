@@ -39,10 +39,11 @@ async function fetchOpenSooqJobs() {
             const link = card.querySelector('a[href*="/job-posters/"]');
             if (!link) return null;
             
-            // Clean title
+            // Clean title (remove time prefix, split at " - ", remove contract suffix)
             let title = link.innerText.trim();
             title = title.replace(/^\d+\s+(minute|hour|day|week)s?\s+ago\s*/i, '');
             title = title.split(' - ')[0].trim();
+            title = title.replace(/\s+(Full Time|Part Time|Freelance|Contract)$/i, '').trim();
             
             // Extract time
             const timeMatch = card.innerText.match(/\b(\d+)\s+(minute|hour|day|week)s?\s+ago\b/i);
@@ -57,21 +58,19 @@ async function fetchOpenSooqJobs() {
             else if (unit === 'week') date = new Date(now - value * 604800000);
             else date = now;
             
-            // Extract location
+            // Extract location – skip lines that contain the title or job details
             const lines = card.innerText.split('\n').map(l => l.trim()).filter(l => l);
             let location = 'Libya';
+            const titleLower = title.toLowerCase();
             for (const line of lines) {
-                if (line.match(/Tripoli|Benghazi|Misrata|Arada|Tajoura|Zawiya|Sabha|Bayda|Derna|Sirte/i)) {
+                const lineLower = line.toLowerCase();
+                if (lineLower.includes(titleLower)) continue;
+                if (lineLower.includes('contract') || lineLower.includes('working') || 
+                    lineLower.includes('salary') || lineLower.includes('benefits')) continue;
+                if (line.match(/Tripoli|Benghazi|Misrata|Arada|Tajoura|Zawiya|Sabha|Bayda|Derna|Sirte/i) || 
+                    (line.includes(',') && line.length < 50)) {
                     location = line;
                     break;
-                }
-            }
-            if (location === 'Libya') {
-                for (const line of lines) {
-                    if (line.includes(',') && !line.match(/Contract|Working|Salary|Benefits/i)) {
-                        location = line;
-                        break;
-                    }
                 }
             }
             
