@@ -48,85 +48,33 @@ async function fetchOpenSooqJobs() {
             timeout: 30000
         });
         
-        // Wait for job links to be present
+        // Wait for the first job link to appear
         await page.waitForSelector('a[href*="/job-vacancies/"]', { timeout: 15000, state: 'attached' });
         
-        const jobs = await page.evaluate(() => {
-            const links = Array.from(document.querySelectorAll('a[href*="/job-vacancies/"]'));
-            const unique = new Map();
-            for (const link of links) {
-                const href = link.href;
-                if (!unique.has(href)) unique.set(href, link);
-            }
-            const jobList = [];
-            for (const link of unique.values()) {
-                const title = link.innerText.trim();
-                const url = link.href;
-                // Try to find date – look for a nearby element containing time
-                let date = null;
-                let parent = link.closest('div, li, article');
-                if (parent) {
-                    const timeElement = parent.querySelector('time, [datetime], .date, .time, .posted-date');
-                    if (timeElement) {
-                        const dateStr = timeElement.innerText.trim() || timeElement.getAttribute('datetime');
-                        if (dateStr) date = new Date(dateStr);
-                    }
-                    if (!date) {
-                        // fallback: look for text like "Today", "Yesterday", "2 days ago"
-                        const text = parent.innerText;
-                        const match = text.match(/(\d+)\s+(minute|hour|day|week)s?\s+ago/i);
-                        if (match) {
-                            const value = parseInt(match[1]);
-                            const unit = match[2].toLowerCase();
-                            const now = new Date();
-                            if (unit === 'minute') date = new Date(now - value * 60000);
-                            else if (unit === 'hour') date = new Date(now - value * 3600000);
-                            else if (unit === 'day') date = new Date(now - value * 86400000);
-                            else if (unit === 'week') date = new Date(now - value * 604800000);
-                        }
-                    }
-                }
-                // Company and location extraction
-                let company = 'Not specified';
-                let location = 'Libya';
-                if (parent) {
-                    const lines = parent.innerText.split('\n');
-                    for (const line of lines) {
-                        const lower = line.toLowerCase();
-                        if (lower.includes('company') || lower.includes('by ')) {
-                            company = line.replace(/company|by/gi, '').trim();
-                        }
-                        if (lower.includes('tripoli') || lower.includes('benghazi') || lower.includes('misrata')) {
-                            location = line.trim();
-                        }
-                    }
-                }
-                jobList.push({ title, url, company, location, date });
-            }
-            return jobList.filter(job => job.title && job.url);
+        // Get the first job link on the page (the newest one)
+        const firstJob = await page.evaluate(() => {
+            const link = document.querySelector('a[href*="/job-vacancies/"]');
+            if (!link) return null;
+            const title = link.innerText.trim();
+            const url = link.href;
+            return { title, url };
         });
         
-        // Sort by date (newest first) – if no date, put at end
-        jobs.sort((a, b) => {
-            if (!a.date && !b.date) return 0;
-            if (!a.date) return 1;
-            if (!b.date) return -1;
-            return b.date - a.date;
-        });
-        
-        console.log(`[Jobs] OpenSooq found ${jobs.length} jobs, newest date: ${jobs[0]?.date || 'unknown'}`);
         await browser.close();
         
-        return jobs.slice(0, 5).map(job => ({
-            id: `opensooq_${job.url.split('/').pop() || Date.now()}`,
-            title: job.title,
-            company: job.company,
-            location: job.location,
-            description: 'Click the link to view the full job description.',
-            url: job.url,
-            postedAt: job.date || new Date(),
+        if (!firstJob) return [];
+        
+        // Return the single most recent job
+        return [{
+            id: `opensooq_${firstJob.url.split('/').pop() || Date.now()}`,
+            title: firstJob.title,
+            company: 'Not specified',
+            location: 'Libya',
+            description: 'Click the link to view the full job details.',
+            url: firstJob.url,
+            postedAt: new Date(),
             source: 'opensooq'
-        }));
+        }];
     } catch (err) {
         console.error('[Jobs] opensooq error:', err.message);
         if (browser) await browser.close().catch(() => {});
