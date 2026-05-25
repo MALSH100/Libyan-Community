@@ -28,7 +28,7 @@ async function fetchOpenSooqJobs() {
         }, { timeout: 15000 });
         
         const jobData = await page.evaluate(() => {
-            // Find the first card with a job link and a time indicator
+            // Find the first card that contains a job link and a time indicator
             const cards = Array.from(document.querySelectorAll('div, li, article')).filter(el => {
                 const hasLink = el.querySelector('a[href*="/job-posters/"]');
                 const hasTime = /\d+\s+(minute|hour|day|week)s?\s+ago/i.test(el.innerText);
@@ -39,7 +39,7 @@ async function fetchOpenSooqJobs() {
             const link = card.querySelector('a[href*="/job-posters/"]');
             if (!link) return null;
             
-            // Clean title (remove time prefix, split at " - ", remove contract suffix)
+            // Clean title
             let title = link.innerText.trim();
             title = title.replace(/^\d+\s+(minute|hour|day|week)s?\s+ago\s*/i, '');
             title = title.split(' - ')[0].trim();
@@ -58,21 +58,31 @@ async function fetchOpenSooqJobs() {
             else if (unit === 'week') date = new Date(now - value * 604800000);
             else date = now;
             
-            // Extract location – skip lines that contain the title or job details
-            const lines = card.innerText.split('\n').map(l => l.trim()).filter(l => l);
+            // Extract location – find the element that contains the address
+            // Look for a span or div with a class like "location", "region", "job-location"
             let location = 'Libya';
-            const titleLower = title.toLowerCase();
-            for (const line of lines) {
-                const lineLower = line.toLowerCase();
-                if (lineLower.includes(titleLower)) continue;
-                if (lineLower.includes('contract') || lineLower.includes('working') || 
-                    lineLower.includes('salary') || lineLower.includes('benefits')) continue;
-                if (line.match(/Tripoli|Benghazi|Misrata|Arada|Tajoura|Zawiya|Sabha|Bayda|Derna|Sirte/i) || 
-                    (line.includes(',') && line.length < 50)) {
-                    location = line;
-                    break;
+            const locationEl = card.querySelector('.location, .region, .job-location, [class*="loc"], [class*="region"]');
+            if (locationEl) {
+                location = locationEl.innerText.trim();
+            } else {
+                // Fallback: scan lines for a pattern that looks like a city/neighborhood
+                const lines = card.innerText.split('\n').map(l => l.trim()).filter(l => l);
+                for (const line of lines) {
+                    // Skip lines that are too long or contain job details
+                    if (line.length > 60) continue;
+                    if (line.match(/Tripoli|Benghazi|Misrata|Arada|Tajoura|Zawiya|Sabha|Bayda|Derna|Sirte/i)) {
+                        location = line;
+                        break;
+                    }
+                    if (line.includes(',') && !line.match(/Contract|Working|Salary|Benefits/i)) {
+                        location = line;
+                        break;
+                    }
                 }
             }
+            
+            // Remove any extra text like "Job Seekers" if it accidentally got in
+            if (location.includes('Job Seekers')) location = 'Libya';
             
             return {
                 title,
