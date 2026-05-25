@@ -303,7 +303,7 @@ function svgEscape(value) {
 }
 
 function buildChartSvg(history) {
-  // Filter entries with rates and sort by date (oldest first)
+  // Filter and sort by date
   let rows = (history || [])
     .filter(entry => entry.rates)
     .sort((a, b) => new Date(a.scrapedAt) - new Date(b.scrapedAt))
@@ -319,7 +319,7 @@ function buildChartSvg(history) {
   const palette = { USD: '#16a34a', EUR: '#2563eb', GBP: '#dc2626' };
   const currencySymbols = { USD: '$', EUR: '€', GBP: '£' };
 
-  // Collect all rate values
+  // Collect all values
   let allValues = [];
   for (const row of rows) {
     for (const c of CURRENCIES) {
@@ -335,23 +335,30 @@ function buildChartSvg(history) {
   min = Math.max(0, min - padVal);
   max = max + padVal;
   
-  // Generate nice Y‑axis ticks (5 steps)
+  // Generate nice Y‑axis ticks (5 steps, rounded to 0.5 or 1.0)
   const range = max - min;
-  const step = range / 4;
+  let step = range / 4;
+  // Round step to a nice number (0.5, 1.0, etc.)
+  let stepMagnitude = Math.pow(10, Math.floor(Math.log10(step)));
+  let niceStep = Math.ceil(step / stepMagnitude) * stepMagnitude;
+  if (niceStep < 0.1) niceStep = 0.1;
+  let niceMin = Math.floor(min / niceStep) * niceStep;
+  let niceMax = Math.ceil(max / niceStep) * niceStep;
   const tickValues = [];
-  for (let i = 0; i <= 4; i++) {
-    tickValues.push(min + i * step);
+  for (let i = niceMin; i <= niceMax + 0.001; i += niceStep) {
+    tickValues.push(i);
   }
   
-  const yFor = (value) => pad.top + (1 - ((value - min) / range)) * plotH;
+  const yFor = (value) => pad.top + (1 - ((value - niceMin) / (niceMax - niceMin))) * plotH;
   
-  // X positions based on index (even spacing)
+  // X positions – evenly spaced by index
   const xFor = (idx) => pad.left + (idx / (rows.length - 1)) * plotW;
   
   // Grid and Y‑axis labels
   const grid = [];
   for (const val of tickValues) {
     const y = yFor(val);
+    if (y < pad.top - 5 || y > pad.top + plotH + 5) continue;
     grid.push(`<line x1="${pad.left}" y1="${y}" x2="${width - pad.right}" y2="${y}" stroke="#4e5058" stroke-width="1"/>`);
     grid.push(`<text x="${pad.left - 10}" y="${y + 4}" text-anchor="end" font-size="12" fill="#b9bbbe">${val.toFixed(2)}</text>`);
   }
@@ -407,7 +414,7 @@ function buildChartSvg(history) {
     callouts.push(`<text x="${boxCenterX}" y="${labelY + 3}" text-anchor="middle" fill="#ffffff" font-size="11" font-weight="bold">${symbol}${value.toFixed(2)}</text>`);
   }
   
-  // X‑axis labels (unique dates, placed under each point)
+  // X‑axis labels: one per unique date, placed at the x position of the first occurrence of that date
   const xLabels = [];
   const seenDates = new Set();
   for (let i = 0; i < rows.length; i++) {
