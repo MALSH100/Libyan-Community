@@ -479,6 +479,7 @@ function getAllCommands() {
   let yaraytCommands = [];
   let exchangeCommands = [];
   let newsCommands = [];
+  let jobsCommands = [];   // ← ADD THIS LINE
   try {
     pokeCommands = getPokemonCommands();
   } catch (e) {
@@ -499,7 +500,12 @@ function getAllCommands() {
   } catch (e) {
     console.error('Could not load libya-news.js commands:', e.message);
   }
-  _allCommands = [...commands, ...pokeCommands, ...yaraytCommands, ...exchangeCommands, ...newsCommands];
+  try {
+    jobsCommands = initJobs.commands || [];   // ← ADD THIS TRY BLOCK
+  } catch (e) {
+    console.error('Could not load jobs.js commands:', e.message);
+  }
+  _allCommands = [...commands, ...pokeCommands, ...yaraytCommands, ...exchangeCommands, ...newsCommands, ...jobsCommands];   // ← ADD ...jobsCommands
   console.log(`📋 Command list built: ${_allCommands.map(c => c.name).join(', ')}`);
   return _allCommands;
 }
