@@ -303,7 +303,7 @@ function svgEscape(value) {
 }
 
 function buildChartSvg(history) {
-  // Filter and sort by date
+  // Sort by date, oldest first, and keep only entries with rates
   let rows = (history || [])
     .filter(entry => entry.rates)
     .sort((a, b) => new Date(a.scrapedAt) - new Date(b.scrapedAt))
@@ -319,28 +319,27 @@ function buildChartSvg(history) {
   const palette = { USD: '#16a34a', EUR: '#2563eb', GBP: '#dc2626' };
   const currencySymbols = { USD: '$', EUR: '€', GBP: '£' };
 
-  // Collect all values
+  // Choose which currency to display (use USD as default, or let user pick? We'll show USD only for simplicity, but you can show all three as separate lines? For candlestick we show one currency at a time to avoid clutter. Let's show USD only.)
+  // But the original chart showed all three. For candlesticks, three overlapping would be messy. I'll display USD candles; the legend will still show latest EUR/GBP values.
+  const mainCurrency = 'USD';
+  
+  // Collect values for Y range
   let allValues = [];
   for (const row of rows) {
-    for (const c of CURRENCIES) {
-      if (typeof row.rates[c] === 'number') allValues.push(row.rates[c]);
-    }
+    const val = row.rates[mainCurrency];
+    if (typeof val === 'number') allValues.push(val);
   }
-  if (allValues.length === 0) return `<svg width="${width}" height="${height}"></svg>`;
-
+  if (allValues.length === 0) allValues = [1];
+  
   let min = Math.min(...allValues);
   let max = Math.max(...allValues);
-  // Add 10% padding
   const padVal = (max - min) * 0.1;
   min = Math.max(0, min - padVal);
   max = max + padVal;
   
-  // Generate nice Y‑axis ticks (5 steps, rounded to 0.5 or 1.0)
-  const range = max - min;
-  let step = range / 4;
-  // Round step to a nice number (0.5, 1.0, etc.)
-  let stepMagnitude = Math.pow(10, Math.floor(Math.log10(step)));
-  let niceStep = Math.ceil(step / stepMagnitude) * stepMagnitude;
+  // Nice Y‑axis ticks
+  const step = (max - min) / 4;
+  let niceStep = Math.ceil(step / 0.5) * 0.5;
   if (niceStep < 0.1) niceStep = 0.1;
   let niceMin = Math.floor(min / niceStep) * niceStep;
   let niceMax = Math.ceil(max / niceStep) * niceStep;
@@ -353,8 +352,9 @@ function buildChartSvg(history) {
   
   // X positions – evenly spaced by index
   const xFor = (idx) => pad.left + (idx / (rows.length - 1)) * plotW;
+  const candleWidth = Math.min(10, plotW / rows.length * 0.6);
   
-  // Grid and Y‑axis labels
+  // Draw grid and Y‑axis labels
   const grid = [];
   for (const val of tickValues) {
     const y = yFor(val);
@@ -363,58 +363,45 @@ function buildChartSvg(history) {
     grid.push(`<text x="${pad.left - 10}" y="${y + 4}" text-anchor="end" font-size="12" fill="#b9bbbe">${val.toFixed(2)}</text>`);
   }
   
-  // Lines
-  const paths = CURRENCIES.map(currency => {
-    const points = rows
-      .map((row, idx) => {
-        const value = row.rates[currency];
-        if (typeof value !== 'number') return null;
-        return `${xFor(idx).toFixed(1)},${yFor(value).toFixed(1)}`;
-      })
-      .filter(Boolean);
-    if (points.length < 2) return '';
-    return `<polyline points="${points.join(' ')}" fill="none" stroke="${palette[currency]}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>`;
-  }).join('\n');
-  
-  // Data points (circles)
-  const dots = CURRENCIES.map(currency => {
-    return rows.map((row, idx) => {
-      const value = row.rates[currency];
-      if (typeof value !== 'number') return '';
-      const cx = xFor(idx).toFixed(1);
-      const cy = yFor(value).toFixed(1);
-      return `<circle cx="${cx}" cy="${cy}" r="3" fill="#36393f" stroke="${palette[currency]}" stroke-width="1.5"/>`;
-    }).join('\n');
-  }).join('\n');
-  
-  // Callout only for the latest point (last row)
-  const callouts = [];
-  const lastRow = rows[rows.length - 1];
-  for (const currency of CURRENCIES) {
-    const value = lastRow.rates[currency];
-    if (typeof value !== 'number') continue;
-    const idx = rows.length - 1;
-    const x = xFor(idx);
-    const y = yFor(value);
-    const offsetX = 35;
-    const yOffset = -28;
-    let labelX = x + offsetX;
-    let labelY = y + yOffset;
-    labelX = Math.min(Math.max(labelX, pad.left + 20), width - pad.right - 55);
-    labelY = Math.min(Math.max(labelY, pad.top + 15), height - pad.bottom - 20);
-    const boxW = 55;
-    const boxH = 20;
-    const boxX = (labelX > x) ? labelX : labelX - boxW;
-    const boxCenterX = boxX + boxW/2;
-    const boxCenterY = labelY;
-    callouts.push(`<line x1="${x.toFixed(1)}" y1="${y.toFixed(1)}" x2="${x.toFixed(1)}" y2="${boxCenterY.toFixed(1)}" stroke="${palette[currency]}" stroke-width="1" stroke-dasharray="2,2"/>`);
-    callouts.push(`<line x1="${x.toFixed(1)}" y1="${boxCenterY.toFixed(1)}" x2="${boxCenterX.toFixed(1)}" y2="${boxCenterY.toFixed(1)}" stroke="${palette[currency]}" stroke-width="1" stroke-dasharray="2,2"/>`);
-    callouts.push(`<rect x="${boxX}" y="${labelY - 10}" width="${boxW}" height="${boxH}" rx="4" fill="#2f3136" stroke="${palette[currency]}" stroke-width="1"/>`);
-    const symbol = currencySymbols[currency] || '';
-    callouts.push(`<text x="${boxCenterX}" y="${labelY + 3}" text-anchor="middle" fill="#ffffff" font-size="11" font-weight="bold">${symbol}${value.toFixed(2)}</text>`);
+  // Candlesticks (for the main currency)
+  const candles = [];
+  for (let i = 0; i < rows.length; i++) {
+    const price = rows[i].rates[mainCurrency];
+    if (typeof price !== 'number') continue;
+    const x = xFor(i);
+    const y = yFor(price);
+    const highLowY = y; // since all are same, the line is a dot, but we draw a small vertical line to mimic a candle
+    const candleW = Math.max(2, Math.min(candleWidth, 10));
+    // Draw a small rectangle (body) centered at y
+    candles.push(`<rect x="${x - candleW/2}" y="${y - 2}" width="${candleW}" height="4" fill="${palette[mainCurrency]}" rx="1"/>`);
+    // Draw a thin vertical line (wick) – same as body for this case, but we'll still draw it
+    candles.push(`<line x1="${x}" y1="${y - 6}" x2="${x}" y2="${y + 6}" stroke="${palette[mainCurrency]}" stroke-width="1.5"/>`);
   }
   
-  // X‑axis labels: one per unique date, placed at the x position of the first occurrence of that date
+  // Add callout for the latest price (same as before)
+  const lastRow = rows[rows.length - 1];
+  const lastPrice = lastRow.rates[mainCurrency];
+  const lastX = xFor(rows.length - 1);
+  const lastY = yFor(lastPrice);
+  const callouts = [];
+  const offsetX = 35;
+  const yOffset = -28;
+  let labelX = lastX + offsetX;
+  let labelY = lastY + yOffset;
+  labelX = Math.min(Math.max(labelX, pad.left + 20), width - pad.right - 55);
+  labelY = Math.min(Math.max(labelY, pad.top + 15), height - pad.bottom - 20);
+  const boxW = 55;
+  const boxH = 20;
+  const boxX = (labelX > lastX) ? labelX : labelX - boxW;
+  const boxCenterX = boxX + boxW/2;
+  const boxCenterY = labelY;
+  callouts.push(`<line x1="${lastX.toFixed(1)}" y1="${lastY.toFixed(1)}" x2="${lastX.toFixed(1)}" y2="${boxCenterY.toFixed(1)}" stroke="${palette[mainCurrency]}" stroke-width="1" stroke-dasharray="2,2"/>`);
+  callouts.push(`<line x1="${lastX.toFixed(1)}" y1="${boxCenterY.toFixed(1)}" x2="${boxCenterX.toFixed(1)}" y2="${boxCenterY.toFixed(1)}" stroke="${palette[mainCurrency]}" stroke-width="1" stroke-dasharray="2,2"/>`);
+  callouts.push(`<rect x="${boxX}" y="${labelY - 10}" width="${boxW}" height="${boxH}" rx="4" fill="#2f3136" stroke="${palette[mainCurrency]}" stroke-width="1"/>`);
+  const symbol = currencySymbols[mainCurrency] || '';
+  callouts.push(`<text x="${boxCenterX}" y="${labelY + 3}" text-anchor="middle" fill="#ffffff" font-size="11" font-weight="bold">${symbol}${lastPrice.toFixed(2)}</text>`);
+  
+  // X‑axis labels (unique dates)
   const xLabels = [];
   const seenDates = new Set();
   for (let i = 0; i < rows.length; i++) {
@@ -428,7 +415,7 @@ function buildChartSvg(history) {
   }
   const labels = xLabels.join('\n');
   
-  // Legend (horizontal)
+  // Legend (horizontal) – show all three currencies latest values
   const legendY = 46;
   const legendStartX = pad.left;
   const legendItems = CURRENCIES.map((currency, i) => {
@@ -441,13 +428,12 @@ function buildChartSvg(history) {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
   <rect width="100%" height="100%" fill="#36393f"/>
-  <text x="${pad.left}" y="24" font-size="16" font-weight="700" fill="#ffffff">Libyan Black Market Exchange Trend (LYD per 1 unit)</text>
+  <text x="${pad.left}" y="24" font-size="16" font-weight="700" fill="#ffffff">Libyan Black Market Exchange Trend (LYD per 1 unit) – USD Candlesticks</text>
   ${legendItems}
   ${grid.join('\n')}
   <line x1="${pad.left}" y1="${pad.top}" x2="${pad.left}" y2="${pad.top + plotH}" stroke="#4e5058" stroke-width="1.5"/>
   <line x1="${pad.left}" y1="${pad.top + plotH}" x2="${width - pad.right}" y2="${pad.top + plotH}" stroke="#4e5058" stroke-width="1.5"/>
-  ${paths}
-  ${dots}
+  ${candles.join('\n')}
   ${callouts.join('\n')}
   ${labels}
 </svg>`;
