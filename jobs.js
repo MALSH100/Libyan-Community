@@ -14,51 +14,41 @@ const CAREERJET_API_KEY = process.env.CAREERJET_API_KEY || '1b7358b4274242b009f6
 // Source 1: hiring.cafe (public API)
 // ----------------------------------------------------------------------
 async function fetchHiringCafeJobs() {
-    try {
-        const url = 'https://api.hiring.cafe/v1/jobs/search?country=Libya&limit=5&sort=date';
-        const res = await axios.get(url, { timeout: 10000 });
-        const jobs = res.data.jobs || [];
-        return jobs.map(job => ({
-            id: `hiringcafe_${job.id || job.url}`,
-            title: job.title,
-            company: job.company,
-            location: job.location || 'Libya',
-            description: (job.description || '').slice(0, 200),
-            url: job.url,
-            postedAt: job.postedAt ? new Date(job.postedAt) : new Date(),
-            source: 'hiring.cafe'
-        }));
-    } catch (err) {
-        console.error('[Jobs] hiring.cafe error:', err.message);
-        return [];
-    }
+    // hiring.cafe does not provide a public API – disabling this source.
+    return [];
 }
 
 // ----------------------------------------------------------------------
 // Source 2: careerjet (official API)
 // ----------------------------------------------------------------------
 async function fetchCareerjetJobs() {
-    if (!CAREERJET_API_KEY) {
+    const API_KEY = process.env.CAREERJET_API_KEY || '1b7358b4274242b009f62e09dd750c73';
+    if (!API_KEY) {
         console.warn('[Jobs] CAREERJET_API_KEY not set');
         return [];
     }
     try {
-        const params = {
-            affiliateId: CAREERJET_API_KEY,
-            location: 'Libya',
-            sort: 'date',
+        // Required parameters per documentation
+        const params = new URLSearchParams({
+            locale_code: 'en_LY',           // English, Libya
+            sort: 'date',                   // newest first
             pagesize: 5,
-            user_ip: 'auto',
+            user_ip: 'auto',                // required
             user_agent: 'Mozilla/5.0 (compatible; DiscordBot/1.0)'
-        };
-        const url = `https://api.careerjet.com/search/jobs?${new URLSearchParams(params)}`;
-        const res = await axios.get(url, { timeout: 10000 });
+        });
+        // Basic auth: username = API key, password = empty string
+        const auth = Buffer.from(`${API_KEY}:`).toString('base64');
+        const url = `https://search.api.careerjet.net/v4/query?${params}`;
+        const res = await axios.get(url, {
+            headers: { 'Authorization': `Basic ${auth}` },
+            timeout: 15000
+        });
         const jobs = res.data.jobs || [];
         return jobs.map(job => ({
-            id: `careerjet_${job.id || job.url}`,
+            id: `careerjet_${job.url || job.title}`,
             title: job.title,
-            company: job.company,
-            location: job.locations?.[0] || 'Libya',
+            company: job.company || 'Not specified',
+            location: (typeof job.locations === 'string' ? job.locations : 'Libya'),
             description: (job.description || '').slice(0, 200),
             url: job.url,
             postedAt: job.date ? new Date(job.date) : new Date(),
@@ -74,61 +64,52 @@ async function fetchCareerjetJobs() {
 // Source 3: opensooq.com (scraping)
 // ----------------------------------------------------------------------
 async function fetchOpenSooqJobs() {
+    let browser;
     try {
-        const url = 'https://ly.opensooq.com/en/jobs/job-vacancies?search=true&sort_code=recent';
-        const { data: html } = await axios.get(url, {
-            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
-            timeout: 15000
+        const { chromium } = require('playwright');
+        browser = await chromium.launch({
+            headless: true,
+            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
         });
-        const $ = cheerio.load(html);
-        const jobs = [];
-        
-        // Each job listing is inside a div with class "ListingCell"
-        $('div.ListingCell').each((i, el) => {
-            if (i >= 5) return false; // only first 5
-            const titleEl = $(el).find('h3 a');
-            const title = titleEl.text().trim();
-            const urlPath = titleEl.attr('href');
-            const fullUrl = urlPath ? `https://ly.opensooq.com${urlPath}` : '';
-            const detailsText = $(el).find('.details').text().trim();
-            // try to extract company and location from details
-            let company = '', location = '';
-            const parts = detailsText.split('|').map(p => p.trim());
-            if (parts.length >= 2) {
-                company = parts[0];
-                location = parts[1];
-            } else {
-                location = detailsText;
-            }
-            const description = $(el).find('.description').text().trim().slice(0, 200);
-            // date is often in a span with class "date" or similar
-            let dateText = $(el).find('.date').text().trim();
-            let postedAt = new Date();
-            if (dateText) {
-                // rough parsing – opensooq shows "Today", "Yesterday", or "DD/MM/YYYY"
-                if (dateText.toLowerCase().includes('today')) postedAt = new Date();
-                else if (dateText.toLowerCase().includes('yesterday')) postedAt = new Date(Date.now() - 86400000);
-                else {
-                    const parsed = Date.parse(dateText);
-                    if (!isNaN(parsed)) postedAt = new Date(parsed);
-                }
-            }
-            if (title && fullUrl) {
-                jobs.push({
-                    id: `opensooq_${fullUrl.split('/').pop() || i}`,
-                    title,
-                    company: company || 'Not specified',
-                    location: location || 'Libya',
-                    description: description || 'Click the link for more details.',
-                    url: fullUrl,
-                    postedAt,
-                    source: 'opensooq'
-                });
-            }
+        const page = await browser.newPage();
+        await page.goto('https://ly.opensooq.com/en/jobs/job-vacancies?search=true&sort_code=recent', {
+            waitUntil: 'networkidle',
+            timeout: 30000
         });
-        return jobs;
+        // Wait for job cards to appear (the page uses lazy loading)
+        await page.waitForSelector('.ListingCell, .job-item, .ad-item', { timeout: 15000 }).catch(() => {});
+        const jobs = await page.evaluate(() => {
+            const items = Array.from(document.querySelectorAll('.ListingCell, .job-item, .ad-item, .post-item'));
+            return items.slice(0, 5).map(el => {
+                // Extract title and URL – common patterns
+                const titleLink = el.querySelector('h3 a, .title a, a[href*="/job-vacancies/"]');
+                const title = titleLink?.innerText?.trim() || '';
+                const url = titleLink?.href || '';
+                // Extract company and location
+                const companyEl = el.querySelector('.company-name, .user-name, .details span:first-child');
+                const locationEl = el.querySelector('.location, .region, .details span:last-child');
+                const company = companyEl?.innerText?.trim() || 'Not specified';
+                const location = locationEl?.innerText?.trim() || 'Libya';
+                // Extract description
+                const descEl = el.querySelector('.description, .job-description, p');
+                const description = descEl?.innerText?.trim()?.slice(0, 200) || '';
+                return { title, url, company, location, description };
+            }).filter(job => job.title && job.url);
+        });
+        await browser.close();
+        return jobs.map(job => ({
+            id: `opensooq_${job.url.split('/').pop() || Date.now()}`,
+            title: job.title,
+            company: job.company,
+            location: job.location,
+            description: job.description || 'Click the link for more details.',
+            url: job.url.startsWith('http') ? job.url : `https://ly.opensooq.com${job.url}`,
+            postedAt: new Date(), // OpenSooq doesn't give reliable dates, use current time
+            source: 'opensooq'
+        }));
     } catch (err) {
         console.error('[Jobs] opensooq error:', err.message);
+        if (browser) await browser.close().catch(() => {});
         return [];
     }
 }
