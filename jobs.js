@@ -1,188 +1,159 @@
 // jobs.js
 const { SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits } = require('discord.js');
 const axios = require('axios');
-const cheerio = require('cheerio');
 
 // === CONFIGURATION ===
 const CHECK_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
 const MAX_HISTORY = 50;
 
-// Careerjet API key (from environment variable)
-const CAREERJET_API_KEY = process.env.CAREERJET_API_KEY || '73f7f75049a63e4dbbeaad53d1b5f11d';
-
 // ----------------------------------------------------------------------
-// Source 1: hiring.cafe (public API)
-// ----------------------------------------------------------------------
-async function fetchHiringCafeJobs() {
-    // hiring.cafe does not provide a public API – disabling this source.
-    return [];
-}
-
-// ----------------------------------------------------------------------
-// Source 2: careerjet (official API)
-// ----------------------------------------------------------------------
-
-// --- Job Fetcher: Careerjet (official API) ---
-async function fetchCareerjetJobs() {
-    // TODO: whitelist the IP in Careerjet dashboard
-    console.log('[Jobs] Careerjet disabled – waiting for IP whitelist');
-    return [];
-}
-
-
-
-// ----------------------------------------------------------------------
-// Source 3: opensooq.com (scraping)
+// Source 1: OpenSooq (Playwright)
 // ----------------------------------------------------------------------
 async function fetchOpenSooqJobs() {
+    const { chromium } = require('playwright');
     let browser;
     try {
-        const { chromium } = require('playwright');
         browser = await chromium.launch({
             headless: true,
             args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
         });
         const page = await browser.newPage();
+        
+        // Set a timeout for the whole navigation
         await page.goto('https://ly.opensooq.com/en/jobs/job-vacancies?search=true&sort_code=recent', {
             waitUntil: 'domcontentloaded',
             timeout: 30000
         });
         
-        // Wait for at least one job card (look for a container with a time indicator)
+        // Wait for the first job card with a time indicator
         await page.waitForFunction(() => {
             return document.body.innerText.match(/\d+\s+(minute|hour|day|week)s?\s+ago/i);
         }, { timeout: 15000 });
         
         const jobs = await page.evaluate(() => {
-            const timePattern = /\b(\d+)\s+(minute|hour|day|week)s?\s+ago\b/i;
-            // Find elements that contain both a job link and a time indicator
-            const candidates = Array.from(document.querySelectorAll('div, li, article')).filter(el => {
-                return el.querySelector('a[href*="/job-posters/"]') && timePattern.test(el.innerText);
+            // Find the first element that contains both a job link and a time indicator
+            const cards = Array.from(document.querySelectorAll('div, li, article')).filter(el => {
+                return el.querySelector('a[href*="/job-posters/"]') && /\d+\s+(minute|hour|day|week)s?\s+ago/i.test(el.innerText);
             });
+            if (cards.length === 0) return [];
             
-            const jobItems = [];
-            for (const card of candidates) {
-                // Get the job link
-                const link = card.querySelector('a[href*="/job-posters/"]');
-                if (!link) continue;
-                
-                // Clean title: remove any leading time text that might be inside the link
-                let rawTitle = link.innerText.trim();
-                rawTitle = rawTitle.replace(/^\d+\s+(minute|hour|day|week)s?\s+ago\s*/i, '').trim();
-                const title = rawTitle;
-                
-                // Extract time from the same card
-                const timeMatch = card.innerText.match(timePattern);
-                if (!timeMatch) continue;
-                const value = parseInt(timeMatch[1]);
-                const unit = timeMatch[2].toLowerCase();
-                const now = new Date();
-                let date;
-                if (unit === 'minute') date = new Date(now - value * 60000);
-                else if (unit === 'hour') date = new Date(now - value * 3600000);
-                else if (unit === 'day') date = new Date(now - value * 86400000);
-                else if (unit === 'week') date = new Date(now - value * 604800000);
-                else date = now;
-                
-                // Extract location – look for a line containing a city name
-                const lines = card.innerText.split('\n').map(l => l.trim()).filter(l => l);
-                let location = 'Libya';
+            // Take only the first card (newest job)
+            const card = cards[0];
+            const link = card.querySelector('a[href*="/job-posters/"]');
+            if (!link) return [];
+            
+            // Clean title – remove any leading time text
+            let title = link.innerText.trim();
+            title = title.replace(/^\d+\s+(minute|hour|day|week)s?\s+ago\s*/i, '').trim();
+            
+            // Extract time
+            const timeMatch = card.innerText.match(/\b(\d+)\s+(minute|hour|day|week)s?\s+ago\b/i);
+            const value = parseInt(timeMatch[1]);
+            const unit = timeMatch[2].toLowerCase();
+            const now = new Date();
+            let date;
+            if (unit === 'minute') date = new Date(now - value * 60000);
+            else if (unit === 'hour') date = new Date(now - value * 3600000);
+            else if (unit === 'day') date = new Date(now - value * 86400000);
+            else if (unit === 'week') date = new Date(now - value * 604800000);
+            else date = now;
+            
+            // Extract location
+            const lines = card.innerText.split('\n').map(l => l.trim()).filter(l => l);
+            let location = 'Libya';
+            for (const line of lines) {
+                if (line.match(/Tripoli|Benghazi|Misrata|Arada|Tajoura|Zawiya|Sabha|Bayda|Derna|Sirte/i)) {
+                    location = line;
+                    break;
+                }
+            }
+            if (location === 'Libya') {
                 for (const line of lines) {
-                    if (line.match(/Tripoli|Benghazi|Misrata|Arada|Tajoura|Zawiya|Sabha|Bayda|Derna|Sirte/i)) {
+                    if (line.includes(',') && !line.match(/Contract|Working|Salary|Benefits/i)) {
                         location = line;
                         break;
                     }
                 }
-                // Fallback: any line with a comma (likely an address)
-                if (location === 'Libya') {
-                    for (const line of lines) {
-                        if (line.includes(',') && !line.match(/Contract|Working|Salary|Benefits/i)) {
-                            location = line;
-                            break;
-                        }
-                    }
-                }
-                
-                // Extract details (contract, working days, salary, benefits) from the same card
-                let contractType = 'Not specified';
-                let workingDays = 'Not specified';
-                let salary = 'Not specified';
-                let benefits = 'None';
-                
-                for (const line of lines) {
-                    const lower = line.toLowerCase();
-                    if (lower.includes('contract type')) {
-                        const parts = line.split(':');
-                        if (parts[1]) contractType = parts[1].trim();
-                    }
-                    if (lower.includes('working days')) {
-                        const parts = line.split(':');
-                        if (parts[1]) workingDays = parts[1].trim();
-                    }
-                    if (lower.includes('expected salary')) {
-                        const parts = line.split(':');
-                        if (parts[1]) {
-                            let sal = parts[1].trim();
-                            const numMatch = sal.match(/\d+(?:\.\d+)?/);
-                            if (numMatch) {
-                                const amount = parseFloat(numMatch[0]);
-                                // Only accept reasonable salaries (1-5000 LYD)
-                                if (amount >= 1 && amount <= 5000) salary = `${amount} LYD`;
-                                else salary = 'Not specified';
-                            } else {
-                                salary = sal;
-                            }
-                        }
-                    }
-                    if (lower.includes('benefits')) {
-                        const parts = line.split(':');
-                        if (parts[1]) benefits = parts[1].trim();
-                    }
-                }
-                
-                // Build description
-                const descParts = [];
-                if (contractType !== 'Not specified') descParts.push(`**Contract:** ${contractType}`);
-                if (workingDays !== 'Not specified') descParts.push(`**Working Days:** ${workingDays}`);
-                if (salary !== 'Not specified') descParts.push(`**Salary:** ${salary}`);
-                if (benefits !== 'None') descParts.push(`**Benefits:** ${benefits}`);
-                const description = descParts.join('\n') || 'Click the link for more details.';
-                
-                jobItems.push({
-                    title,
-                    url: link.href,
-                    location,
-                    description,
-                    date
-                });
             }
-            return jobItems;
+            
+            // Extract details
+            let contractType = 'Not specified';
+            let workingDays = 'Not specified';
+            let salary = 'Not specified';
+            let benefits = 'None';
+            for (const line of lines) {
+                const lower = line.toLowerCase();
+                if (lower.includes('contract type')) {
+                    const parts = line.split(':');
+                    if (parts[1]) contractType = parts[1].trim();
+                }
+                if (lower.includes('working days')) {
+                    const parts = line.split(':');
+                    if (parts[1]) workingDays = parts[1].trim();
+                }
+                if (lower.includes('expected salary')) {
+                    const parts = line.split(':');
+                    if (parts[1]) {
+                        let sal = parts[1].trim();
+                        const numMatch = sal.match(/\d+(?:\.\d+)?/);
+                        if (numMatch) {
+                            const amount = parseFloat(numMatch[0]);
+                            if (amount >= 1 && amount <= 5000) salary = `${amount} LYD`;
+                            else salary = 'Not specified';
+                        } else {
+                            salary = sal;
+                        }
+                    }
+                }
+                if (lower.includes('benefits')) {
+                    const parts = line.split(':');
+                    if (parts[1]) benefits = parts[1].trim();
+                }
+            }
+            
+            const descParts = [];
+            if (contractType !== 'Not specified') descParts.push(`**Contract:** ${contractType}`);
+            if (workingDays !== 'Not specified') descParts.push(`**Working Days:** ${workingDays}`);
+            if (salary !== 'Not specified') descParts.push(`**Salary:** ${salary}`);
+            if (benefits !== 'None') descParts.push(`**Benefits:** ${benefits}`);
+            const description = descParts.join('\n') || 'Click the link for more details.';
+            
+            return [{
+                title,
+                url: link.href,
+                location,
+                description,
+                date
+            }];
         });
         
-        // Sort by date (newest first)
-        jobs.sort((a, b) => b.date - a.date);
-        console.log(`[Jobs] OpenSooq found ${jobs.length} jobs, newest: ${jobs[0]?.title} at ${jobs[0]?.date}`);
         await browser.close();
-        
         if (jobs.length === 0) return [];
-        const latest = jobs[0];
+        const job = jobs[0];
         return [{
-            id: `opensooq_${latest.url.split('/').pop() || Date.now()}`,
-            title: latest.title,
-            location: latest.location,
-            description: latest.description,
-            url: latest.url,
-            postedAt: latest.date,
+            id: `opensooq_${job.url.split('/').pop() || Date.now()}`,
+            title: job.title,
+            location: job.location,
+            description: job.description,
+            url: job.url,
+            postedAt: job.date,
             source: 'opensooq'
         }];
     } catch (err) {
-        console.error('[Jobs] opensooq error:', err.message);
+        console.error('[Jobs] OpenSooq error:', err.message);
         if (browser) await browser.close().catch(() => {});
         return [];
     }
 }
+
 // ----------------------------------------------------------------------
-// Combine all sources and get the single most recent job
+// Careerjet and hiring.cafe are disabled (return empty)
+// ----------------------------------------------------------------------
+async function fetchCareerjetJobs() { return []; }
+async function fetchHiringCafeJobs() { return []; }
+
+// ----------------------------------------------------------------------
+// Combine sources
 // ----------------------------------------------------------------------
 async function getLatestJob() {
     const results = await Promise.allSettled([
@@ -195,20 +166,19 @@ async function getLatestJob() {
         if (res.status === 'fulfilled') allJobs.push(...res.value);
     }
     if (allJobs.length === 0) return null;
-    // sort by postedAt descending
     allJobs.sort((a, b) => b.postedAt - a.postedAt);
     return allJobs[0];
 }
 
 // ----------------------------------------------------------------------
-// Persistent data helpers (same as news/exchange bots)
+// Persistent data helpers
 // ----------------------------------------------------------------------
 function getJobsData(db, guildId) {
     if (!db[guildId]) db[guildId] = {};
     if (!db[guildId].__jobs) {
         db[guildId].__jobs = {
             channelId: null,
-            lastPostedId: null,     // stores composite id of the most recent posted job
+            lastPostedId: null,
             lastCheckedAt: null,
             history: []
         };
@@ -217,30 +187,31 @@ function getJobsData(db, guildId) {
 }
 
 // ----------------------------------------------------------------------
-// Post a job embed to Discord
+// Post embed
 // ----------------------------------------------------------------------
 async function postJobsUpdate(client, jobsState, job, forced = false) {
     if (!jobsState.channelId) return false;
     const channel = await client.channels.fetch(jobsState.channelId).catch(() => null);
     if (!channel || !channel.isTextBased()) return false;
 
-const embed = new EmbedBuilder()
-    .setColor(0x2B5B84)
-    .setTitle(`💼 ${job.title}`)
-    .setURL(job.url)
-    .addFields(
-        { name: '📍 Location', value: job.location || 'Libya', inline: true },
-        { name: '⏱️ Posted', value: `<t:${Math.floor(job.postedAt.getTime() / 1000)}:R>`, inline: true },
-        { name: '📋 Details', value: job.description || 'Click the link to view the full job posting.', inline: false }
-    )
-    .setFooter({ text: `${job.source} • Jobs updated every 30 minutes` })
-    .setTimestamp();
+    const embed = new EmbedBuilder()
+        .setColor(0x2B5B84)
+        .setTitle(`💼 ${job.title}`)
+        .setURL(job.url)
+        .addFields(
+            { name: '📍 Location', value: job.location || 'Libya', inline: true },
+            { name: '⏱️ Posted', value: `<t:${Math.floor(job.postedAt.getTime() / 1000)}:R>`, inline: true },
+            { name: '📋 Details', value: job.description || 'Click the link to view the full job posting.', inline: false }
+        )
+        .setFooter({ text: `${job.source} • Jobs updated every 30 minutes` })
+        .setTimestamp();
 
     await channel.send({ embeds: [embed] });
     return true;
 }
+
 // ----------------------------------------------------------------------
-// Main update function (called by timer or /jobs-refresh)
+// Main update
 // ----------------------------------------------------------------------
 async function updateJobs({ client, db, saveData, guildId, forcePost = false }) {
     const jobsState = getJobsData(db, guildId);
@@ -253,7 +224,6 @@ async function updateJobs({ client, db, saveData, guildId, forcePost = false }) 
     }
     const isNew = latest.id !== jobsState.lastPostedId;
 
-    // store in history (optional)
     jobsState.history = jobsState.history || [];
     jobsState.history.push(latest);
     jobsState.history = jobsState.history.slice(-MAX_HISTORY);
@@ -293,7 +263,7 @@ async function safeDefer(interaction, opts = {}) {
 }
 
 // ----------------------------------------------------------------------
-// Slash command definitions
+// Slash commands
 // ----------------------------------------------------------------------
 const jobsCommands = [
     new SlashCommandBuilder()
@@ -311,7 +281,7 @@ const jobsCommands = [
 ].map(cmd => cmd.toJSON());
 
 // ----------------------------------------------------------------------
-// Module initialisation (called from index.js)
+// Module initialisation
 // ----------------------------------------------------------------------
 module.exports = function initJobs({ client, db, saveData }) {
     const timers = new Map();
