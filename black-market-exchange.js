@@ -302,10 +302,10 @@ function svgEscape(value) {
   }[ch]));
 }
 
-function buildChartSvg(history) {
-  // Sort by date, oldest first, and keep only entries with rates
+function buildChartSvg(history, mainCurrency = 'USD') {
+  // Sort by date, oldest first
   let rows = (history || [])
-    .filter(entry => entry.rates)
+    .filter(entry => entry.rates && typeof entry.rates[mainCurrency] === 'number')
     .sort((a, b) => new Date(a.scrapedAt) - new Date(b.scrapedAt))
     .slice(-CHART_POINTS);
   
@@ -318,18 +318,11 @@ function buildChartSvg(history) {
   const plotH = height - pad.top - pad.bottom;
   const palette = { USD: '#16a34a', EUR: '#2563eb', GBP: '#dc2626' };
   const currencySymbols = { USD: '$', EUR: '€', GBP: '£' };
-
-  // Choose which currency to display (use USD as default, or let user pick? We'll show USD only for simplicity, but you can show all three as separate lines? For candlestick we show one currency at a time to avoid clutter. Let's show USD only.)
-  // But the original chart showed all three. For candlesticks, three overlapping would be messy. I'll display USD candles; the legend will still show latest EUR/GBP values.
-  const mainCurrency = 'USD';
+  const color = palette[mainCurrency];
   
   // Collect values for Y range
-  let allValues = [];
-  for (const row of rows) {
-    const val = row.rates[mainCurrency];
-    if (typeof val === 'number') allValues.push(val);
-  }
-  if (allValues.length === 0) allValues = [1];
+  let allValues = rows.map(r => r.rates[mainCurrency]).filter(v => typeof v === 'number');
+  if (allValues.length === 0) return `<svg width="900" height="480"></svg>`;
   
   let min = Math.min(...allValues);
   let max = Math.max(...allValues);
@@ -349,12 +342,9 @@ function buildChartSvg(history) {
   }
   
   const yFor = (value) => pad.top + (1 - ((value - niceMin) / (niceMax - niceMin))) * plotH;
-  
-  // X positions – evenly spaced by index
   const xFor = (idx) => pad.left + (idx / (rows.length - 1)) * plotW;
-  const candleWidth = Math.min(10, plotW / rows.length * 0.6);
   
-  // Draw grid and Y‑axis labels
+  // Grid and Y‑axis
   const grid = [];
   for (const val of tickValues) {
     const y = yFor(val);
@@ -363,26 +353,24 @@ function buildChartSvg(history) {
     grid.push(`<text x="${pad.left - 10}" y="${y + 4}" text-anchor="end" font-size="12" fill="#b9bbbe">${val.toFixed(2)}</text>`);
   }
   
-  // Candlesticks (for the main currency)
-  const candles = [];
-  for (let i = 0; i < rows.length; i++) {
-    const price = rows[i].rates[mainCurrency];
-    if (typeof price !== 'number') continue;
-    const x = xFor(i);
-    const y = yFor(price);
-    const highLowY = y; // since all are same, the line is a dot, but we draw a small vertical line to mimic a candle
-    const candleW = Math.max(2, Math.min(candleWidth, 10));
-    // Draw a small rectangle (body) centered at y
-    candles.push(`<rect x="${x - candleW/2}" y="${y - 2}" width="${candleW}" height="4" fill="${palette[mainCurrency]}" rx="1"/>`);
-    // Draw a thin vertical line (wick) – same as body for this case, but we'll still draw it
-    candles.push(`<line x1="${x}" y1="${y - 6}" x2="${x}" y2="${y + 6}" stroke="${palette[mainCurrency]}" stroke-width="1.5"/>`);
-  }
+  // Line and points
+  const points = rows.map((row, idx) => {
+    const val = row.rates[mainCurrency];
+    if (typeof val !== 'number') return null;
+    return `${xFor(idx).toFixed(1)},${yFor(val).toFixed(1)}`;
+  }).filter(Boolean);
   
-  // Add callout for the latest price (same as before)
+  const line = points.length >= 2 ? `<polyline points="${points.join(' ')}" fill="none" stroke="${color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>` : '';
+  const dots = points.map((point, i) => {
+    const [x, y] = point.split(',');
+    return `<circle cx="${x}" cy="${y}" r="3" fill="#36393f" stroke="${color}" stroke-width="1.5"/>`;
+  }).join('\n');
+  
+  // Callout only for the latest point
   const lastRow = rows[rows.length - 1];
-  const lastPrice = lastRow.rates[mainCurrency];
+  const lastVal = lastRow.rates[mainCurrency];
   const lastX = xFor(rows.length - 1);
-  const lastY = yFor(lastPrice);
+  const lastY = yFor(lastVal);
   const callouts = [];
   const offsetX = 35;
   const yOffset = -28;
@@ -395,11 +383,11 @@ function buildChartSvg(history) {
   const boxX = (labelX > lastX) ? labelX : labelX - boxW;
   const boxCenterX = boxX + boxW/2;
   const boxCenterY = labelY;
-  callouts.push(`<line x1="${lastX.toFixed(1)}" y1="${lastY.toFixed(1)}" x2="${lastX.toFixed(1)}" y2="${boxCenterY.toFixed(1)}" stroke="${palette[mainCurrency]}" stroke-width="1" stroke-dasharray="2,2"/>`);
-  callouts.push(`<line x1="${lastX.toFixed(1)}" y1="${boxCenterY.toFixed(1)}" x2="${boxCenterX.toFixed(1)}" y2="${boxCenterY.toFixed(1)}" stroke="${palette[mainCurrency]}" stroke-width="1" stroke-dasharray="2,2"/>`);
-  callouts.push(`<rect x="${boxX}" y="${labelY - 10}" width="${boxW}" height="${boxH}" rx="4" fill="#2f3136" stroke="${palette[mainCurrency]}" stroke-width="1"/>`);
+  callouts.push(`<line x1="${lastX.toFixed(1)}" y1="${lastY.toFixed(1)}" x2="${lastX.toFixed(1)}" y2="${boxCenterY.toFixed(1)}" stroke="${color}" stroke-width="1" stroke-dasharray="2,2"/>`);
+  callouts.push(`<line x1="${lastX.toFixed(1)}" y1="${boxCenterY.toFixed(1)}" x2="${boxCenterX.toFixed(1)}" y2="${boxCenterY.toFixed(1)}" stroke="${color}" stroke-width="1" stroke-dasharray="2,2"/>`);
+  callouts.push(`<rect x="${boxX}" y="${labelY - 10}" width="${boxW}" height="${boxH}" rx="4" fill="#2f3136" stroke="${color}" stroke-width="1"/>`);
   const symbol = currencySymbols[mainCurrency] || '';
-  callouts.push(`<text x="${boxCenterX}" y="${labelY + 3}" text-anchor="middle" fill="#ffffff" font-size="11" font-weight="bold">${symbol}${lastPrice.toFixed(2)}</text>`);
+  callouts.push(`<text x="${boxCenterX}" y="${labelY + 3}" text-anchor="middle" fill="#ffffff" font-size="11" font-weight="bold">${symbol}${lastVal.toFixed(2)}</text>`);
   
   // X‑axis labels (unique dates)
   const xLabels = [];
@@ -415,34 +403,24 @@ function buildChartSvg(history) {
   }
   const labels = xLabels.join('\n');
   
-  // Legend (horizontal) – show all three currencies latest values
-  const legendY = 46;
-  const legendStartX = pad.left;
-  const legendItems = CURRENCIES.map((currency, i) => {
-    const x = legendStartX + i * 130;
-    const latestVal = lastRow.rates[currency];
-    return `<rect x="${x}" y="${legendY}" width="12" height="12" rx="2" fill="${palette[currency]}"/>
-            <text x="${x + 18}" y="${legendY + 10}" fill="#e3e5e8" font-size="13">${currency} ${latestVal ? latestVal.toFixed(2) : '?'}</text>`;
-  }).join('');
-  
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
   <rect width="100%" height="100%" fill="#36393f"/>
-  <text x="${pad.left}" y="24" font-size="16" font-weight="700" fill="#ffffff">Libyan Black Market Exchange Trend (LYD per 1 unit) – USD Candlesticks</text>
-  ${legendItems}
+  <text x="${pad.left}" y="24" font-size="16" font-weight="700" fill="#ffffff">Libyan Black Market Exchange Trend – ${mainCurrency} (LYD per 1 unit)</text>
   ${grid.join('\n')}
   <line x1="${pad.left}" y1="${pad.top}" x2="${pad.left}" y2="${pad.top + plotH}" stroke="#4e5058" stroke-width="1.5"/>
   <line x1="${pad.left}" y1="${pad.top + plotH}" x2="${width - pad.right}" y2="${pad.top + plotH}" stroke="#4e5058" stroke-width="1.5"/>
-  ${candles.join('\n')}
+  ${line}
+  ${dots}
   ${callouts.join('\n')}
   ${labels}
 </svg>`;
 }
 
-async function chartAttachment(exchangeData) {
-  const svg = buildChartSvg(exchangeData.history || []);
+async function chartAttachment(exchangeData, currency = 'USD') {
+  const svg = buildChartSvg(exchangeData.history || [], currency);
   const pngBuffer = await svgToPngBuffer(svg);
-  return new AttachmentBuilder(pngBuffer, { name: 'libya-exchange-chart.png' });
+  return new AttachmentBuilder(pngBuffer, { name: `libya-exchange-chart-${currency}.png` });
 }
 
 async function svgToPngBuffer(svgString) {
@@ -597,16 +575,44 @@ module.exports = function initBlackMarketExchange({ client, db, saveData }) {
         return safeReply(interaction, { embeds: [buildRateEmbed(exchangeData, latest, true)], flags: 64 });
       }
 
-      if (commandName === 'exchange-chart') {
-        if (!exchangeData.history || exchangeData.history.length < 2) {
-          return safeReply(interaction, { content: 'Not enough exchange history yet. The chart needs at least two saved updates.', flags: 64 });
-        }
-        return safeReply(interaction, {
-          content: 'Recent Libyan black market exchange trend:',
-          files: [chartAttachment(exchangeData)],
-          flags: 64,
-        });
-      }
+if (commandName === 'exchange-chart') {
+  if (!exchangeData.history || exchangeData.history.length < 2) {
+    return safeReply(interaction, { content: 'Not enough exchange history yet. The chart needs at least two saved updates.', flags: 64 });
+  }
+  
+  // Create buttons
+  const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('chart_usd').setLabel('$ USD').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('chart_eur').setLabel('€ EUR').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('chart_gbp').setLabel('£ GBP').setStyle(ButtonStyle.Primary),
+  );
+  
+  const initialChart = await chartAttachment(exchangeData, 'USD');
+  await interaction.reply({
+    content: '📈 Select a currency to view its exchange rate trend:',
+    files: [initialChart],
+    components: [row],
+    flags: 64,
+  });
+  
+  const msg = await interaction.fetchReply();
+  const filter = i => i.user.id === interaction.user.id && ['chart_usd','chart_eur','chart_gbp'].includes(i.customId);
+  const collector = msg.createMessageComponentCollector({ filter, time: 60000 });
+  
+  collector.on('collect', async i => {
+    let currency = 'USD';
+    if (i.customId === 'chart_eur') currency = 'EUR';
+    if (i.customId === 'chart_gbp') currency = 'GBP';
+    const newChart = await chartAttachment(exchangeData, currency);
+    await i.update({ files: [newChart], components: [row] });
+  });
+  
+  collector.on('end', () => {
+    interaction.editReply({ components: [] }).catch(() => {});
+  });
+  return;
+}
 
       if (commandName === 'exchange-refresh') {
         if (!isAdmin(interaction)) return safeReply(interaction, { content: 'Only admins can refresh and post exchange updates.', flags: 64 });
