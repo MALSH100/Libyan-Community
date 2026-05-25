@@ -206,17 +206,28 @@ async function scrapeFacebookRates() {
     if (currentUrl.includes('login') || currentUrl.includes('checkpoint')) {
       console.log('[Exchange] Login required. Attempting to log in...');
       
-      // Fill email field
-      await page.fill('input[name="email"], input[type="email"], #email', process.env.FACEBOOK_EMAIL);
+      // Wait for the login form to be present
+      await page.waitForSelector('input[type="email"], input[name="email"], #email', { timeout: 10000 });
       
-      // Fill password field
-      await page.fill('input[name="pass"], input[type="password"], #pass', process.env.FACEBOOK_PASSWORD);
+      // Fill email – try multiple selectors
+      const emailInput = await page.$('input[type="email"], input[name="email"], #email');
+      if (emailInput) await emailInput.fill(process.env.FACEBOOK_EMAIL);
       
-      // Click login button
-      await page.click('button[name="login"], button[type="submit"], #loginbutton');
+      // Fill password
+      const passInput = await page.$('input[type="password"], input[name="pass"], #pass');
+      if (passInput) await passInput.fill(process.env.FACEBOOK_PASSWORD);
       
-      // Wait for navigation to complete (up to 30 seconds)
-      await page.waitForNavigation({ waitUntil: 'networkidle', timeout: 30000 });
+      // Click login button – try multiple selectors, then fallback to Enter key
+      const loginButton = await page.$('button[type="submit"], button[name="login"], #loginbutton, div[aria-label="Log in"]');
+      if (loginButton) {
+        await loginButton.click();
+      } else {
+        // Fallback: press Enter after filling
+        await page.keyboard.press('Enter');
+      }
+      
+      // Wait for navigation (may be a redirect, not necessarily networkidle)
+      await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
       
       // Handle "Save login info?" popup if present
       await page.waitForTimeout(3000);
