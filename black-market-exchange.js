@@ -84,34 +84,45 @@ function findRateNearKeyword(text, keywords) {
 
 function parseRatesFromText(text) {
   const rates = { USD: null, EUR: null, GBP: null };
-  const hyphenPatterns = [
-    { currency: 'USD', regex: /-dollar\s*\$1\s*=\s*(\d{1,2}(?:[.,]\d{1,2})?)\s*LYD\.?/i },
-    { currency: 'EUR', regex: /-Euro\s*€1\s*=\s*(\d{1,2}(?:[.,]\d{1,2})?)\s*LYD\.?/i },
-    { currency: 'GBP', regex: /-Pound\s*£1\s*=\s*(\d{1,2}(?:[.,]\d{1,2})?)\s*LYD\.?/i },
+  
+  // Log the raw text for debugging
+  console.log('[Exchange] Page text sample (first 500 chars):\n', text.slice(0, 500));
+  
+  // Method 1: Direct patterns like "$1=08.32 LYD"
+  const directPatterns = [
+    { currency: 'USD', regex: /\$1\s*=\s*(\d{1,2}(?:[.,]\d{1,2})?)\s*LYD/i },
+    { currency: 'EUR', regex: /€1\s*=\s*(\d{1,2}(?:[.,]\d{1,2})?)\s*LYD/i },
+    { currency: 'GBP', regex: /£1\s*=\s*(\d{1,2}(?:[.,]\d{1,2})?)\s*LYD/i },
   ];
-  for (const p of hyphenPatterns) {
+  for (const p of directPatterns) {
     const match = text.match(p.regex);
     if (match) rates[p.currency] = num(match[1]);
   }
-  if (rates.USD === null) {
-    const match = text.match(/\$1\s*=\s*(\d{1,2}(?:[.,]\d{1,2})?)\s*LYD/i);
-    if (match) rates.USD = num(match[1]);
+  
+  // Method 2: Look for any number near the currency symbol
+  const nearSymbol = [
+    { currency: 'USD', regex: /\$\s*(\d{1,2}(?:[.,]\d{1,2})?)/i },
+    { currency: 'EUR', regex: /€\s*(\d{1,2}(?:[.,]\d{1,2})?)/i },
+    { currency: 'GBP', regex: /£\s*(\d{1,2}(?:[.,]\d{1,2})?)/i },
+  ];
+  for (const p of nearSymbol) {
+    if (rates[p.currency] === null) {
+      const match = text.match(p.regex);
+      if (match) rates[p.currency] = num(match[1]);
+    }
   }
-  if (rates.EUR === null) {
-    const match = text.match(/€1\s*=\s*(\d{1,2}(?:[.,]\d{1,2})?)\s*LYD/i);
-    if (match) rates.EUR = num(match[1]);
-  }
-  if (rates.GBP === null) {
-    const match = text.match(/£1\s*=\s*(\d{1,2}(?:[.,]\d{1,2})?)\s*LYD/i);
-    if (match) rates.GBP = num(match[1]);
-  }
-  if (rates.USD === null) rates.USD = findRateNearKeyword(text, ['usd', 'dollar', 'dolar', '$']);
-  if (rates.EUR === null) rates.EUR = findRateNearKeyword(text, ['eur', 'euro', '€']);
-  if (rates.GBP === null) rates.GBP = findRateNearKeyword(text, ['gbp', 'pound', 'sterling', '£']);
+  
+  // Method 3: Keyword proximity
+  if (rates.USD === null) rates.USD = findRateNearKeyword(text, ['dollar', 'usd', '$']);
+  if (rates.EUR === null) rates.EUR = findRateNearKeyword(text, ['euro', 'eur', '€']);
+  if (rates.GBP === null) rates.GBP = findRateNearKeyword(text, ['pound', 'gbp', 'sterling', '£']);
+  
+  // If still missing, log the failure
   if (CURRENCIES.every(c => rates[c] === null)) {
-    console.error('❌ All parsing methods failed. Text sample (first 500 chars):', text.slice(0, 500));
+    console.error('❌ All parsing methods failed. Full text sample (first 1000 chars):\n', text.slice(0, 1000));
     return null;
   }
+  
   console.log(`✅ Parsed rates: USD=${rates.USD}, EUR=${rates.EUR}, GBP=${rates.GBP}`);
   return rates;
 }
