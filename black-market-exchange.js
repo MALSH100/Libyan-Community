@@ -464,46 +464,57 @@ async function postUpdate(client, guildId, exchangeData, latest, forced = false)
   const files = [];
   let row = null;
 
-  if ((exchangeData.history || []).length >= 2) {
-    // Generate initial chart for USD
-    const chartFile = await chartAttachment(exchangeData, 'USD');
-    files.push(chartFile);
-    embed.setImage('attachment://libya-exchange-chart-USD.png');
+  try {
+    if ((exchangeData.history || []).length >= 2) {
+      // Generate initial chart for USD
+      const chartFile = await chartAttachment(exchangeData, 'USD');
+      files.push(chartFile);
+      embed.setImage('attachment://libya-exchange-chart-USD.png');
 
-    // Create interactive buttons
-    row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('chart_usd').setLabel('$ USD').setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId('chart_eur').setLabel('€ EUR').setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId('chart_gbp').setLabel('£ GBP').setStyle(ButtonStyle.Primary),
-    );
-  }
+      // Create interactive buttons
+      row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('chart_usd').setLabel('$ USD').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('chart_eur').setLabel('€ EUR').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('chart_gbp').setLabel('£ GBP').setStyle(ButtonStyle.Primary),
+      );
+    }
 
-  const message = await channel.send({
-    embeds: [embed],
-    files,
-    components: row ? [row] : [],
-  });
-
-  // Set up collector for button interactions on this message
-  if (row && message) {
-    const filter = i => ['chart_usd', 'chart_eur', 'chart_gbp'].includes(i.customId);
-    const collector = message.createMessageComponentCollector({ filter, time: 300000 }); // 5 minutes
-
-    collector.on('collect', async i => {
-      let currency = 'USD';
-      if (i.customId === 'chart_eur') currency = 'EUR';
-      if (i.customId === 'chart_gbp') currency = 'GBP';
-      const newChart = await chartAttachment(exchangeData, currency);
-      // Update only the chart image, keep embed and buttons
-      await i.update({ files: [newChart], components: [row] });
+    const message = await channel.send({
+      embeds: [embed],
+      files,
+      components: row ? [row] : [],
     });
 
-    collector.on('end', () => {
-      message.edit({ components: [] }).catch(() => {});
-    });
-  }
+    // Set up collector for button interactions on this message
+    if (row && message) {
+      const filter = i => ['chart_usd', 'chart_eur', 'chart_gbp'].includes(i.customId);
+      const collector = message.createMessageComponentCollector({ filter, time: 300000 });
 
-  return true;
+      collector.on('collect', async i => {
+        try {
+          let currency = 'USD';
+          if (i.customId === 'chart_eur') currency = 'EUR';
+          if (i.customId === 'chart_gbp') currency = 'GBP';
+          const newChart = await chartAttachment(exchangeData, currency);
+          await i.update({ files: [newChart], components: [row] });
+        } catch (err) {
+          console.error('[Exchange] Button error:', err);
+          await i.reply({ content: 'Failed to update chart.', ephemeral: true });
+        }
+      });
+
+      collector.on('end', () => {
+        message.edit({ components: [] }).catch(() => {});
+      });
+    }
+
+    return true;
+  } catch (err) {
+    console.error('[Exchange] postUpdate error:', err);
+    // Fallback: send just the embed without chart
+    await channel.send({ embeds: [embed] }).catch(() => {});
+    return false;
+  }
 }
 
 async function updateRates({ client, db, saveData, guildId, forcePost = false }) {
