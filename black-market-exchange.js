@@ -480,14 +480,16 @@ async function updateRates({ client, db, saveData, guildId, forcePost = false })
 
   exchangeData.lastRates = latest;
   exchangeData.history = exchangeData.history || [];
-  // Only push if the rates changed (or forced refresh)
+
+  // Only push to history if the rates changed OR it's a forced refresh
   if (forcePost || changed) {
     exchangeData.history.push(latest);
     exchangeData.history = exchangeData.history.slice(-MAX_HISTORY);
   }
+
   let posted = false;
   if (forcePost || changed) {
-    posted = await postUpdate(...);
+    posted = await postUpdate(client, guildId, exchangeData, latest, forcePost);
     if (posted) exchangeData.lastPostedKey = key;
   }
 
