@@ -303,15 +303,23 @@ function svgEscape(value) {
 }
 
 function buildChartSvg(history) {
-  const rows = (history || []).filter(entry => entry.rates).slice(-CHART_POINTS);
+  // Filter to entries that have rates, sort by date (oldest first)
+  const rows = (history || [])
+    .filter(entry => entry.rates)
+    .sort((a, b) => new Date(a.scrapedAt) - new Date(b.scrapedAt))
+    .slice(-CHART_POINTS);
+  
+  if (rows.length === 0) return `<svg width="900" height="480"></svg>`;
+
   const width = 900;
-  const height = 480; // increased for legend and callouts
-  const pad = { left: 70, right: 40, top: 70, bottom: 90 };
+  const height = 480;
+  const pad = { left: 70, right: 40, top: 50, bottom: 60 };
   const plotW = width - pad.left - pad.right;
   const plotH = height - pad.top - pad.bottom;
   const palette = { USD: '#16a34a', EUR: '#2563eb', GBP: '#dc2626' };
+  const currencySymbols = { USD: '$', EUR: '€', GBP: '£' };
   
-  // Collect all values
+  // Collect all values for Y range
   let allValues = [];
   for (const row of rows) {
     for (const c of CURRENCIES) {
@@ -319,14 +327,14 @@ function buildChartSvg(history) {
     }
   }
   if (allValues.length === 0) return `<svg width="${width}" height="${height}"></svg>`;
-
+  
   let min = Math.min(...allValues);
   let max = Math.max(...allValues);
   const padRange = (max - min) * 0.15;
   min = Math.max(0, min - padRange);
   max = max + padRange;
   
-  // Y-axis ticks
+  // Y‑axis ticks (nice steps)
   const range = max - min;
   const tickCount = 5;
   let step = range / (tickCount - 1);
@@ -342,10 +350,16 @@ function buildChartSvg(history) {
   const niceRange = niceMax - niceMin;
   const steps = Math.round(niceRange / niceStep);
   
-  const xFor = idx => pad.left + (rows.length <= 1 ? plotW / 2 : (idx / (rows.length - 1)) * plotW);
-  const yFor = value => pad.top + (1 - ((value - niceMin) / niceRange)) * plotH;
+  // Date range for x‑axis
+  const firstDate = new Date(rows[0].scrapedAt).getTime();
+  const lastDate  = new Date(rows[rows.length-1].scrapedAt).getTime();
+  const dateRange = lastDate - firstDate;
   
-  // Grid & Y-axis
+  // Convert date to x coordinate (linear interpolation)
+  const xForDate = (dateMs) => pad.left + ((dateMs - firstDate) / dateRange) * plotW;
+  const yFor = (value) => pad.top + (1 - ((value - niceMin) / niceRange)) * plotH;
+  
+  // Build grid and Y‑axis labels
   const grid = [];
   for (let i = 0; i <= steps; i++) {
     const value = niceMin + i * niceStep;
@@ -354,92 +368,78 @@ function buildChartSvg(history) {
     grid.push(`<text x="${pad.left - 10}" y="${y + 4}" text-anchor="end" font-size="12" fill="#b9bbbe">${value.toFixed(2)}</text>`);
   }
   
-  // Lines
+  // Pre‑compute coordinates for each row
+  const coords = rows.map(row => ({
+    dateMs: new Date(row.scrapedAt).getTime(),
+    x: xForDate(new Date(row.scrapedAt).getTime()),
+    rates: row.rates,
+  }));
+  
+  // Draw lines for each currency
   const paths = CURRENCIES.map(currency => {
-    const points = rows
-      .map((row, idx) => {
-        const value = row.rates[currency];
-        if (typeof value !== 'number') return null;
-        return `${xFor(idx).toFixed(1)},${yFor(value).toFixed(1)}`;
-      })
-      .filter(Boolean);
+    const points = coords
+      .filter(p => typeof p.rates[currency] === 'number')
+      .map(p => `${p.x.toFixed(1)},${yFor(p.rates[currency]).toFixed(1)}`);
     if (points.length < 2) return '';
     return `<polyline points="${points.join(' ')}" fill="none" stroke="${palette[currency]}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>`;
   }).join('\n');
   
-  // Small circles for all points
-  const dots = CURRENCIES.map(currency => rows.map((row, idx) => {
-    const value = row.rates[currency];
-    if (typeof value !== 'number') return '';
-    const cx = xFor(idx).toFixed(1);
-    const cy = yFor(value).toFixed(1);
-    return `<circle cx="${cx}" cy="${cy}" r="3" fill="#36393f" stroke="${palette[currency]}" stroke-width="1.5"/>`;
-  }).join('\n')).join('\n');
-  
-  // Callouts: only last 2 points per currency (latest and previous)
-  const callouts = [];
-  const lastPoints = {};
-  const currencySymbols = { USD: '$', EUR: '€', GBP: '£' };
-  for (const currency of CURRENCIES) {
-    // Collect last 2 points
-    const points = [];
-    for (let idx = Math.max(0, rows.length - 2); idx < rows.length; idx++) {
-      const row = rows[idx];
-      const value = row.rates[currency];
-      if (typeof value === 'number') {
-        points.push({ idx, value, x: xFor(idx), y: yFor(value) });
-      }
-    }
-    if (points.length === 0) continue;
-    lastPoints[currency] = points[points.length-1].value;
-    
-    for (const p of points) {
-      const isLast = (p.idx === rows.length-1);
-      const offsetX = isLast ? 45 : -140;
-      // For previous point, use a positive Y offset (downward) so line doesn't cross the latest point's line
-      const yOffset = isLast ? -28 : 20;
-      let labelX = p.x + offsetX;
-      let labelY = p.y + yOffset;
-      // Bounds checking
-      labelX = Math.min(Math.max(labelX, pad.left + 20), width - pad.right - 55);
-      labelY = Math.min(Math.max(labelY, pad.top + 15), height - pad.bottom - 20);
-      
-      // Box dimensions
-      const boxW = 55;  // slightly wider to fit "$8.31"
-      const boxH = 20;
-      // Determine box left edge: if label is to the right, box starts at labelX; if left, box ends at labelX
-      const boxX = (labelX > p.x) ? labelX : labelX - boxW;
-      const boxCenterX = boxX + boxW/2;
-      const boxCenterY = labelY;  // because box's y is labelY-10, height 20 → center y = labelY
-      
-      // Line colour
-      const lineColor = isLast ? palette[currency] : '#888888';
-      // Draw vertical line from point to box center Y (not midY)
-      callouts.push(`<line x1="${p.x.toFixed(1)}" y1="${p.y.toFixed(1)}" x2="${p.x.toFixed(1)}" y2="${boxCenterY.toFixed(1)}" stroke="${lineColor}" stroke-width="1" stroke-dasharray="2,2"/>`);
-      // Draw horizontal line from point's x to box center X
-      callouts.push(`<line x1="${p.x.toFixed(1)}" y1="${boxCenterY.toFixed(1)}" x2="${boxCenterX.toFixed(1)}" y2="${boxCenterY.toFixed(1)}" stroke="${lineColor}" stroke-width="1" stroke-dasharray="2,2"/>`);
-      
-      // Box stroke colour
-      const strokeColor = isLast ? palette[currency] : '#888888';
-      callouts.push(`<rect x="${boxX}" y="${labelY - 10}" width="${boxW}" height="${boxH}" rx="4" fill="#2f3136" stroke="${strokeColor}" stroke-width="1"/>`);
-      // Text with currency symbol
-      const symbol = currencySymbols[currency] || '';
-      callouts.push(`<text x="${boxCenterX}" y="${labelY + 3}" text-anchor="middle" fill="#ffffff" font-size="11" font-weight="bold">${symbol}${p.value.toFixed(2)}</text>`);
-    }
-  }
-  
-  // X-axis labels – show each unique date only once (first occurrence of that date)
-  const seenDates = new Set();
-  const labels = rows.map((row, idx) => {
-    const date = new Date(row.scrapedAt || row.createdAt || Date.now());
-    const dateKey = `${date.getDate()}/${date.getMonth() + 1}`;
-    if (seenDates.has(dateKey)) return ''; // skip duplicate dates
-    seenDates.add(dateKey);
-    // For spacing, we still position the label at the x coordinate of the first point of that day
-    return `<text x="${xFor(idx).toFixed(1)}" y="${height - 55}" text-anchor="middle" font-size="10" fill="#b9bbbe">${svgEscape(dateKey)}</text>`;
+  // Draw circles for all points
+  const dots = CURRENCIES.map(currency => {
+    return coords.map(p => {
+      const value = p.rates[currency];
+      if (typeof value !== 'number') return '';
+      const cx = p.x.toFixed(1);
+      const cy = yFor(value).toFixed(1);
+      return `<circle cx="${cx}" cy="${cy}" r="3" fill="#36393f" stroke="${palette[currency]}" stroke-width="1.5"/>`;
+    }).join('\n');
   }).join('\n');
   
-  // Horizontal legend below title
+  // Callouts: only the latest point per currency (placed above)
+  const callouts = [];
+  const lastPoints = {};
+  for (const currency of CURRENCIES) {
+    const lastRow = coords[coords.length-1];
+    const value = lastRow.rates[currency];
+    if (typeof value !== 'number') continue;
+    lastPoints[currency] = value;
+    const x = lastRow.x;
+    const y = yFor(value);
+    const offsetX = 35;
+    const yOffset = -28;
+    let labelX = x + offsetX;
+    let labelY = y + yOffset;
+    labelX = Math.min(Math.max(labelX, pad.left + 20), width - pad.right - 55);
+    labelY = Math.min(Math.max(labelY, pad.top + 15), height - pad.bottom - 20);
+    const boxW = 55;
+    const boxH = 20;
+    const boxX = (labelX > x) ? labelX : labelX - boxW;
+    const boxCenterX = boxX + boxW/2;
+    const boxCenterY = labelY;
+    const lineColor = palette[currency];
+    callouts.push(`<line x1="${x.toFixed(1)}" y1="${y.toFixed(1)}" x2="${x.toFixed(1)}" y2="${boxCenterY.toFixed(1)}" stroke="${lineColor}" stroke-width="1" stroke-dasharray="2,2"/>`);
+    callouts.push(`<line x1="${x.toFixed(1)}" y1="${boxCenterY.toFixed(1)}" x2="${boxCenterX.toFixed(1)}" y2="${boxCenterY.toFixed(1)}" stroke="${lineColor}" stroke-width="1" stroke-dasharray="2,2"/>`);
+    callouts.push(`<rect x="${boxX}" y="${labelY - 10}" width="${boxW}" height="${boxH}" rx="4" fill="#2f3136" stroke="${lineColor}" stroke-width="1"/>`);
+    const symbol = currencySymbols[currency] || '';
+    callouts.push(`<text x="${boxCenterX}" y="${labelY + 3}" text-anchor="middle" fill="#ffffff" font-size="11" font-weight="bold">${symbol}${value.toFixed(2)}</text>`);
+  }
+  
+  // X‑axis labels: show each date once, positioned at the point's x
+  const uniqueDates = [];
+  const seenDates = new Set();
+  for (const p of coords) {
+    const date = new Date(p.dateMs);
+    const dateKey = `${date.getDate()}/${date.getMonth()+1}`;
+    if (!seenDates.has(dateKey)) {
+      seenDates.add(dateKey);
+      uniqueDates.push({ x: p.x, label: dateKey });
+    }
+  }
+  const labels = uniqueDates.map(d => {
+    return `<text x="${d.x.toFixed(1)}" y="${height - 25}" text-anchor="middle" font-size="10" fill="#b9bbbe">${svgEscape(d.label)}</text>`;
+  }).join('\n');
+  
+  // Legend (horizontal)
   const legendY = 46;
   const legendStartX = pad.left;
   const legendItems = CURRENCIES.map((currency, i) => {
@@ -447,11 +447,6 @@ function buildChartSvg(history) {
     return `<rect x="${x}" y="${legendY}" width="12" height="12" rx="2" fill="${palette[currency]}"/>
             <text x="${x + 18}" y="${legendY + 10}" fill="#e3e5e8" font-size="13">${currency} ${lastPoints[currency] ? lastPoints[currency].toFixed(2) : '?'}</text>`;
   }).join('');
-  
-  // Remove the duplicate subtitle line; legend already shows latest values
-  // Increase top margin by setting pad.top = 70 instead of 50
-  // But we can't change pad.top here because it's used earlier. Instead, adjust the legend position and title y.
-  // We'll set title at y=24, legend at y=46.
   
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
