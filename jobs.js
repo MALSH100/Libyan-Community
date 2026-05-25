@@ -48,24 +48,34 @@ async function fetchOpenSooqJobs() {
             timeout: 30000
         });
         
-        // Wait for any time indicator
+        // Wait for at least one job card (look for a container with a time indicator)
         await page.waitForFunction(() => {
             return document.body.innerText.match(/\d+\s+(minute|hour|day|week)s?\s+ago/i);
         }, { timeout: 15000 });
         
         const jobs = await page.evaluate(() => {
             const timePattern = /\b(\d+)\s+(minute|hour|day|week)s?\s+ago\b/i;
-            const containers = Array.from(document.querySelectorAll('div, li, article')).filter(el => {
-                return timePattern.test(el.innerText);
+            // Find elements that contain both a job link and a time indicator
+            const candidates = Array.from(document.querySelectorAll('div, li, article')).filter(el => {
+                return el.querySelector('a[href*="/job-posters/"]') && timePattern.test(el.innerText);
             });
             
             const jobItems = [];
-            for (const container of containers) {
-                // Extract time
-                const match = container.innerText.match(timePattern);
-                if (!match) continue;
-                const value = parseInt(match[1]);
-                const unit = match[2].toLowerCase();
+            for (const card of candidates) {
+                // Get the job link
+                const link = card.querySelector('a[href*="/job-posters/"]');
+                if (!link) continue;
+                
+                // Clean title: remove any leading time text that might be inside the link
+                let rawTitle = link.innerText.trim();
+                rawTitle = rawTitle.replace(/^\d+\s+(minute|hour|day|week)s?\s+ago\s*/i, '').trim();
+                const title = rawTitle;
+                
+                // Extract time from the same card
+                const timeMatch = card.innerText.match(timePattern);
+                if (!timeMatch) continue;
+                const value = parseInt(timeMatch[1]);
+                const unit = timeMatch[2].toLowerCase();
                 const now = new Date();
                 let date;
                 if (unit === 'minute') date = new Date(now - value * 60000);
@@ -74,40 +84,26 @@ async function fetchOpenSooqJobs() {
                 else if (unit === 'week') date = new Date(now - value * 604800000);
                 else date = now;
                 
-                // Find job link (prefer /job-posters/)
-                let link = container.querySelector('a[href*="/job-posters/"]');
-                if (!link) link = container.querySelector('a[href*="/job-vacancies/"]');
-                if (!link) continue;
-                
-                // Clean title: take everything before " - " or before the first dash
-                let rawTitle = link.innerText.trim();
-                let cleanTitle = rawTitle.split(' - ')[0];
-                // Remove any trailing contract type like "Full Time", "Part Time", "Freelance"
-                cleanTitle = cleanTitle.replace(/\s+(Full Time|Part Time|Freelance|Contract)$/i, '').trim();
-                
-                const lines = container.innerText.split('\n').map(l => l.trim()).filter(l => l);
-                
-                // Extract location: find a line that contains a city name AND a comma (e.g., "Arada, Tripoli")
+                // Extract location – look for a line containing a city name
+                const lines = card.innerText.split('\n').map(l => l.trim()).filter(l => l);
                 let location = 'Libya';
                 for (const line of lines) {
-                    const lower = line.toLowerCase();
-                    if ((lower.includes('tripoli') || lower.includes('benghazi') || lower.includes('misrata')) && line.includes(',')) {
+                    if (line.match(/Tripoli|Benghazi|Misrata|Arada|Tajoura|Zawiya|Sabha|Bayda|Derna|Sirte/i)) {
                         location = line;
                         break;
                     }
                 }
-                // Fallback to any line with a city name
+                // Fallback: any line with a comma (likely an address)
                 if (location === 'Libya') {
                     for (const line of lines) {
-                        const lower = line.toLowerCase();
-                        if (lower.includes('tripoli') || lower.includes('benghazi') || lower.includes('misrata')) {
+                        if (line.includes(',') && !line.match(/Contract|Working|Salary|Benefits/i)) {
                             location = line;
                             break;
                         }
                     }
                 }
                 
-                // Extract details with better parsing
+                // Extract details (contract, working days, salary, benefits) from the same card
                 let contractType = 'Not specified';
                 let workingDays = 'Not specified';
                 let salary = 'Not specified';
@@ -124,12 +120,17 @@ async function fetchOpenSooqJobs() {
                         if (parts[1]) workingDays = parts[1].trim();
                     }
                     if (lower.includes('expected salary')) {
-                        // Extract number and currency, ignoring absurdly high values (> 10000)
-                        const salaryMatch = line.match(/expected salary[:\s]*([\d\.,]+)\s*(LYD|USD|EUR)?/i);
-                        if (salaryMatch) {
-                            const amount = parseFloat(salaryMatch[1].replace(',', '.'));
-                            if (amount <= 10000) {
-                                salary = `${amount} ${salaryMatch[2] || 'LYD'}`;
+                        const parts = line.split(':');
+                        if (parts[1]) {
+                            let sal = parts[1].trim();
+                            const numMatch = sal.match(/\d+(?:\.\d+)?/);
+                            if (numMatch) {
+                                const amount = parseFloat(numMatch[0]);
+                                // Only accept reasonable salaries (1-5000 LYD)
+                                if (amount >= 1 && amount <= 5000) salary = `${amount} LYD`;
+                                else salary = 'Not specified';
+                            } else {
+                                salary = sal;
                             }
                         }
                     }
@@ -140,18 +141,18 @@ async function fetchOpenSooqJobs() {
                 }
                 
                 // Build description
-                const descriptionParts = [];
-                if (contractType !== 'Not specified') descriptionParts.push(`**Contract:** ${contractType}`);
-                if (workingDays !== 'Not specified') descriptionParts.push(`**Working Days:** ${workingDays}`);
-                if (salary !== 'Not specified') descriptionParts.push(`**Salary:** ${salary}`);
-                if (benefits !== 'None') descriptionParts.push(`**Benefits:** ${benefits}`);
-                const cleanDescription = descriptionParts.join('\n') || 'Click the link for more details.';
+                const descParts = [];
+                if (contractType !== 'Not specified') descParts.push(`**Contract:** ${contractType}`);
+                if (workingDays !== 'Not specified') descParts.push(`**Working Days:** ${workingDays}`);
+                if (salary !== 'Not specified') descParts.push(`**Salary:** ${salary}`);
+                if (benefits !== 'None') descParts.push(`**Benefits:** ${benefits}`);
+                const description = descParts.join('\n') || 'Click the link for more details.';
                 
                 jobItems.push({
-                    title: cleanTitle,
+                    title,
                     url: link.href,
                     location,
-                    description: cleanDescription,
+                    description,
                     date
                 });
             }
