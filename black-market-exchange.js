@@ -209,7 +209,7 @@ function svgEscape(value) {
 }
 
 function buildChartSvg(history, mainCurrency = 'USD') {
-  // Filter entries with valid rate for the selected currency, sort by date
+  // Sort by date
   let rows = (history || [])
     .filter(entry => entry.rates && typeof entry.rates[mainCurrency] === 'number')
     .sort((a, b) => new Date(a.scrapedAt) - new Date(b.scrapedAt));
@@ -222,7 +222,7 @@ function buildChartSvg(history, mainCurrency = 'USD') {
   const plotW = width - pad.left - pad.right;
   const plotH = height - pad.top - pad.bottom;
   
-  // Build candlestick data (open = previous close, high/low derived)
+  // Build candlestick data
   const candles = [];
   for (let i = 0; i < rows.length; i++) {
     const close = rows[i].rates[mainCurrency];
@@ -230,29 +230,27 @@ function buildChartSvg(history, mainCurrency = 'USD') {
     const high = Math.max(open, close);
     const low = Math.min(open, close);
     const date = new Date(rows[i].scrapedAt);
-    // Color: green if close < open (dinar strengthens), red if close > open (dinar weakens)
+    // Green if dinar strengthens (close < open), red if weakens (close > open)
     const color = close < open ? '#26a69a' : (close > open ? '#ef5350' : '#888888');
     candles.push({ date, open, high, low, close, color });
   }
   
-  // Y‑axis range with padding
+  // Y range – use actual min/max with 5% padding
   let allValues = candles.flatMap(c => [c.high, c.low]);
   let min = Math.min(...allValues);
   let max = Math.max(...allValues);
-  const padVal = (max - min) * 0.1;
-  min = Math.max(0, min - padVal);
-  max = max + padVal;
+  const padRange = (max - min) * 0.05;
+  min = min - padRange;
+  max = max + padRange;
+  if (min < 0) min = 0;
   
-  // Nice Y‑axis ticks
-  const step = (max - min) / 4;
-  let niceStep = Math.ceil(step / 0.5) * 0.5;
-  if (niceStep < 0.1) niceStep = 0.1;
-  let niceMin = Math.floor(min / niceStep) * niceStep;
-  let niceMax = Math.ceil(max / niceStep) * niceStep;
+  // Y‑axis ticks – 5 evenly spaced values
+  const tickCount = 5;
+  const step = (max - min) / (tickCount - 1);
   const tickValues = [];
-  for (let i = niceMin; i <= niceMax + 0.001; i += niceStep) tickValues.push(i);
+  for (let i = 0; i < tickCount; i++) tickValues.push(min + i * step);
   
-  const yFor = (value) => pad.top + (1 - ((value - niceMin) / (niceMax - niceMin))) * plotH;
+  const yFor = (value) => pad.top + (1 - ((value - min) / (max - min))) * plotH;
   const xFor = (idx) => pad.left + (idx / (candles.length - 1)) * plotW;
   const candleWidth = Math.max(3, Math.min(10, plotW / candles.length * 0.6));
   const halfWidth = candleWidth / 2;
@@ -278,19 +276,16 @@ function buildChartSvg(history, mainCurrency = 'USD') {
     const bodyTop = Math.min(openY, closeY);
     const bodyBottom = Math.max(openY, closeY);
     const bodyHeight = Math.max(1, bodyBottom - bodyTop);
-    // Wick
     candlesSvg.push(`<line x1="${x}" y1="${highY}" x2="${x}" y2="${lowY}" stroke="${c.color}" stroke-width="1.5"/>`);
-    // Candle body
     candlesSvg.push(`<rect x="${x - halfWidth}" y="${bodyTop}" width="${candleWidth}" height="${bodyHeight}" fill="${c.color}" stroke="${c.color}" stroke-width="1"/>`);
   }
   
-  // Callout for the latest closing value
-  const lastCandle = candles[candles.length - 1];
-  const lastX = xFor(candles.length - 1);
-  const lastY = yFor(lastCandle.close);
+  // Callout for the latest close
+  const last = candles[candles.length-1];
+  const lastX = xFor(candles.length-1);
+  const lastY = yFor(last.close);
   const offsetX = 35, yOffset = -28;
-  let labelX = lastX + offsetX;
-  let labelY = lastY + yOffset;
+  let labelX = lastX + offsetX, labelY = lastY + yOffset;
   labelX = Math.min(Math.max(labelX, pad.left + 20), width - pad.right - 55);
   labelY = Math.min(Math.max(labelY, pad.top + 15), height - pad.bottom - 20);
   const boxW = 55, boxH = 20;
@@ -303,10 +298,10 @@ function buildChartSvg(history, mainCurrency = 'USD') {
     `<line x1="${lastX.toFixed(1)}" y1="${lastY.toFixed(1)}" x2="${lastX.toFixed(1)}" y2="${boxCenterY.toFixed(1)}" stroke="#888888" stroke-width="1" stroke-dasharray="2,2"/>`,
     `<line x1="${lastX.toFixed(1)}" y1="${boxCenterY.toFixed(1)}" x2="${boxCenterX.toFixed(1)}" y2="${boxCenterY.toFixed(1)}" stroke="#888888" stroke-width="1" stroke-dasharray="2,2"/>`,
     `<rect x="${boxX}" y="${labelY - 10}" width="${boxW}" height="${boxH}" rx="4" fill="#2f3136" stroke="#888888" stroke-width="1"/>`,
-    `<text x="${boxCenterX}" y="${labelY + 3}" text-anchor="middle" fill="#ffffff" font-size="11" font-weight="bold">${symbol}${lastCandle.close.toFixed(2)}</text>`
+    `<text x="${boxCenterX}" y="${labelY + 3}" text-anchor="middle" fill="#ffffff" font-size="11" font-weight="bold">${symbol}${last.close.toFixed(2)}</text>`
   ];
   
-  // X‑axis labels: one per unique date
+  // X‑axis labels (unique dates)
   const xLabels = [];
   const seenDates = new Set();
   for (let i = 0; i < candles.length; i++) {
