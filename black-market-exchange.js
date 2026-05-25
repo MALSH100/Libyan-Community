@@ -428,14 +428,15 @@ function buildChartSvg(history) {
     }
   }
   
-  // X-axis labels (show date only, on every point if space permits, otherwise every 2nd)
+  // X-axis labels – show each unique date only once (first occurrence of that date)
+  const seenDates = new Set();
   const labels = rows.map((row, idx) => {
-    // Show every point if there are 10 or fewer, otherwise every 2nd to avoid clutter
-    const everyN = rows.length <= 10 ? 1 : 2;
-    if (idx !== 0 && idx !== rows.length - 1 && idx % everyN !== 0) return '';
     const date = new Date(row.scrapedAt || row.createdAt || Date.now());
-    const label = `${date.getDate()}/${date.getMonth() + 1}`;
-    return `<text x="${xFor(idx).toFixed(1)}" y="${height - 55}" text-anchor="middle" font-size="10" fill="#b9bbbe">${svgEscape(label)}</text>`;
+    const dateKey = `${date.getDate()}/${date.getMonth() + 1}`;
+    if (seenDates.has(dateKey)) return ''; // skip duplicate dates
+    seenDates.add(dateKey);
+    // For spacing, we still position the label at the x coordinate of the first point of that day
+    return `<text x="${xFor(idx).toFixed(1)}" y="${height - 55}" text-anchor="middle" font-size="10" fill="#b9bbbe">${svgEscape(dateKey)}</text>`;
   }).join('\n');
   
   // Horizontal legend below title
@@ -529,7 +530,19 @@ async function updateRates({ client, db, saveData, guildId, forcePost = false })
 
   // Only push to history if the rates changed OR it's a forced refresh
   if (forcePost || changed) {
-    exchangeData.history.push(latest);
+    const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+    // Check if we already have an entry for today
+    const existingIndex = exchangeData.history.findIndex(entry => 
+      new Date(entry.scrapedAt).toISOString().slice(0, 10) === today
+    );
+    if (existingIndex !== -1) {
+      // Replace today's entry with the latest
+      exchangeData.history[existingIndex] = latest;
+    } else {
+      // Add new entry
+      exchangeData.history.push(latest);
+    }
+    // Keep only the last MAX_HISTORY days
     exchangeData.history = exchangeData.history.slice(-MAX_HISTORY);
   }
 
