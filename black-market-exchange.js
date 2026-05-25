@@ -605,13 +605,17 @@ if (commandName === 'exchange-chart') {
     // Generate initial chart for USD
     const initialChart = await chartAttachment(exchangeData, 'USD');
     
-    // Send the message (non‑ephemeral so buttons are clearly visible)
-    await interaction.reply({
+    // Send the message with buttons – force non‑ephemeral
+    const reply = await interaction.reply({
       content: '📈 Select a currency to view its exchange rate trend:',
       files: [initialChart],
       components: [row],
+      // No flags, so it's a public message
     });
     
+    console.log('[Exchange] Chart reply sent with buttons');
+    
+    // Fetch the message to attach collector
     const msg = await interaction.fetchReply();
     const filter = i => i.user.id === interaction.user.id && ['chart_usd','chart_eur','chart_gbp'].includes(i.customId);
     const collector = msg.createMessageComponentCollector({ filter, time: 60000 });
@@ -620,6 +624,7 @@ if (commandName === 'exchange-chart') {
       let currency = 'USD';
       if (i.customId === 'chart_eur') currency = 'EUR';
       if (i.customId === 'chart_gbp') currency = 'GBP';
+      console.log(`[Exchange] Button clicked: ${i.customId}, generating chart for ${currency}`);
       const newChart = await chartAttachment(exchangeData, currency);
       await i.update({ files: [newChart], components: [row] });
     });
@@ -628,7 +633,7 @@ if (commandName === 'exchange-chart') {
       interaction.editReply({ components: [] }).catch(() => {});
     });
   } catch (err) {
-    console.error('Exchange chart error:', err);
+    console.error('[Exchange] Chart error:', err);
     return safeReply(interaction, { content: '❌ Failed to generate chart. Please try again later.', flags: 64 });
   }
   return;
