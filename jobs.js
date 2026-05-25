@@ -23,29 +23,26 @@ async function fetchOpenSooqJobs() {
             timeout: 30000
         });
         
-        // Wait for at least one time indicator
         await page.waitForFunction(() => {
             return document.body.innerText.match(/\d+\s+(minute|hour|day|week)s?\s+ago/i);
         }, { timeout: 15000 });
         
         const jobData = await page.evaluate(() => {
-            // Find all elements that contain both a job link and a time string
+            // Find the first card with a job link and a time indicator
             const cards = Array.from(document.querySelectorAll('div, li, article')).filter(el => {
                 const hasLink = el.querySelector('a[href*="/job-posters/"]');
                 const hasTime = /\d+\s+(minute|hour|day|week)s?\s+ago/i.test(el.innerText);
                 return hasLink && hasTime;
             });
             if (cards.length === 0) return null;
-            
-            // Take the first card (newest)
             const card = cards[0];
             const link = card.querySelector('a[href*="/job-posters/"]');
             if (!link) return null;
             
-            // Clean title – remove any trailing " - ..." and remove time prefix if present
-            let rawTitle = link.innerText.trim();
-            rawTitle = rawTitle.replace(/^\d+\s+(minute|hour|day|week)s?\s+ago\s*/i, '');
-            let title = rawTitle.split(' - ')[0].trim();
+            // Clean title
+            let title = link.innerText.trim();
+            title = title.replace(/^\d+\s+(minute|hour|day|week)s?\s+ago\s*/i, '');
+            title = title.split(' - ')[0].trim();
             
             // Extract time
             const timeMatch = card.innerText.match(/\b(\d+)\s+(minute|hour|day|week)s?\s+ago\b/i);
@@ -60,7 +57,7 @@ async function fetchOpenSooqJobs() {
             else if (unit === 'week') date = new Date(now - value * 604800000);
             else date = now;
             
-            // Extract location: find a line that contains a city name or a comma (address)
+            // Extract location
             const lines = card.innerText.split('\n').map(l => l.trim()).filter(l => l);
             let location = 'Libya';
             for (const line of lines) {
@@ -78,38 +75,10 @@ async function fetchOpenSooqJobs() {
                 }
             }
             
-            // Extract details (contract, working days, benefits) – ignore salary
-            let contractType = 'Not specified';
-            let workingDays = 'Not specified';
-            let benefits = 'None';
-            for (const line of lines) {
-                const lower = line.toLowerCase();
-                if (lower.includes('contract type')) {
-                    const parts = line.split(':');
-                    if (parts[1]) contractType = parts[1].trim();
-                }
-                if (lower.includes('working days')) {
-                    const parts = line.split(':');
-                    if (parts[1]) workingDays = parts[1].trim();
-                }
-                if (lower.includes('benefits')) {
-                    const parts = line.split(':');
-                    if (parts[1]) benefits = parts[1].trim();
-                }
-            }
-            
-            // Build description
-            const descParts = [];
-            if (contractType !== 'Not specified') descParts.push(`**Contract:** ${contractType}`);
-            if (workingDays !== 'Not specified') descParts.push(`**Working Days:** ${workingDays}`);
-            if (benefits !== 'None') descParts.push(`**Benefits:** ${benefits}`);
-            const description = descParts.join('\n') || 'Click the link for more details.';
-            
             return {
                 title,
                 url: link.href,
                 location,
-                description,
                 postedAt: date.getTime()
             };
         });
@@ -120,7 +89,6 @@ async function fetchOpenSooqJobs() {
             id: `opensooq_${jobData.url.split('/').pop() || Date.now()}`,
             title: jobData.title,
             location: jobData.location,
-            description: jobData.description,
             url: jobData.url,
             postedAt: new Date(jobData.postedAt),
             source: 'opensooq'
@@ -186,8 +154,7 @@ async function postJobsUpdate(client, jobsState, job, forced = false) {
         .setURL(job.url)
         .addFields(
             { name: '📍 Location', value: job.location || 'Libya', inline: true },
-            { name: '⏱️ Posted', value: `<t:${Math.floor(job.postedAt.getTime() / 1000)}:R>`, inline: true },
-            { name: '📋 Details', value: job.description || 'Click the link to view the full job posting.', inline: false }
+            { name: '⏱️ Posted', value: `<t:${Math.floor(job.postedAt.getTime() / 1000)}:R>`, inline: true }
         )
         .setFooter({ text: `${job.source} • Jobs updated every 30 minutes` })
         .setTimestamp();
@@ -195,7 +162,6 @@ async function postJobsUpdate(client, jobsState, job, forced = false) {
     await channel.send({ embeds: [embed] });
     return true;
 }
-
 // ----------------------------------------------------------------------
 // Main update
 // ----------------------------------------------------------------------
