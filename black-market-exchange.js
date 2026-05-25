@@ -504,12 +504,7 @@ async function postUpdate(client, guildId, exchangeData, latest, forced = false)
 
 async function updateRates({ client, db, saveData, guildId, forcePost = false }) {
   const exchangeData = getExchangeData(db, guildId);
-  // Optional: force clear history (run once)
-if (!exchangeData.cleaned) {
-  exchangeData.history = [];
-  exchangeData.cleaned = true;
-  saveData(guildId);
-}
+
   exchangeData.lastCheckedAt = new Date().toISOString();
 
   const latest = await scrapeFacebookRates();
