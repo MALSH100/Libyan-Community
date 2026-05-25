@@ -43,21 +43,27 @@ async function fetchOpenSooqJobs() {
             args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
         });
         const page = await browser.newPage();
+        // Use domcontentloaded instead of networkidle – much faster and less strict
         await page.goto('https://ly.opensooq.com/en/jobs/job-vacancies?search=true&sort_code=recent', {
-            waitUntil: 'networkidle',
+            waitUntil: 'domcontentloaded',
             timeout: 30000
         });
         
-        // Wait for any job link to appear
-        await page.waitForSelector('a[href*="/job-vacancies/"]', { timeout: 15000 });
+        // Wait for at least one link that points to a job detail page
+        await page.waitForSelector('a[href*="/job-vacancies/"]', { timeout: 15000, state: 'attached' });
         
         const jobs = await page.evaluate(() => {
-            // Find all links that look like job listings
-            const links = Array.from(document.querySelectorAll('a[href*="/en/jobs/job-vacancies/"]'));
-            return links.slice(0, 5).map(link => {
+            // Get all unique job links (avoid duplicates)
+            const links = Array.from(document.querySelectorAll('a[href*="/job-vacancies/"]'));
+            const unique = new Map();
+            for (const link of links) {
+                const href = link.href;
+                if (!unique.has(href)) unique.set(href, link);
+            }
+            return Array.from(unique.values()).slice(0, 5).map(link => {
                 const title = link.innerText.trim();
                 const url = link.href;
-                // Try to get company and location from the nearest parent container
+                // Try to get company/location from parent elements
                 let company = 'Not specified';
                 let location = 'Libya';
                 const parent = link.closest('div, li, article');
@@ -66,7 +72,7 @@ async function fetchOpenSooqJobs() {
                     const lines = text.split('\n');
                     for (const line of lines) {
                         const lower = line.toLowerCase();
-                        if (lower.includes('company') || lower.includes('by ')) {
+                        if ((lower.includes('company') || lower.includes('by ')) && line.length > 4) {
                             company = line.replace(/company|by/gi, '').trim();
                         }
                         if (lower.includes('tripoli') || lower.includes('benghazi') || lower.includes('misrata')) {
@@ -86,7 +92,7 @@ async function fetchOpenSooqJobs() {
             title: job.title,
             company: job.company,
             location: job.location,
-            description: 'Click the link to view the full job details.',
+            description: 'Click the link to view the full job description.',
             url: job.url,
             postedAt: new Date(),
             source: 'opensooq'
@@ -97,7 +103,6 @@ async function fetchOpenSooqJobs() {
         return [];
     }
 }
-
 // ----------------------------------------------------------------------
 // Combine all sources and get the single most recent job
 // ----------------------------------------------------------------------
