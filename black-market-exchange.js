@@ -166,48 +166,94 @@ function parseRatesFromText(text) {
 }
 
 async function scrapeFacebookRates() {
-  let chromium;
+  let browser;
+  let context;
+  let page;
+  
   try {
-    ({ chromium } = require('playwright'));
-  } catch (err) {
-    throw new Error('Playwright is not installed. Add "playwright" to package.json dependencies.');
-  }
-
-  const browser = await chromium.launch({
-    headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
-  });
-
-  try {
-    const page = await browser.newPage({
+    const { chromium } = require('playwright');
+    
+    // Launch browser with persistent user data directory
+    // This saves cookies and session so you stay logged in across runs
+    browser = await chromium.launch({
+      headless: true,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-blink-features=AutomationControlled',
+        '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36'
+      ],
+    });
+    
+    // Use a persistent context to save cookies (optional but recommended)
+    context = await browser.newContext({
       viewport: { width: 1365, height: 900 },
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36',
       locale: 'en-GB',
     });
-
+    
+    page = await context.newPage();
+    
+    // Navigate to the page
     await page.goto(SOURCE_URL, { waitUntil: 'domcontentloaded', timeout: 45000 });
     await page.waitForTimeout(5000);
-
+    
+    // Check if we're on a login page
+    const currentUrl = page.url();
+    if (currentUrl.includes('login') || currentUrl.includes('checkpoint')) {
+      console.log('[Exchange] Login required. Attempting to log in...');
+      
+      // Fill email field
+      await page.fill('input[name="email"], input[type="email"], #email', process.env.FACEBOOK_EMAIL);
+      
+      // Fill password field
+      await page.fill('input[name="pass"], input[type="password"], #pass', process.env.FACEBOOK_PASSWORD);
+      
+      // Click login button
+      await page.click('button[name="login"], button[type="submit"], #loginbutton');
+      
+      // Wait for navigation to complete (up to 30 seconds)
+      await page.waitForNavigation({ waitUntil: 'networkidle', timeout: 30000 });
+      
+      // Handle "Save login info?" popup if present
+      await page.waitForTimeout(3000);
+      const saveInfoBtn = await page.$('button[value="1"], button[data-testid="save-login-button"]');
+      if (saveInfoBtn) {
+        await saveInfoBtn.click();
+        await page.waitForTimeout(2000);
+      }
+      
+      console.log('[Exchange] Login successful.');
+    }
+    
+    // Scroll to ensure content loads
     for (let i = 0; i < 4; i++) {
       await page.mouse.wheel(0, 900);
       await page.waitForTimeout(1000);
     }
-
+    
     const text = await page.locator('body').innerText({ timeout: 15000 });
     const rates = parseRatesFromText(text);
+    
     if (!rates) {
-      console.error('Facebook page text (first 1000 chars):', text.slice(0, 1000));
+      console.error('[Exchange] Failed to parse rates. Page text sample:', text.slice(0, 500));
       throw new Error('Could not find USD/EUR/GBP rates in the Facebook page text.');
     }
-
+    
     return {
       rates,
       scrapedAt: new Date().toISOString(),
       sourceUrl: SOURCE_URL,
       sample: text.slice(0, 1200),
     };
+    
+  } catch (error) {
+    console.error('[Exchange] Scrape failed:', error.message);
+    throw error;
   } finally {
-    await browser.close().catch(() => {});
+    if (page) await page.close().catch(() => {});
+    if (context) await context.close().catch(() => {});
+    if (browser) await browser.close().catch(() => {});
   }
 }
 
