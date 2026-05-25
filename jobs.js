@@ -8,7 +8,7 @@ const CHECK_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
 const MAX_HISTORY = 50;
 
 // Careerjet API key (from environment variable)
-const CAREERJET_API_KEY = process.env.CAREERJET_API_KEY || '1b7358b4274242b009f62e09dd750c73';
+const CAREERJET_API_KEY = process.env.CAREERJET_API_KEY || '73f7f75049a63e4dbbeaad53d1b5f11d';
 
 // ----------------------------------------------------------------------
 // Source 1: hiring.cafe (public API)
@@ -21,55 +21,58 @@ async function fetchHiringCafeJobs() {
 // ----------------------------------------------------------------------
 // Source 2: careerjet (official API)
 // ----------------------------------------------------------------------
-// --- Job Fetcher: Careerjet (using RSS feed) ---
+
+// --- Job Fetcher: Careerjet (official API) ---
 async function fetchCareerjetJobs() {
+    const API_KEY = process.env.CAREERJET_API_KEY || '73f7f75049a63e4dbbeaad53d1b5f11d';
+    if (!API_KEY) {
+        console.warn('[Jobs] CAREERJET_API_KEY not set');
+        return [];
+    }
     try {
-        // Construct the RSS feed URL for Libya
-        const rssUrl = `https://www.careerjet.com/jobs.rss?location=Libya&s=20`;
-        const { data: xmlData } = await axios.get(rssUrl, {
-            headers: { 'User-Agent': 'Mozilla/5.0 (compatible; DiscordBot/1.0)' },
+        // Required parameters per Careerjet API documentation
+        const params = new URLSearchParams({
+            locale_code: 'en_GB',           // English, Great Britain
+            keywords: 'Libya',               // Search term
+            sort: 'date',                   // Newest first
+            pagesize: 5,                    // Fetch up to 5 jobs
+            user_ip: 'auto',                // Let Careerjet detect IP
+            user_agent: 'Mozilla/5.0 (compatible; DiscordBot/1.0)'
+        });
+
+        const url = `https://search.api.careerjet.net/v4/query?${params}`;
+        // Basic authentication: username = API key, password = empty string
+        const auth = Buffer.from(`${API_KEY}:`).toString('base64');
+        
+        const res = await axios.get(url, {
+            headers: {
+                'Authorization': `Basic ${auth}`,
+                'Referer': 'https://libyan-community-production.up.railway.app'
+            },
             timeout: 15000
         });
 
-        // Parse the XML data
-        const $ = cheerio.load(xmlData, { xmlMode: true });
-
-        const jobs = [];
-        $('item').each((i, elem) => {
-            if (i >= 5) return false; // Limit to 5 jobs
-            const title = $(elem).find('title').text();
-            const link = $(elem).find('link').text();
-            const description = $(elem).find('description').text().slice(0, 200);
-            const pubDate = $(elem).find('pubDate').text();
-
-            jobs.push({
-                id: `careerjet_${link}`,
-                title: title,
-                company: 'Not specified', // RSS feed doesn't provide company directly
-                location: 'Libya',
-                description: description || 'Click the link for more details.',
-                url: link,
-                postedAt: new Date(pubDate),
-                source: 'careerjet'
-            });
-        });
-        return jobs;
+        const jobs = res.data.jobs || [];
+        return jobs.map(job => ({
+            id: `careerjet_${job.url || job.title}`,
+            title: job.title,
+            company: job.company || 'Not specified',
+            location: (typeof job.locations === 'string' ? job.locations : 'Libya'),
+            description: (job.description || '').slice(0, 200),
+            url: job.url,
+            postedAt: job.date ? new Date(job.date) : new Date(),
+            source: 'careerjet'
+        }));
     } catch (err) {
-        console.error('[Jobs] careerjet RSS error:', err.message);
+        console.error('[Jobs] careerjet API error:', err.message);
+        if (err.response) {
+            console.error('[Jobs] careerjet API response:', err.response.status, err.response.data);
+        }
         return [];
     }
 }
 
-// Helper function to get the server's public IP address (required by Careerjet API)
-async function getPublicIP() {
-    try {
-        const response = await axios.get('https://api.ipify.org?format=json', { timeout: 5000 });
-        return response.data.ip;
-    } catch (error) {
-        console.error('[Jobs] Failed to get public IP:', error.message);
-        return '0.0.0.0'; // Fallback IP
-    }
-}
+
 
 // ----------------------------------------------------------------------
 // Source 3: opensooq.com (scraping)
