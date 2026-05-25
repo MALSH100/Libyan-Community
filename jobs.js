@@ -41,6 +41,8 @@ async function fetchOpenSooqJobs() {
             
             // Clean title
             let title = link.innerText.trim();
+            // Remove "Now" or relative time patterns
+            title = title.replace(/^Now\s*/i, '');
             title = title.replace(/^\d+\s+(minute|hour|day|week)s?\s+ago\s*/i, '');
             title = title.split(' - ')[0].trim();
             title = title.replace(/\s+(Full Time|Part Time|Freelance|Contract)$/i, '').trim();
