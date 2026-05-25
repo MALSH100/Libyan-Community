@@ -583,37 +583,43 @@ if (commandName === 'exchange-chart') {
     return safeReply(interaction, { content: 'Not enough exchange history yet. The chart needs at least two saved updates.', flags: 64 });
   }
   
-  // Create buttons
-  const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('chart_usd').setLabel('$ USD').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId('chart_eur').setLabel('€ EUR').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId('chart_gbp').setLabel('£ GBP').setStyle(ButtonStyle.Primary),
-  );
-  
-  // Generate initial chart for USD
-  const initialChart = await chartAttachment(exchangeData, 'USD');
-  await interaction.reply({
-    content: '📈 Select a currency to view its exchange rate trend:',
-    files: [initialChart],
-    components: [row],
-    flags: 64,
-  });
-  
-  const msg = await interaction.fetchReply();
-  const filter = i => i.user.id === interaction.user.id && ['chart_usd','chart_eur','chart_gbp'].includes(i.customId);
-  const collector = msg.createMessageComponentCollector({ filter, time: 60000 });
-  
-  collector.on('collect', async i => {
-    let currency = 'USD';
-    if (i.customId === 'chart_eur') currency = 'EUR';
-    if (i.customId === 'chart_gbp') currency = 'GBP';
-    const newChart = await chartAttachment(exchangeData, currency);
-    await i.update({ files: [newChart], components: [row] });
-  });
-  
-  collector.on('end', () => {
-    interaction.editReply({ components: [] }).catch(() => {});
-  });
+  try {
+    // Create buttons
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('chart_usd').setLabel('$ USD').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('chart_eur').setLabel('€ EUR').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('chart_gbp').setLabel('£ GBP').setStyle(ButtonStyle.Primary),
+    );
+    
+    // Generate initial chart for USD
+    const initialChart = await chartAttachment(exchangeData, 'USD');
+    
+    // Send the message (non‑ephemeral so buttons are clearly visible)
+    await interaction.reply({
+      content: '📈 Select a currency to view its exchange rate trend:',
+      files: [initialChart],
+      components: [row],
+    });
+    
+    const msg = await interaction.fetchReply();
+    const filter = i => i.user.id === interaction.user.id && ['chart_usd','chart_eur','chart_gbp'].includes(i.customId);
+    const collector = msg.createMessageComponentCollector({ filter, time: 60000 });
+    
+    collector.on('collect', async i => {
+      let currency = 'USD';
+      if (i.customId === 'chart_eur') currency = 'EUR';
+      if (i.customId === 'chart_gbp') currency = 'GBP';
+      const newChart = await chartAttachment(exchangeData, currency);
+      await i.update({ files: [newChart], components: [row] });
+    });
+    
+    collector.on('end', () => {
+      interaction.editReply({ components: [] }).catch(() => {});
+    });
+  } catch (err) {
+    console.error('Exchange chart error:', err);
+    return safeReply(interaction, { content: '❌ Failed to generate chart. Please try again later.', flags: 64 });
+  }
   return;
 }
 
