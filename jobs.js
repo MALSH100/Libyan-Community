@@ -28,21 +28,27 @@ async function fetchCareerjetJobs() {
         return [];
     }
     try {
-        // Required parameters per documentation
+        const referer = 'https://your-railway-app.up.railway.app'; // Use your actual Railway URL
+        
         const params = new URLSearchParams({
-            locale_code: 'en_LY',           // English, Libya
-            sort: 'date',                   // newest first
-            pagesize: 5,
-            user_ip: 'auto',                // required
+            locale_code: 'en_GB',           // English, Great Britain (Libya is not a specific country in Careerjet's list)
+            keywords: 'Libya',               // ← This is the fix for Libya
+            sort: 'date',
+            pagesize: 10,                   // Fetch 10 jobs to ensure we have the latest
+            user_ip: await getPublicIP(),    // ← Call the async function below
             user_agent: 'Mozilla/5.0 (compatible; DiscordBot/1.0)'
         });
-        // Basic auth: username = API key, password = empty string
-        const auth = Buffer.from(`${API_KEY}:`).toString('base64');
+        
         const url = `https://search.api.careerjet.net/v4/query?${params}`;
+        const auth = Buffer.from(`${API_KEY}:`).toString('base64');
         const res = await axios.get(url, {
-            headers: { 'Authorization': `Basic ${auth}` },
+            headers: { 
+                'Authorization': `Basic ${auth}`,
+                'Referer': referer
+            },
             timeout: 15000
         });
+        
         const jobs = res.data.jobs || [];
         return jobs.map(job => ({
             id: `careerjet_${job.url || job.title}`,
@@ -56,7 +62,21 @@ async function fetchCareerjetJobs() {
         }));
     } catch (err) {
         console.error('[Jobs] careerjet error:', err.message);
+        if (err.response) {
+            console.error('[Jobs] careerjet response:', err.response.status, err.response.data);
+        }
         return [];
+    }
+}
+
+// Helper function to get the server's public IP address (required by Careerjet API)
+async function getPublicIP() {
+    try {
+        const response = await axios.get('https://api.ipify.org?format=json', { timeout: 5000 });
+        return response.data.ip;
+    } catch (error) {
+        console.error('[Jobs] Failed to get public IP:', error.message);
+        return '0.0.0.0'; // Fallback IP
     }
 }
 
