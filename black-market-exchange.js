@@ -591,30 +591,27 @@ module.exports = function initBlackMarketExchange({ client, db, saveData }) {
       }
 
 if (commandName === 'exchange-chart') {
-  console.log('[Exchange] Chart command entered – deferring reply');
+  if (!exchangeData.history || exchangeData.history.length < 2) {
+    return safeReply(interaction, { content: 'Not enough exchange history yet. The chart needs at least two saved updates.', flags: 64 });
+  }
   
-  // Defer the reply immediately (prevents timeout, allows longer processing)
-  await interaction.deferReply({ flags: 64 }); // ephemeral so the channel isn't spammed
+  await interaction.deferReply({ flags: 64 });
   
   try {
-    // Create button row
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId('chart_usd').setLabel('$ USD').setStyle(ButtonStyle.Primary),
       new ButtonBuilder().setCustomId('chart_eur').setLabel('€ EUR').setStyle(ButtonStyle.Primary),
       new ButtonBuilder().setCustomId('chart_gbp').setLabel('£ GBP').setStyle(ButtonStyle.Primary),
     );
     
-    console.log('[Exchange] Buttons created, sending follow-up');
-    
-    // Send the follow-up message with buttons (and eventually the chart)
+    // Initial chart (USD)
+    const initialChart = await chartAttachment(exchangeData, 'USD');
     await interaction.editReply({
       content: '📈 Select a currency to view its exchange rate trend:',
+      files: [initialChart],
       components: [row],
     });
     
-    console.log('[Exchange] Follow-up sent with buttons');
-    
-    // Get the message to set up collector
     const msg = await interaction.fetchReply();
     const filter = i => i.user.id === interaction.user.id && ['chart_usd','chart_eur','chart_gbp'].includes(i.customId);
     const collector = msg.createMessageComponentCollector({ filter, time: 60000 });
@@ -623,9 +620,6 @@ if (commandName === 'exchange-chart') {
       let currency = 'USD';
       if (i.customId === 'chart_eur') currency = 'EUR';
       if (i.customId === 'chart_gbp') currency = 'GBP';
-      console.log(`[Exchange] Button clicked: ${currency}`);
-      
-      // Generate the chart for the selected currency
       const newChart = await chartAttachment(exchangeData, currency);
       await i.update({ files: [newChart], components: [row] });
     });
@@ -633,10 +627,9 @@ if (commandName === 'exchange-chart') {
     collector.on('end', () => {
       interaction.editReply({ components: [] }).catch(() => {});
     });
-    
   } catch (err) {
-    console.error('[Exchange] Chart command error:', err);
-    await interaction.editReply({ content: '❌ Failed to generate chart. Check logs.', components: [] });
+    console.error('[Exchange] Chart error:', err);
+    await interaction.editReply({ content: '❌ Failed to generate chart. Please try again later.' });
   }
   return;
 }
