@@ -46,11 +46,7 @@ const exchangeCommands = [
   .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
   .setDMPermission(false),
 
-  new SlashCommandBuilder()
-    .setName('exchange-chart')
-    .setDescription('Show a line graph of recent USD/EUR/GBP exchange rates')
-    .setDMPermission(false),
-].map(c => c.toJSON());
+
 
 function getExchangeData(db, guildId) {
   if (!db[guildId]) db[guildId] = {};
@@ -464,19 +460,49 @@ async function postUpdate(client, guildId, exchangeData, latest, forced = false)
   const channel = await client.channels.fetch(exchangeData.channelId).catch(() => null);
   if (!channel || !channel.isTextBased()) return false;
 
-   const files = [];
-  let embed = buildRateEmbed(exchangeData, latest, forced);
-  
+  const embed = buildRateEmbed(exchangeData, latest, forced);
+  const files = [];
+  let row = null;
+
   if ((exchangeData.history || []).length >= 2) {
-    const chartFile = await chartAttachment(exchangeData);
+    // Generate initial chart for USD
+    const chartFile = await chartAttachment(exchangeData, 'USD');
     files.push(chartFile);
-    embed.setImage('attachment://libya-exchange-chart.png');
+    embed.setImage('attachment://libya-exchange-chart-USD.png');
+
+    // Create interactive buttons
+    row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('chart_usd').setLabel('$ USD').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('chart_eur').setLabel('€ EUR').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('chart_gbp').setLabel('£ GBP').setStyle(ButtonStyle.Primary),
+    );
   }
 
-  await channel.send({
+  const message = await channel.send({
     embeds: [embed],
     files,
+    components: row ? [row] : [],
   });
+
+  // Set up collector for button interactions on this message
+  if (row && message) {
+    const filter = i => ['chart_usd', 'chart_eur', 'chart_gbp'].includes(i.customId);
+    const collector = message.createMessageComponentCollector({ filter, time: 300000 }); // 5 minutes
+
+    collector.on('collect', async i => {
+      let currency = 'USD';
+      if (i.customId === 'chart_eur') currency = 'EUR';
+      if (i.customId === 'chart_gbp') currency = 'GBP';
+      const newChart = await chartAttachment(exchangeData, currency);
+      // Update only the chart image, keep embed and buttons
+      await i.update({ files: [newChart], components: [row] });
+    });
+
+    collector.on('end', () => {
+      message.edit({ components: [] }).catch(() => {});
+    });
+  }
+
   return true;
 }
 
