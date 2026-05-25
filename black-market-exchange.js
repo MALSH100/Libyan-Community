@@ -382,11 +382,13 @@ function buildChartSvg(history) {
     }
   }
   
-  // X-axis labels (every 2nd point)
+  // X-axis labels (show date only, on every point if space permits, otherwise every 2nd)
   const labels = rows.map((row, idx) => {
-    if (idx !== 0 && idx !== rows.length - 1 && idx % 2 !== 0) return '';
+    // Show every point if there are 10 or fewer, otherwise every 2nd to avoid clutter
+    const everyN = rows.length <= 10 ? 1 : 2;
+    if (idx !== 0 && idx !== rows.length - 1 && idx % everyN !== 0) return '';
     const date = new Date(row.scrapedAt || row.createdAt || Date.now());
-    const label = `${date.getDate()}/${date.getMonth() + 1}\n${String(date.getHours()).padStart(2, '0')}:00`;
+    const label = `${date.getDate()}/${date.getMonth() + 1}`;
     return `<text x="${xFor(idx).toFixed(1)}" y="${height - 55}" text-anchor="middle" font-size="10" fill="#b9bbbe">${svgEscape(label)}</text>`;
   }).join('\n');
   
@@ -478,12 +480,14 @@ async function updateRates({ client, db, saveData, guildId, forcePost = false })
 
   exchangeData.lastRates = latest;
   exchangeData.history = exchangeData.history || [];
-  exchangeData.history.push(latest);
-  exchangeData.history = exchangeData.history.slice(-MAX_HISTORY);
-
+  // Only push if the rates changed (or forced refresh)
+  if (forcePost || changed) {
+    exchangeData.history.push(latest);
+    exchangeData.history = exchangeData.history.slice(-MAX_HISTORY);
+  }
   let posted = false;
   if (forcePost || changed) {
-    posted = await postUpdate(client, guildId, exchangeData, latest, forcePost);
+    posted = await postUpdate(...);
     if (posted) exchangeData.lastPostedKey = key;
   }
 
