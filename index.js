@@ -46,7 +46,7 @@ async function safeDefer(interaction, opts = {}) {
   }
 }
 
-const { MongoClient } =('mongodb');
+const { MongoClient } = require('mongodb');
 
 // ─── Persistent Storage (MongoDB) ────────────────────────────────────────────
 // Uses MongoDB Atlas free tier — survives Railway restarts and redeploys.
@@ -467,7 +467,7 @@ const commands = [
 
 let _allCommands = null; // reset on each startup — always re-registers
 
-const getPokemonCommands =('./pokemon-commands');
+const getPokemonCommands = require('./pokemon-commands');
 const initYarayt = require('./yarayt');
 const initBlackMarketExchange = require('./black-market-exchange');
 const initLibyaNews = require('./libya-news');
