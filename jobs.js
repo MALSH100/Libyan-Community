@@ -43,36 +43,57 @@ async function fetchOpenSooqJobs() {
             args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
         });
         const page = await browser.newPage();
-        // Use domcontentloaded instead of networkidle – much faster and less strict
         await page.goto('https://ly.opensooq.com/en/jobs/job-vacancies?search=true&sort_code=recent', {
             waitUntil: 'domcontentloaded',
             timeout: 30000
         });
         
-        // Wait for at least one link that points to a job detail page
+        // Wait for job links to be present
         await page.waitForSelector('a[href*="/job-vacancies/"]', { timeout: 15000, state: 'attached' });
         
         const jobs = await page.evaluate(() => {
-            // Get all unique job links (avoid duplicates)
             const links = Array.from(document.querySelectorAll('a[href*="/job-vacancies/"]'));
             const unique = new Map();
             for (const link of links) {
                 const href = link.href;
                 if (!unique.has(href)) unique.set(href, link);
             }
-            return Array.from(unique.values()).slice(0, 5).map(link => {
+            const jobList = [];
+            for (const link of unique.values()) {
                 const title = link.innerText.trim();
                 const url = link.href;
-                // Try to get company/location from parent elements
+                // Try to find date – look for a nearby element containing time
+                let date = null;
+                let parent = link.closest('div, li, article');
+                if (parent) {
+                    const timeElement = parent.querySelector('time, [datetime], .date, .time, .posted-date');
+                    if (timeElement) {
+                        const dateStr = timeElement.innerText.trim() || timeElement.getAttribute('datetime');
+                        if (dateStr) date = new Date(dateStr);
+                    }
+                    if (!date) {
+                        // fallback: look for text like "Today", "Yesterday", "2 days ago"
+                        const text = parent.innerText;
+                        const match = text.match(/(\d+)\s+(minute|hour|day|week)s?\s+ago/i);
+                        if (match) {
+                            const value = parseInt(match[1]);
+                            const unit = match[2].toLowerCase();
+                            const now = new Date();
+                            if (unit === 'minute') date = new Date(now - value * 60000);
+                            else if (unit === 'hour') date = new Date(now - value * 3600000);
+                            else if (unit === 'day') date = new Date(now - value * 86400000);
+                            else if (unit === 'week') date = new Date(now - value * 604800000);
+                        }
+                    }
+                }
+                // Company and location extraction
                 let company = 'Not specified';
                 let location = 'Libya';
-                const parent = link.closest('div, li, article');
                 if (parent) {
-                    const text = parent.innerText;
-                    const lines = text.split('\n');
+                    const lines = parent.innerText.split('\n');
                     for (const line of lines) {
                         const lower = line.toLowerCase();
-                        if ((lower.includes('company') || lower.includes('by ')) && line.length > 4) {
+                        if (lower.includes('company') || lower.includes('by ')) {
                             company = line.replace(/company|by/gi, '').trim();
                         }
                         if (lower.includes('tripoli') || lower.includes('benghazi') || lower.includes('misrata')) {
@@ -80,21 +101,30 @@ async function fetchOpenSooqJobs() {
                         }
                     }
                 }
-                return { title, url, company, location };
-            }).filter(job => job.title && job.url);
+                jobList.push({ title, url, company, location, date });
+            }
+            return jobList.filter(job => job.title && job.url);
         });
         
-        console.log(`[Jobs] OpenSooq found ${jobs.length} jobs`);
+        // Sort by date (newest first) – if no date, put at end
+        jobs.sort((a, b) => {
+            if (!a.date && !b.date) return 0;
+            if (!a.date) return 1;
+            if (!b.date) return -1;
+            return b.date - a.date;
+        });
+        
+        console.log(`[Jobs] OpenSooq found ${jobs.length} jobs, newest date: ${jobs[0]?.date || 'unknown'}`);
         await browser.close();
         
-        return jobs.map(job => ({
+        return jobs.slice(0, 5).map(job => ({
             id: `opensooq_${job.url.split('/').pop() || Date.now()}`,
             title: job.title,
             company: job.company,
             location: job.location,
             description: 'Click the link to view the full job description.',
             url: job.url,
-            postedAt: new Date(),
+            postedAt: job.date || new Date(),
             source: 'opensooq'
         }));
     } catch (err) {
