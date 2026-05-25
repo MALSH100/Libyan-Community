@@ -48,30 +48,33 @@ async function fetchOpenSooqJobs() {
             timeout: 30000
         });
         
-        // Wait for the first job link to appear
+        // Wait for any job link
         await page.waitForSelector('a[href*="/job-vacancies/"]', { timeout: 15000, state: 'attached' });
         
-        // Get the first job link on the page (the newest one)
-        const firstJob = await page.evaluate(() => {
-            const link = document.querySelector('a[href*="/job-vacancies/"]');
-            if (!link) return null;
-            const title = link.innerText.trim();
-            const url = link.href;
-            return { title, url };
+        // Get the first 5 job links and their texts
+        const links = await page.evaluate(() => {
+            const allLinks = Array.from(document.querySelectorAll('a[href*="/job-vacancies/"]'));
+            return allLinks.slice(0, 5).map(link => ({
+                href: link.href,
+                text: link.innerText.trim()
+            }));
         });
+        
+        console.log('[Jobs] OpenSooq first 5 job links:');
+        links.forEach((link, i) => console.log(`  ${i+1}. ${link.text} -> ${link.href}`));
         
         await browser.close();
         
-        if (!firstJob) return [];
-        
-        // Return the single most recent job
+        // Return the first one as the latest
+        if (links.length === 0) return [];
+        const first = links[0];
         return [{
-            id: `opensooq_${firstJob.url.split('/').pop() || Date.now()}`,
-            title: firstJob.title,
+            id: `opensooq_${first.href.split('/').pop() || Date.now()}`,
+            title: first.text,
             company: 'Not specified',
             location: 'Libya',
             description: 'Click the link to view the full job details.',
-            url: firstJob.url,
+            url: first.href,
             postedAt: new Date(),
             source: 'opensooq'
         }];
