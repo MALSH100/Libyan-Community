@@ -21,50 +21,41 @@ async function fetchHiringCafeJobs() {
 // ----------------------------------------------------------------------
 // Source 2: careerjet (official API)
 // ----------------------------------------------------------------------
+// --- Job Fetcher: Careerjet (using RSS feed) ---
 async function fetchCareerjetJobs() {
-    const API_KEY = process.env.CAREERJET_API_KEY || '1b7358b4274242b009f62e09dd750c73';
-    if (!API_KEY) {
-        console.warn('[Jobs] CAREERJET_API_KEY not set');
-        return [];
-    }
     try {
-        const referer = 'https://your-railway-app.up.railway.app'; // Use your actual Railway URL
-        
-        const params = new URLSearchParams({
-            locale_code: 'en_GB',           // English, Great Britain (Libya is not a specific country in Careerjet's list)
-            keywords: 'Libya',               // ← This is the fix for Libya
-            sort: 'date',
-            pagesize: 10,                   // Fetch 10 jobs to ensure we have the latest
-            user_ip: await getPublicIP(),    // ← Call the async function below
-            user_agent: 'Mozilla/5.0 (compatible; DiscordBot/1.0)'
-        });
-        
-        const url = `https://search.api.careerjet.net/v4/query?${params}`;
-        const auth = Buffer.from(`${API_KEY}:`).toString('base64');
-        const res = await axios.get(url, {
-            headers: { 
-                'Authorization': `Basic ${auth}`,
-                'Referer': referer
-            },
+        // Construct the RSS feed URL for Libya
+        const rssUrl = `https://www.careerjet.com/jobs.rss?location=Libya&s=20`;
+        const { data: xmlData } = await axios.get(rssUrl, {
+            headers: { 'User-Agent': 'Mozilla/5.0 (compatible; DiscordBot/1.0)' },
             timeout: 15000
         });
-        
-        const jobs = res.data.jobs || [];
-        return jobs.map(job => ({
-            id: `careerjet_${job.url || job.title}`,
-            title: job.title,
-            company: job.company || 'Not specified',
-            location: (typeof job.locations === 'string' ? job.locations : 'Libya'),
-            description: (job.description || '').slice(0, 200),
-            url: job.url,
-            postedAt: job.date ? new Date(job.date) : new Date(),
-            source: 'careerjet'
-        }));
+
+        // Parse the XML data
+        const $ = cheerio.load(xmlData, { xmlMode: true });
+
+        const jobs = [];
+        $('item').each((i, elem) => {
+            if (i >= 5) return false; // Limit to 5 jobs
+            const title = $(elem).find('title').text();
+            const link = $(elem).find('link').text();
+            const description = $(elem).find('description').text().slice(0, 200);
+            const pubDate = $(elem).find('pubDate').text();
+
+            jobs.push({
+                id: `careerjet_${link}`,
+                title: title,
+                company: 'Not specified', // RSS feed doesn't provide company directly
+                location: 'Libya',
+                description: description || 'Click the link for more details.',
+                url: link,
+                postedAt: new Date(pubDate),
+                source: 'careerjet'
+            });
+        });
+        return jobs;
     } catch (err) {
-        console.error('[Jobs] careerjet error:', err.message);
-        if (err.response) {
-            console.error('[Jobs] careerjet response:', err.response.status, err.response.data);
-        }
+        console.error('[Jobs] careerjet RSS error:', err.message);
         return [];
     }
 }
