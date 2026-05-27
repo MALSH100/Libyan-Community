@@ -1,63 +1,66 @@
 // translator.js
 const { translate } = require('@vitalets/google-translate-api');
+const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 
-// Cooldown map to avoid reacting to the same message multiple times
 const processedMessages = new Set();
 
-// Detect if text contains Arabic characters
 function containsArabic(text) {
     const arabicRegex = /[\u0600-\u06FF]/;
     return arabicRegex.test(text);
 }
 
 module.exports = function initTranslator(client) {
+    // Step 1: Detect Arabic messages and attach a Translate button
     client.on('messageCreate', async (message) => {
         if (message.author.bot) return;
         if (!message.content) return;
         if (processedMessages.has(message.id)) return;
-
         if (!containsArabic(message.content)) return;
 
-        // Mark as processed to avoid duplicate reactions
         processedMessages.add(message.id);
-        setTimeout(() => processedMessages.delete(message.id), 60000); // 1 minute
+        setTimeout(() => processedMessages.delete(message.id), 60000); // 1 minute cooldown
 
-        const emoji = '🔁'; // repeat emoji
+        const button = new ButtonBuilder()
+            .setCustomId(`translate_${message.id}`)
+            .setLabel('Translate 🔁')
+            .setStyle(ButtonStyle.Secondary);
+
+        const row = new ActionRowBuilder().addComponents(button);
+
+        // Reply to the message with a button
+        await message.reply({
+            content: '> 🌐 This message is in Arabic. Click the button to translate.',
+            components: [row],
+        });
+    });
+
+    // Step 2: Handle button click – ephemeral translation
+    client.on('interactionCreate', async (interaction) => {
+        if (!interaction.isButton()) return;
+        if (!interaction.customId.startsWith('translate_')) return;
+
+        // Defer the reply ephemerally (only the clicker will see the result)
+        await interaction.deferReply({ ephemeral: true });
+
+        const messageId = interaction.customId.replace('translate_', '');
 
         try {
-            await message.react(emoji);
+            // Fetch the original message from the channel
+            const targetMessage = await interaction.channel.messages.fetch(messageId);
+            const originalText = targetMessage.content;
+
+            // Translate from Arabic to English
+            const { text: translated } = await translate(originalText, { to: 'en' });
+
+            // Send the ephemeral translation
+            await interaction.editReply({
+                content: `**🔹 Original (Arabic):**\n${originalText}\n\n**🔸 Translation (English):**\n${translated}`,
+            });
         } catch (err) {
-            console.error('Translator: Could not add reaction', err.message);
-            return;
+            console.error('Translator error:', err.message);
+            await interaction.editReply({
+                content: '❌ Could not translate this message. The language might not be supported or the service is unavailable.',
+            });
         }
-
-        // Collector: only when someone clicks this specific reaction (not the bot)
-        const filter = (reaction, user) => reaction.emoji.name === emoji && !user.bot;
-        const collector = message.createReactionCollector({ filter, max: 1, time: 60000 });
-
-        collector.on('collect', async (reaction, user) => {
-            try {
-                // Remove the reaction immediately so it's clean for next time
-                await reaction.users.remove(user.id).catch(() => {});
-
-                const originalText = message.content;
-                if (!originalText) {
-                    await user.send('❌ No text to translate.').catch(() => {});
-                    return;
-                }
-
-                const { text: translated } = await translate(originalText, { to: 'en' });
-
-                // Ephemeral reply (only visible to the user who clicked)
-                await message.reply({
-                    content: `**🔹 Original (Arabic):**\n${originalText}\n\n**🔸 Translation (English):**\n${translated}`,
-                    flags: 64,
-                });
-            } catch (err) {
-                console.error('Translator error:', err.message);
-                await user.send('❌ Could not translate this message. The language might not be supported or the service is unavailable.')
-                    .catch(() => {});
-            }
-        });
     });
 };
