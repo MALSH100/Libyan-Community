@@ -472,7 +472,7 @@ const initYarayt = require('./yarayt');
 const initBlackMarketExchange = require('./black-market-exchange');
 const initLibyaNews = require('./libya-news');
 const initJobs = require('./jobs');
-const initTranslator = require('./translator'); 
+const initTranslator = require('./translator');
 
 function getAllCommands() {
   if (_allCommands) return _allCommands;
@@ -480,7 +480,8 @@ function getAllCommands() {
   let yaraytCommands = [];
   let exchangeCommands = [];
   let newsCommands = [];
-  let jobsCommands = [];   // ← ADD THIS LINE
+  let jobsCommands = [];
+  let translatorCommands = [];   // ADD
   try {
     pokeCommands = getPokemonCommands();
   } catch (e) {
@@ -502,11 +503,16 @@ function getAllCommands() {
     console.error('Could not load libya-news.js commands:', e.message);
   }
   try {
-    jobsCommands = initJobs.commands || [];   // ← ADD THIS TRY BLOCK
+    jobsCommands = initJobs.commands || [];
   } catch (e) {
     console.error('Could not load jobs.js commands:', e.message);
   }
-  _allCommands = [...commands, ...pokeCommands, ...yaraytCommands, ...exchangeCommands, ...newsCommands, ...jobsCommands];   // ← ADD ...jobsCommands
+  try {
+    translatorCommands = initTranslator.commands || [];   // ADD
+  } catch (e) {
+    console.error('Could not load translator.js commands:', e.message);
+  }
+  _allCommands = [...commands, ...pokeCommands, ...yaraytCommands, ...exchangeCommands, ...newsCommands, ...jobsCommands, ...translatorCommands];   // ADD ...translatorCommands  // ← ADD ...jobsCommands
   console.log(`📋 Command list built: ${_allCommands.map(c => c.name).join(', ')}`);
   return _allCommands;
 }
@@ -1981,7 +1987,7 @@ initLibyaNews({ client, db, saveData });
 initJobs({ client, db, saveData });
 
 // Translator (reaction-based Arabic → English)
-initTranslator(client);
+initTranslator(client, db, saveData);
 
 // ─── Login ────────────────────────────────────────────────────────────────────
 
