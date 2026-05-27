@@ -219,123 +219,230 @@ function buildChartSvg(history, mainCurrency = 'USD') {
         dailyMap.set(dateKey, entry);
       }
     });
-  
+
   let rows = Array.from(dailyMap.values())
     .sort((a, b) => new Date(a.scrapedAt) - new Date(b.scrapedAt))
     .slice(-30); // last 30 days
-  
-  if (rows.length === 0) return `<svg width="900" height="480"></svg>`;
 
-  // Build candlesticks
+  if (rows.length === 0) return `<svg width="960" height="520"></svg>`;
+
+  // -----------------------------------------------------------------
+  // Build candles
+  // Each day: open = previous day's close, close = today's rate.
+  // COLOR CONVENTION (standard financial chart):
+  //   Green (bullish)  = close > open  → LYD rate rose  (foreign currency costs more)
+  //   Red   (bearish)  = close < open  → LYD rate fell  (foreign currency costs less / dinar strengthened)
+  // The subtitle clarifies this for the reader.
+  // -----------------------------------------------------------------
   const candles = [];
   for (let i = 0; i < rows.length; i++) {
     const close = rows[i].rates[mainCurrency];
-    const open = i === 0 ? close : rows[i-1].rates[mainCurrency];
-    const high = Math.max(open, close);
-    const low = Math.min(open, close);
-    const date = new Date(rows[i].scrapedAt);
-    const color = close < open ? '#4caf50' : (close > open ? '#ef5350' : '#888888'); // brighter green
-    candles.push({ date, open, high, low, close, color });
+    const open  = i === 0 ? close : rows[i - 1].rates[mainCurrency];
+    const high  = Math.max(open, close);
+    const low   = Math.min(open, close);
+    const date  = new Date(rows[i].scrapedAt);
+    // Standard: green when price closes higher (rate went up), red when lower
+    const bullish = close >= open;
+    const color      = bullish ? '#26a69a' : '#ef5350'; // teal-green / red
+    const colorLight = bullish ? '#4db6ac' : '#ff7043';
+    candles.push({ date, open, high, low, close, color, colorLight, bullish });
   }
 
-  // Y‑axis range with minimal padding
-  let allHighs = candles.map(c => c.high);
-  let allLows = candles.map(c => c.low);
-  let min = Math.min(...allLows);
-  let max = Math.max(...allHighs);
-  const padRange = (max - min) * 0.005;
-  min = min - padRange;
-  max = max + padRange;
-  if (min < 0) min = 0;
+  // Y-axis range with comfortable padding
+  const allVals = candles.flatMap(c => [c.high, c.low]);
+  let minVal = Math.min(...allVals);
+  let maxVal = Math.max(...allVals);
+  const range = maxVal - minVal || 0.01;
+  const pad0  = range * 0.12;
+  minVal -= pad0;
+  maxVal += pad0;
+  if (minVal < 0) minVal = 0;
 
-  const tickCount = 5;
-  const step = (max - min) / (tickCount - 1);
+  // Nice Y ticks
+  const tickCount = 6;
+  const rawStep = (maxVal - minVal) / (tickCount - 1);
+  const magnitude = Math.pow(10, Math.floor(Math.log10(rawStep)));
+  const niceStep  = Math.ceil(rawStep / magnitude) * magnitude;
+  const niceMin   = Math.floor(minVal / niceStep) * niceStep;
   const tickValues = [];
-  for (let i = 0; i < tickCount; i++) tickValues.push(min + i * step);
+  for (let i = 0; i <= tickCount; i++) {
+    const v = niceMin + i * niceStep;
+    if (v >= minVal - 1e-9 && v <= maxVal + 1e-9) tickValues.push(v);
+  }
 
-  const width = 900;
-  const height = 480;
-  const pad = { left: 70, right: 40, top: 50, bottom: 60 };
-  const plotW = width - pad.left - pad.right;
-  const plotH = height - pad.top - pad.bottom;
+  // Layout
+  const width  = 960;
+  const height = 520;
+  const pad    = { left: 80, right: 30, top: 80, bottom: 70 };
+  const plotW  = width  - pad.left - pad.right;
+  const plotH  = height - pad.top  - pad.bottom;
 
-  const yFor = (value) => pad.top + (1 - ((value - min) / (max - min))) * plotH;
-  const xFor = (idx) => pad.left + (idx / (candles.length - 1)) * plotW;
-  const candleWidth = Math.max(3, Math.min(8, plotW / candles.length * 0.6));
-  const halfWidth = candleWidth / 2;
+  const yFor = (v) => pad.top + (1 - (v - minVal) / (maxVal - minVal)) * plotH;
+  const xFor = (i) => {
+    if (candles.length === 1) return pad.left + plotW / 2;
+    return pad.left + (i / (candles.length - 1)) * plotW;
+  };
 
-  // Grid
-  const grid = [];
+  const candleBodyW = Math.max(4, Math.min(18, (plotW / candles.length) * 0.55));
+  const halfW       = candleBodyW / 2;
+
+  // ── Background panels (alternating subtle bands) ────────────────
+  const bands = [];
+  for (let i = 0; i < candles.length; i++) {
+    if (i % 2 === 0) continue;
+    const x0 = i === 0 ? pad.left : (xFor(i - 1) + xFor(i)) / 2;
+    const x1 = i === candles.length - 1 ? pad.left + plotW : (xFor(i) + xFor(i + 1)) / 2;
+    bands.push(`<rect x="${x0.toFixed(1)}" y="${pad.top}" width="${(x1 - x0).toFixed(1)}" height="${plotH}" fill="rgba(255,255,255,0.018)"/>`);
+  }
+
+  // ── Grid lines ───────────────────────────────────────────────────
+  const gridLines = [];
   for (const val of tickValues) {
     const y = yFor(val);
-    if (y < pad.top - 5 || y > pad.top + plotH + 5) continue;
-    grid.push(`<line x1="${pad.left}" y1="${y}" x2="${width - pad.right}" y2="${y}" stroke="#4e5058" stroke-width="1"/>`);
-    grid.push(`<text x="${pad.left - 10}" y="${y + 4}" text-anchor="end" font-size="12" fill="#b9bbbe">${val.toFixed(4)}</text>`);
+    gridLines.push(
+      `<line x1="${pad.left}" y1="${y.toFixed(1)}" x2="${pad.left + plotW}" y2="${y.toFixed(1)}" stroke="#3a3d45" stroke-width="1" stroke-dasharray="4,3"/>`,
+      `<text x="${pad.left - 12}" y="${(y + 4).toFixed(1)}" text-anchor="end" font-family="'Segoe UI',Arial,sans-serif" font-size="12" fill="#72767d">${val.toFixed(3)}</text>`
+    );
   }
 
-  // Candlesticks
+  // ── Candlestick bodies & wicks ───────────────────────────────────
   const candlesSvg = [];
   for (let i = 0; i < candles.length; i++) {
-    const c = candles[i];
-    const x = xFor(i);
-    const highY = yFor(c.high);
-    const lowY = yFor(c.low);
-    const openY = yFor(c.open);
+    const c      = candles[i];
+    const x      = xFor(i);
+    const highY  = yFor(c.high);
+    const lowY   = yFor(c.low);
+    const openY  = yFor(c.open);
     const closeY = yFor(c.close);
-    const bodyTop = Math.min(openY, closeY);
+    const bodyTop    = Math.min(openY, closeY);
     const bodyBottom = Math.max(openY, closeY);
-    const bodyHeight = Math.max(1, bodyBottom - bodyTop);
+    const bodyH      = Math.max(2, bodyBottom - bodyTop);
+
+    // Wick
     if (c.high !== c.low) {
-      candlesSvg.push(`<line x1="${x}" y1="${highY}" x2="${x}" y2="${lowY}" stroke="${c.color}" stroke-width="1"/>`);
+      candlesSvg.push(`<line x1="${x.toFixed(1)}" y1="${highY.toFixed(1)}" x2="${x.toFixed(1)}" y2="${lowY.toFixed(1)}" stroke="${c.color}" stroke-width="1.5" stroke-linecap="round"/>`);
     }
-    candlesSvg.push(`<rect x="${x - halfWidth}" y="${bodyTop}" width="${candleWidth}" height="${bodyHeight}" fill="${c.color}" stroke="${c.color}" stroke-width="0.5"/>`);
+
+    // Body with gradient fill for depth
+    const gradId = `cg${i}`;
+    candlesSvg.push(
+      `<defs><linearGradient id="${gradId}" x1="0" y1="0" x2="1" y2="0">` +
+        `<stop offset="0%" stop-color="${c.colorLight}"/>` +
+        `<stop offset="100%" stop-color="${c.color}"/>` +
+      `</linearGradient></defs>`,
+      `<rect x="${(x - halfW).toFixed(1)}" y="${bodyTop.toFixed(1)}" width="${candleBodyW.toFixed(1)}" height="${bodyH.toFixed(1)}" rx="2" ry="2" fill="url(#${gradId})" stroke="${c.color}" stroke-width="0.8"/>`
+    );
   }
 
-  // Latest price callout
-  const last = candles[candles.length-1];
-  const lastX = xFor(candles.length-1);
-  const lastY = yFor(last.close);
-  const guideLine = `<line x1="${pad.left}" y1="${lastY.toFixed(1)}" x2="${width - pad.right - 10}" y2="${lastY.toFixed(1)}" stroke="#888888" stroke-width="1" stroke-dasharray="4,4"/>`;
+  // ── Trend line (simple moving average of close prices) ───────────
+  const maLine = [];
+  const maWindow = Math.min(7, candles.length);
+  for (let i = maWindow - 1; i < candles.length; i++) {
+    const avg = candles.slice(i - maWindow + 1, i + 1).reduce((s, c) => s + c.close, 0) / maWindow;
+    const px  = xFor(i);
+    const py  = yFor(avg);
+    maLine.push(i === maWindow - 1 ? `M${px.toFixed(1)},${py.toFixed(1)}` : `L${px.toFixed(1)},${py.toFixed(1)}`);
+  }
+  const trendPath = maLine.length > 1
+    ? `<path d="${maLine.join(' ')}" fill="none" stroke="#f0c040" stroke-width="1.5" stroke-dasharray="5,3" opacity="0.7"/>`
+    : '';
 
-  const offsetX = 35, yOffset = -28;
-  let labelX = lastX + offsetX, labelY = lastY + yOffset;
-  labelX = Math.min(Math.max(labelX, pad.left + 20), width - pad.right - 65);
-  labelY = Math.min(Math.max(labelY, pad.top + 15), height - pad.bottom - 20);
-  const boxW = 65, boxH = 22;
-  const boxX = labelX > lastX ? labelX : labelX - boxW;
-  const boxCenterX = boxX + boxW/2;
-  const boxCenterY = labelY;
-  const currencySymbols = { USD: '$', EUR: '€', GBP: '£' };
-  const symbol = currencySymbols[mainCurrency] || '';
-  const callouts = [
-    guideLine,
-    `<line x1="${lastX.toFixed(1)}" y1="${lastY.toFixed(1)}" x2="${lastX.toFixed(1)}" y2="${boxCenterY.toFixed(1)}" stroke="#888888" stroke-width="1" stroke-dasharray="2,2"/>`,
-    `<line x1="${lastX.toFixed(1)}" y1="${boxCenterY.toFixed(1)}" x2="${boxCenterX.toFixed(1)}" y2="${boxCenterY.toFixed(1)}" stroke="#888888" stroke-width="1" stroke-dasharray="2,2"/>`,
-    `<rect x="${boxX}" y="${labelY - 10}" width="${boxW}" height="${boxH}" rx="4" fill="#2f3136" stroke="#888888" stroke-width="1"/>`,
-    `<text x="${boxCenterX}" y="${labelY + 4}" text-anchor="middle" fill="#ffffff" font-size="11" font-weight="bold">${symbol}${last.close.toFixed(4)}</text>`
+  // ── Latest price tag on right axis ──────────────────────────────
+  const last   = candles[candles.length - 1];
+  const lastY  = yFor(last.close);
+  const tagColor = last.bullish ? '#26a69a' : '#ef5350';
+  const priceTagW = 68;
+  const priceTag = [
+    `<line x1="${pad.left}" y1="${lastY.toFixed(1)}" x2="${pad.left + plotW}" y2="${lastY.toFixed(1)}" stroke="${tagColor}" stroke-width="1" stroke-dasharray="4,3" opacity="0.6"/>`,
+    `<rect x="${pad.left + plotW - 2}" y="${(lastY - 11).toFixed(1)}" width="${priceTagW}" height="22" rx="4" fill="${tagColor}"/>`,
+    `<text x="${(pad.left + plotW + priceTagW / 2 - 2).toFixed(1)}" y="${(lastY + 5).toFixed(1)}" text-anchor="middle" font-family="'Segoe UI',Arial,sans-serif" font-size="12" font-weight="700" fill="#ffffff">${last.close.toFixed(3)}</text>`
   ];
 
-  // X‑axis labels: one per unique date, placed at the candle's x
+  // ── X-axis date labels (show ~8 evenly spaced) ───────────────────
   const xLabels = [];
+  const maxLabels = Math.min(8, candles.length);
+  const step = Math.max(1, Math.round(candles.length / maxLabels));
   for (let i = 0; i < candles.length; i++) {
-    const date = candles[i].date;
-    const dateKey = `${date.getDate()}/${date.getMonth() + 1}`;
-    const x = xFor(i);
-    // Show every label (if too crowded, you can adjust, but with 30 days it's fine)
-    xLabels.push(`<text x="${x.toFixed(1)}" y="${height - 25}" text-anchor="middle" font-size="10" fill="#b9bbbe">${svgEscape(dateKey)}</text>`);
+    if (i % step !== 0 && i !== candles.length - 1) continue;
+    const d       = candles[i].date;
+    const dateStr = `${d.getDate()} ${['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getMonth()]}`;
+    xLabels.push(
+      `<text x="${xFor(i).toFixed(1)}" y="${height - pad.bottom + 22}" text-anchor="middle" font-family="'Segoe UI',Arial,sans-serif" font-size="11" fill="#72767d">${svgEscape(dateStr)}</text>`,
+      `<line x1="${xFor(i).toFixed(1)}" y1="${pad.top + plotH}" x2="${xFor(i).toFixed(1)}" y2="${pad.top + plotH + 5}" stroke="#3a3d45" stroke-width="1"/>`
+    );
   }
-  const labels = xLabels.join('\n');
+
+  // ── Header ───────────────────────────────────────────────────────
+  const currencyNames  = { USD: 'US Dollar', EUR: 'Euro', GBP: 'British Pound' };
+  const currencySymbol = { USD: '$', EUR: '€', GBP: '£' };
+  const sym    = currencySymbol[mainCurrency] || '';
+  const cName  = currencyNames[mainCurrency]  || mainCurrency;
+  const delta  = candles.length > 1 ? last.close - candles[0].close : 0;
+  const deltaTxt = (delta >= 0 ? '+' : '') + delta.toFixed(3);
+  const deltaColor = delta >= 0 ? '#26a69a' : '#ef5350';
+
+  // ── Legend ───────────────────────────────────────────────────────
+  const legendY = pad.top - 28;
+  const legend = [
+    `<rect x="${pad.left + plotW - 200}" y="${legendY - 9}" width="12" height="12" rx="2" fill="#26a69a"/>`,
+    `<text x="${pad.left + plotW - 185}" y="${legendY}" font-family="'Segoe UI',Arial,sans-serif" font-size="11" fill="#72767d">Rate Up (Dinar Weaker)</text>`,
+    `<rect x="${pad.left + plotW - 60}" y="${legendY - 9}" width="12" height="12" rx="2" fill="#ef5350"/>`,
+    `<text x="${pad.left + plotW - 45}" y="${legendY}" font-family="'Segoe UI',Arial,sans-serif" font-size="11" fill="#72767d">Rate Down</text>`,
+  ].join('\n');
+
+  const maLegendY = legendY + 16;
+  const maLegend = maLine.length > 1
+    ? `<line x1="${pad.left + plotW - 200}" y1="${maLegendY - 4}" x2="${pad.left + plotW - 185}" y2="${maLegendY - 4}" stroke="#f0c040" stroke-width="1.5" stroke-dasharray="5,3" opacity="0.7"/>
+       <text x="${pad.left + plotW - 183}" y="${maLegendY}" font-family="'Segoe UI',Arial,sans-serif" font-size="11" fill="#72767d">${maWindow}-day MA</text>`
+    : '';
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
-  <rect width="100%" height="100%" fill="#36393f"/>
-  <text x="${pad.left}" y="24" font-size="16" font-weight="700" fill="#ffffff">Libyan Dinar Strength – ${mainCurrency}/LYD (Green = Dinar Strengthens, Red = Weakens)</text>
-  ${grid.join('\n')}
+  <defs>
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%"   stop-color="#1e2124"/>
+      <stop offset="100%" stop-color="#292b2f"/>
+    </linearGradient>
+    <clipPath id="plotClip">
+      <rect x="${pad.left}" y="${pad.top}" width="${plotW}" height="${plotH}"/>
+    </clipPath>
+  </defs>
+
+  <!-- Background -->
+  <rect width="${width}" height="${height}" fill="url(#bgGrad)" rx="12"/>
+  <rect x="${pad.left}" y="${pad.top}" width="${plotW}" height="${plotH}" fill="#1a1c1f" rx="4"/>
+
+  <!-- Alternating bands -->
+  ${bands.join('\n')}
+
+  <!-- Grid -->
+  ${gridLines.join('\n')}
+
+  <!-- Axis lines -->
   <line x1="${pad.left}" y1="${pad.top}" x2="${pad.left}" y2="${pad.top + plotH}" stroke="#4e5058" stroke-width="1.5"/>
-  <line x1="${pad.left}" y1="${pad.top + plotH}" x2="${width - pad.right}" y2="${pad.top + plotH}" stroke="#4e5058" stroke-width="1.5"/>
-  ${candlesSvg.join('\n')}
-  ${callouts.join('\n')}
-  ${labels}
+  <line x1="${pad.left}" y1="${pad.top + plotH}" x2="${pad.left + plotW}" y2="${pad.top + plotH}" stroke="#4e5058" stroke-width="1.5"/>
+
+  <!-- Chart content (clipped) -->
+  <g clip-path="url(#plotClip)">
+    ${candlesSvg.join('\n')}
+    ${trendPath}
+  </g>
+
+  <!-- Latest price tag (outside clip so it shows on right edge) -->
+  ${priceTag.join('\n')}
+
+  <!-- X labels -->
+  ${xLabels.join('\n')}
+
+  <!-- Header -->
+  <text x="${pad.left}" y="30" font-family="'Segoe UI',Arial,sans-serif" font-size="18" font-weight="700" fill="#ffffff">${cName} / LYD</text>
+  <text x="${pad.left}" y="52" font-family="'Segoe UI',Arial,sans-serif" font-size="13" fill="#72767d">Libyan Black Market Rate · Last 30 Days</text>
+  <text x="${pad.left + 160}" y="30" font-family="'Segoe UI',Arial,sans-serif" font-size="22" font-weight="700" fill="#ffffff">${sym}${last.close.toFixed(3)} LYD</text>
+  <text x="${pad.left + 280}" y="30" font-family="'Segoe UI',Arial,sans-serif" font-size="14" font-weight="600" fill="${deltaColor}">${deltaTxt}</text>
+
+  <!-- Legend -->
+  ${legend}
+  ${maLegend}
 </svg>`;
 }
 
