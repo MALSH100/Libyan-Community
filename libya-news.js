@@ -11,7 +11,6 @@ const MAX_HISTORY = 50;
 // === Core: fetch the latest message from the Telegram channel using public preview ===
 async function getLatestLibyaNews() {
     try {
-        // Public preview URL for any Telegram channel
         const url = `https://t.me/s/${TELEGRAM_CHANNEL}`;
         const { data: html } = await axios.get(url, {
             headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
@@ -19,22 +18,47 @@ async function getLatestLibyaNews() {
         });
         const $ = cheerio.load(html);
         
-        // Find the first message widget
-        const firstMessage = $('.tgme_widget_message').first();
-        if (!firstMessage.length) {
+        // Find all message widgets
+        const messages = $('.tgme_widget_message');
+        if (!messages.length) {
             console.log('[News] No messages found on the page');
             return null;
         }
 
-        // Extract message ID from data-post attribute
-        const dataPost = firstMessage.attr('data-post');
+        // Find the newest non-pinned message by comparing datetime
+        let newestMsg = null;
+        let newestDate = null;
+        messages.each((i, elem) => {
+            const $msg = $(elem);
+            // Skip pinned messages
+            if ($msg.hasClass('tgme_widget_message_pinned')) return;
+            
+            const timeElem = $msg.find('.tgme_widget_message_date time');
+            const dateTime = timeElem.attr('datetime');
+            if (dateTime) {
+                const msgDate = new Date(dateTime);
+                if (!newestDate || msgDate > newestDate) {
+                    newestDate = msgDate;
+                    newestMsg = $msg;
+                }
+            } else if (!newestMsg) {
+                // fallback to first non-pinned if no date
+                newestMsg = $msg;
+            }
+        });
+
+        // If still no message, fallback to the first message (may be pinned)
+        if (!newestMsg) {
+            newestMsg = messages.first();
+        }
+
+        const dataPost = newestMsg.attr('data-post');
         const messageId = dataPost ? dataPost.split('/').pop() : '';
 
         // Extract text
-        const textElem = firstMessage.find('.tgme_widget_message_text');
+        const textElem = newestMsg.find('.tgme_widget_message_text');
         let text = textElem.text().trim();
         if (!text) {
-            // Maybe it's a media-only post
             text = '📷 Media post';
         }
         const lines = text.split('\n').filter(l => l.trim());
@@ -42,22 +66,15 @@ async function getLatestLibyaNews() {
         let description = lines.slice(1).join(' ').slice(0, 250);
         if (!description) description = 'Click the link to read the full post on Telegram.';
 
-        // Extract image URL if present
+        // Extract image URL
         let imageUrl = null;
-        const photoElem = firstMessage.find('.tgme_widget_message_photo img');
+        const photoElem = newestMsg.find('.tgme_widget_message_photo img');
         if (photoElem.length) {
             imageUrl = photoElem.attr('src');
-        } else {
-            // Also check for video thumbnails etc.
-            const thumbElem = firstMessage.find('.tgme_widget_message_video thumb');
-            if (thumbElem.length) imageUrl = thumbElem.attr('src');
         }
 
-        // Construct the direct message link
         const postUrl = `https://t.me/${TELEGRAM_CHANNEL}/${messageId}`;
-
-        // Extract date from the <time> tag
-        const timeElem = firstMessage.find('.tgme_widget_message_date time');
+        const timeElem = newestMsg.find('.tgme_widget_message_date time');
         const dateTime = timeElem.attr('datetime');
         const scrapedAt = dateTime ? new Date(dateTime).toISOString() : new Date().toISOString();
 
