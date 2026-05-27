@@ -70,32 +70,47 @@ async function getLatestLibyaNews() {
         if (!title || title === '📷 Media post (no text)') title = '📢 New post';
 
 // Extract media URL (photo or video thumbnail)
-let mediaUrl = null;
+        // Helper: extract url("...") from background-image style
+        function extractBgUrl(style) {
+            if (!style) return null;
+            const match = style.match(/url\(["']?(.*?)["']?\)/);
+            return match ? match[1] : null;
+        }
 
-// 1. Check for photos
-const photoImg = newestMsg.find('.tgme_widget_message_photo img');
-if (photoImg.length) {
-    mediaUrl = photoImg.attr('src');
-} 
-// 2. Check for videos
-else {
-    const videoElem = newestMsg.find('.tgme_widget_message_video');
-    if (videoElem.length) {
-        // Try to get the poster image (from video tag)
-        const videoTag = videoElem.find('video');
-        if (videoTag.length) {
-            const poster = videoTag.attr('poster');
-            if (poster) mediaUrl = poster;
+        // Extract media URL (photo or video thumbnail)
+        let mediaUrl = null;
+
+        // 1. PHOTO: background-image on .tgme_widget_message_photo_wrap
+        const photoWrap = newestMsg.find('.tgme_widget_message_photo_wrap');
+        if (photoWrap.length) {
+            const style = photoWrap.attr('style');
+            mediaUrl = extractBgUrl(style);
         }
-        // If no poster, look for an img inside the video wrapper
+
+        // 2. VIDEO: background-image on .tgme_widget_message_video_thumb
         if (!mediaUrl) {
-            const videoImg = videoElem.find('img');
-            if (videoImg.length) mediaUrl = videoImg.attr('src');
+            const videoThumb = newestMsg.find('.tgme_widget_message_video_thumb');
+            if (videoThumb.length) {
+                const style = videoThumb.attr('style');
+                mediaUrl = extractBgUrl(style);
+            }
         }
-        // If still no mediaUrl, log it
-        if (!mediaUrl) console.log('[News] Video post without thumbnail');
-    }
-}
+
+        // 3. Fallback: any element with background-image
+        if (!mediaUrl) {
+            const anyMedia = newestMsg.find('[style*="background-image"]');
+            if (anyMedia.length) {
+                const style = anyMedia.first().attr('style');
+                mediaUrl = extractBgUrl(style);
+            }
+        }
+
+        // Convert protocol-relative URLs to https
+        if (mediaUrl && mediaUrl.startsWith('//')) {
+            mediaUrl = 'https:' + mediaUrl;
+        }
+
+        console.log(`[News] Media URL extracted: ${mediaUrl || 'none'}`);
 
 console.log(`[News] Media URL extracted: ${mediaUrl || 'none'}`);
 
