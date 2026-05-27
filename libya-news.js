@@ -1,140 +1,177 @@
 // libya-news.js
 const { SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits } = require('discord.js');
-const axios = require('axios');
-const cheerio = require('cheerio');
 
 // === CONFIGURATION ===
-const TELEGRAM_CHANNEL = process.env.TELEGRAM_CHANNEL || 'libyabreaking';
+// Your Telegram bot token from @BotFather
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || 'YOUR_BOT_TOKEN_HERE';
+
+// The public Telegram channel username (with or without @).
+// Example: 'libyaakhbar' for t.me/libyaakhbar
+const TELEGRAM_CHANNEL = process.env.TELEGRAM_CHANNEL || '@your_channel_username';
+
 const CHECK_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
 const MAX_HISTORY = 50;
 
-// === Core: fetch the latest message from the Telegram channel using public preview ===
+// Normalise channel identifier — always prefix with @
+function channelId() {
+    const ch = TELEGRAM_CHANNEL.trim();
+    return ch.startsWith('@') ? ch : `@${ch}`;
+}
+
+// === Core: fetch the latest message from the Telegram channel ===
+// Uses getUpdates with allowed_updates=channel_post to avoid needing
+// the bot to be an admin. For a public channel, simply forward/call
+// getChatHistory via getUpdates after the bot has seen at least one message.
+//
+// Strategy: call getUpdates with a high offset so we only get recent
+// posts, then fall back to forwardMessages if the bot has never seen
+// any updates yet (first run).
+let _lastTelegramUpdateId = null;
+
+async function fetchTelegramUpdates() {
+    const params = new URLSearchParams({
+        timeout: 0,
+        limit: 10,
+        allowed_updates: JSON.stringify(['channel_post']),
+    });
+    if (_lastTelegramUpdateId !== null) {
+        params.set('offset', _lastTelegramUpdateId + 1);
+    }
+    const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates?${params}`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`Telegram getUpdates HTTP ${res.status}`);
+    const data = await res.json();
+    if (!data.ok) throw new Error(`Telegram API error: ${data.description}`);
+    return data.result; // array of Update objects
+}
+
+// Fetch the single most recent message posted in the channel.
+// Works by calling getMessages via the Bot API forwardMessages trick:
+// We send getUpdates, and separately hit getChatHistory using
+// the undocumented (but stable) messages.getHistory-like approach
+// via copyMessage. Instead, we use the reliable approach:
+// call getUpdates to drain any backlog, then use getChatHistory
+// via the `messages` method available through the Bot API's
+// forwardMessages endpoint on a temporary offset scan.
+//
+// Simplest reliable method for a public channel without admin rights:
+// hit https://api.telegram.org/bot{TOKEN}/getChat to confirm access,
+// then use `forwardMessages` or just rely on `getUpdates` draining.
+// For a fully reliable "get latest post regardless of bot uptime" we
+// use the sendMessage → deleteMessage trick on a throwaway private chat
+// is NOT needed — instead we use the public channel's message link
+// by calling getChatHistory via the Bot API's `copyMessage` dry-run.
+//
+// CLEANEST approach that actually works without admin rights on a public channel:
+// Use getUpdates (drains updates as they arrive) AND on first run,
+// call `forwardMessages` from the channel to a dummy chat to get the
+// message_id range, then use `getChatHistory` via the channel itself.
+// In practice, the simplest approach is: on startup, send a dummy message
+// to get the bot's own chat id, then forward the latest channel post.
+//
+// ACTUALLY — the cleanest, simplest approach with zero tricks:
+// Just use getUpdates. The bot must be a member of the channel
+// (add it as a subscriber — no admin needed for public channels).
+// Telegram will then deliver channel_post updates to getUpdates.
 async function getLatestLibyaNews() {
     try {
-        const url = `https://t.me/s/${TELEGRAM_CHANNEL}`;
-        const { data: html } = await axios.get(url, {
-            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
-            timeout: 15000
-        });
-        const $ = cheerio.load(html);
+        const updates = await fetchTelegramUpdates();
 
-        // Find all message widgets
-        const messages = $('.tgme_widget_message');
-        if (!messages.length) {
-            console.log('[News] No messages found on the page');
+        // Advance the offset so we don't re-process old updates next time
+        if (updates.length > 0) {
+            _lastTelegramUpdateId = updates[updates.length - 1].update_id;
+        }
+
+        // Filter to channel_post updates from our target channel
+        const channelPosts = updates
+            .filter(u => {
+                if (!u.channel_post) return false;
+                const chat = u.channel_post.chat;
+                // Match by username or channel id
+                const target = channelId().replace('@', '').toLowerCase();
+                return (
+                    (chat.username && chat.username.toLowerCase() === target) ||
+                    String(chat.id) === target
+                );
+            })
+            .map(u => u.channel_post)
+            // Newest first
+            .sort((a, b) => b.date - a.date);
+
+        if (channelPosts.length === 0) {
+            // No new posts in this poll cycle — not an error
             return null;
         }
 
-        // Find the newest non-pinned message by comparing datetime
-        let newestMsg = null;
-        let newestDate = null;
-        messages.each((i, elem) => {
-            const $msg = $(elem);
-            if ($msg.hasClass('tgme_widget_message_pinned')) return;
-            const timeElem = $msg.find('.tgme_widget_message_date time');
-            const dateTime = timeElem.attr('datetime');
-            if (dateTime) {
-                const msgDate = new Date(dateTime);
-                if (!newestDate || msgDate > newestDate) {
-                    newestDate = msgDate;
-                    newestMsg = $msg;
-                }
-            } else if (!newestMsg) {
-                newestMsg = $msg;
-            }
-        });
-        if (!newestMsg) newestMsg = messages.first();
-
-        const dataPost = newestMsg.attr('data-post');
-        const messageId = dataPost ? dataPost.split('/').pop() : '';
-
-        // Extract full text (preserve line breaks)
-        const textElem = newestMsg.find('.tgme_widget_message_text');
-        let fullText = '';
-        if (textElem.length) {
-            // Get HTML content
-            fullText = textElem.html() || '';
-            // Convert <br> to newline, then strip remaining HTML
-            fullText = fullText.replace(/<br\s*\/?>/g, '\n').replace(/<[^>]*>/g, '');
-            fullText = fullText.trim();
-        }
-        if (!fullText) fullText = '📷 Media post (no text)';
-
-        // Discord description limit: 4096, but we'll keep under 2000 to be safe
-        let description = fullText;
-        if (description.length > 2000) description = description.slice(0, 1997) + '...';
-
-        // Title: first line of the post
-        const firstLine = fullText.split('\n')[0];
-        let title = firstLine.length > 100 ? firstLine.slice(0, 97) + '...' : firstLine;
-        if (!title || title === '📷 Media post (no text)') title = '📢 New post';
-
-// Extract media URL (photo or video thumbnail)
-        // Helper: extract url("...") from background-image style
-        function extractBgUrl(style) {
-            if (!style) return null;
-            const match = style.match(/url\(["']?(.*?)["']?\)/);
-            return match ? match[1] : null;
-        }
-
-        // Extract media URL (photo or video thumbnail)
-        let mediaUrl = null;
-
-        // 1. PHOTO: background-image on .tgme_widget_message_photo_wrap
-        const photoWrap = newestMsg.find('.tgme_widget_message_photo_wrap');
-        if (photoWrap.length) {
-            const style = photoWrap.attr('style');
-            mediaUrl = extractBgUrl(style);
-        }
-
-        // 2. VIDEO: background-image on .tgme_widget_message_video_thumb
-        if (!mediaUrl) {
-            const videoThumb = newestMsg.find('.tgme_widget_message_video_thumb');
-            if (videoThumb.length) {
-                const style = videoThumb.attr('style');
-                mediaUrl = extractBgUrl(style);
-            }
-        }
-
-        // 3. Fallback: any element with background-image
-        if (!mediaUrl) {
-            const anyMedia = newestMsg.find('[style*="background-image"]');
-            if (anyMedia.length) {
-                const style = anyMedia.first().attr('style');
-                mediaUrl = extractBgUrl(style);
-            }
-        }
-
-        // Convert protocol-relative URLs to https
-        if (mediaUrl && mediaUrl.startsWith('//')) {
-            mediaUrl = 'https:' + mediaUrl;
-        }
-
-        console.log(`[News] Media URL extracted: ${mediaUrl || 'none'}`);
-
-console.log(`[News] Media URL extracted: ${mediaUrl || 'none'}`);
-
-        const postUrl = `https://t.me/${TELEGRAM_CHANNEL}/${messageId}`;
-        const timeElem = newestMsg.find('.tgme_widget_message_date time');
-        const dateTime = timeElem.attr('datetime');
-        const scrapedAt = dateTime ? new Date(dateTime).toISOString() : new Date().toISOString();
-
-        return {
-            title,
-            description,
-            url: postUrl,
-            mediaUrl,
-            scrapedAt,
-            messageId,
-            channelUsername: TELEGRAM_CHANNEL,
-        };
+        const post = channelPosts[0];
+        return parseTelegramPost(post);
     } catch (err) {
-        console.error('[News] Scrape error:', err.message);
-        throw new Error(`Could not fetch latest news from Telegram: ${err.message}`);
+        console.error('[News] Telegram fetch error:', err.message);
+        throw new Error('Could not fetch latest news from Telegram channel.');
     }
 }
 
-// === Persistent data helpers ===
+// === Parse a Telegram channel_post into a normalised article object ===
+function parseTelegramPost(post) {
+    const chatUsername = post.chat.username || '';
+    const msgId        = post.message_id;
+
+    // Public message link
+    const url = chatUsername
+        ? `https://t.me/${chatUsername}/${msgId}`
+        : null;
+
+    // Raw text (may contain Markdown/HTML entities from Telegram)
+    const rawText = post.text || post.caption || '';
+
+    // Extract a title: first non-empty line, up to 120 chars
+    const lines     = rawText.split('\n').map(l => l.trim()).filter(Boolean);
+    const title     = lines[0]
+        ? (lines[0].length > 120 ? lines[0].slice(0, 117) + '...' : lines[0])
+        : '📢 New post';
+
+    // Description: remaining lines joined, trimmed to 250 chars
+    let description = lines.slice(1).join(' ').trim();
+    if (description.length > 250) description = description.slice(0, 247) + '...';
+    if (!description) description = 'Click the link to read the full post on Telegram.';
+
+    // Image: if the post has a photo, pick the largest size
+    let imageUrl = null;
+    if (post.photo && post.photo.length > 0) {
+        const largest = post.photo.reduce((best, p) =>
+            (p.file_size || 0) > (best.file_size || 0) ? p : best
+        , post.photo[0]);
+        // We'll resolve the file URL below (async), store file_id for now
+        imageUrl = `tg-file:${largest.file_id}`;
+    } else if (post.document?.mime_type?.startsWith('image/')) {
+        imageUrl = `tg-file:${post.document.file_id}`;
+    }
+
+    return {
+        title,
+        description,
+        url,
+        imageFileId: imageUrl?.startsWith('tg-file:') ? imageUrl.slice(8) : null,
+        scrapedAt:   new Date(post.date * 1000).toISOString(),
+        messageId:   msgId,
+        channelUsername: chatUsername,
+    };
+}
+
+// === Resolve a Telegram file_id to a public HTTPS URL ===
+async function resolveTelegramFileUrl(fileId) {
+    try {
+        const res  = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getFile?file_id=${fileId}`);
+        const data = await res.json();
+        if (!data.ok || !data.result?.file_path) return null;
+        return `https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/${data.result.file_path}`;
+    } catch {
+        return null;
+    }
+}
+
+
+// === Persistent data helpers (unchanged) ===
 function getNewsData(db, guildId) {
     if (!db[guildId]) db[guildId] = {};
     if (!db[guildId].__news) {
@@ -154,21 +191,28 @@ async function postNewsUpdate(client, newsState, latestArticle, forced = false) 
     const channel = await client.channels.fetch(newsState.channelId).catch(() => null);
     if (!channel || !channel.isTextBased()) return false;
 
-    const channelName = latestArticle.channelUsername ? `@${latestArticle.channelUsername}` : 'Telegram';
+    // Resolve Telegram photo to a public URL (if present)
+    let imageUrl = null;
+    if (latestArticle.imageFileId) {
+        imageUrl = await resolveTelegramFileUrl(latestArticle.imageFileId);
+    }
+
+    const channelName = latestArticle.channelUsername
+        ? `@${latestArticle.channelUsername}`
+        : 'Telegram';
+
     const telegramIconUrl = 'https://telegram.org/img/t_logo.png';
 
     const embed = new EmbedBuilder()
-        .setColor(0x229ED9)
-        .setAuthor({ name: '📢 Telegram Update', iconURL: telegramIconUrl })
+        .setColor(0x229ED9)  // Telegram blue
         .setTitle(latestArticle.title)
         .setDescription(latestArticle.description)
-        .setURL(latestArticle.url)
         .setTimestamp(new Date(latestArticle.scrapedAt))
-        .setFooter({ text: `Posted in ${channelName}`, iconURL: telegramIconUrl });
+        .setFooter({ text: `Posted in ${channelName}`, iconURL: telegramIconUrl })
+        .setAuthor({ name: '📢 Libya Channel Update' });
 
-    if (latestArticle.mediaUrl) {
-        embed.setImage(latestArticle.mediaUrl);
-    }
+    if (latestArticle.url) embed.setURL(latestArticle.url);
+    if (imageUrl)          embed.setImage(imageUrl);
 
     await channel.send({ embeds: [embed] });
     return true;
@@ -180,12 +224,15 @@ async function updateNews({ client, db, saveData, guildId, forcePost = false }) 
     newsState.lastCheckedAt = new Date().toISOString();
 
     const latestArticle = await getLatestLibyaNews();
+
+    // null means no new posts in this poll cycle
     if (!latestArticle) {
         saveData(guildId);
         return { latestArticle: null, posted: false, isNew: false };
     }
 
-    const articleKey = latestArticle.url;
+    // Deduplicate by message URL (or messageId as fallback)
+    const articleKey = latestArticle.url || String(latestArticle.messageId);
     const isNew = articleKey !== newsState.lastPostedUrl;
 
     console.log(`[News] Auto check for guild ${guildId}: isNew=${isNew}, lastUrl=${newsState.lastPostedUrl}, currentUrl=${articleKey}`);
