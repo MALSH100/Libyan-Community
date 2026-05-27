@@ -69,22 +69,35 @@ async function getLatestLibyaNews() {
         let title = firstLine.length > 100 ? firstLine.slice(0, 97) + '...' : firstLine;
         if (!title || title === '📷 Media post (no text)') title = '📢 New post';
 
-        // Extract media URL (photo or video thumbnail)
-        let mediaUrl = null;
-        const photoImg = newestMsg.find('.tgme_widget_message_photo img');
-        if (photoImg.length) {
-            mediaUrl = photoImg.attr('src');
-        } else {
-            const videoElem = newestMsg.find('.tgme_widget_message_video');
-            if (videoElem.length) {
-                const poster = videoElem.attr('poster');
-                if (poster) mediaUrl = poster;
-                else {
-                    const videoThumb = videoElem.find('img');
-                    if (videoThumb.length) mediaUrl = videoThumb.attr('src');
-                }
-            }
+// Extract media URL (photo or video thumbnail)
+let mediaUrl = null;
+
+// 1. Check for photos
+const photoImg = newestMsg.find('.tgme_widget_message_photo img');
+if (photoImg.length) {
+    mediaUrl = photoImg.attr('src');
+} 
+// 2. Check for videos
+else {
+    const videoElem = newestMsg.find('.tgme_widget_message_video');
+    if (videoElem.length) {
+        // Try to get the poster image (from video tag)
+        const videoTag = videoElem.find('video');
+        if (videoTag.length) {
+            const poster = videoTag.attr('poster');
+            if (poster) mediaUrl = poster;
         }
+        // If no poster, look for an img inside the video wrapper
+        if (!mediaUrl) {
+            const videoImg = videoElem.find('img');
+            if (videoImg.length) mediaUrl = videoImg.attr('src');
+        }
+        // If still no mediaUrl, log it
+        if (!mediaUrl) console.log('[News] Video post without thumbnail');
+    }
+}
+
+console.log(`[News] Media URL extracted: ${mediaUrl || 'none'}`);
 
         const postUrl = `https://t.me/${TELEGRAM_CHANNEL}/${messageId}`;
         const timeElem = newestMsg.find('.tgme_widget_message_date time');
