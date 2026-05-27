@@ -88,14 +88,13 @@ function parseRatesFromText(text) {
   // Log the raw text for debugging
   console.log('[Exchange] Page text sample (first 500 chars):\n', text.slice(0, 500));
   
-  // Check for holiday or no-update message
+  // Check for holiday or no‑update message
   if (text.includes('no black market exchange rate updates') || text.includes('holiday')) {
-    console.log('[Exchange] Holiday or no update detected – returning null');
+    console.log('[Exchange] Holiday or no update detected – skipping');
     return null;
   }
   
   // Method 1: Direct patterns like "$1=08.32 LYD"
-  ...
   const directPatterns = [
     { currency: 'USD', regex: /\$1\s*=\s*(\d{1,2}(?:[.,]\d{1,2})?)\s*LYD/i },
     { currency: 'EUR', regex: /€1\s*=\s*(\d{1,2}(?:[.,]\d{1,2})?)\s*LYD/i },
