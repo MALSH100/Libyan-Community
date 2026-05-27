@@ -215,240 +215,253 @@ function svgEscape(value) {
 }
 
 function buildChartSvg(history, mainCurrency = 'USD') {
-  // Group by date (take the last entry of each day)
+  // ── 1. Aggregate: one data point per day (last entry of each day wins) ────
   const dailyMap = new Map();
   (history || [])
     .filter(entry => entry.rates && typeof entry.rates[mainCurrency] === 'number')
     .forEach(entry => {
-      const dateKey = entry.scrapedAt.slice(0, 10); // YYYY-MM-DD
-      if (!dailyMap.has(dateKey) || new Date(entry.scrapedAt) > new Date(dailyMap.get(dateKey).scrapedAt)) {
-        dailyMap.set(dateKey, entry);
+      const key = entry.scrapedAt.slice(0, 10); // YYYY-MM-DD
+      if (!dailyMap.has(key) || new Date(entry.scrapedAt) > new Date(dailyMap.get(key).scrapedAt)) {
+        dailyMap.set(key, entry);
       }
     });
 
-  let rows = Array.from(dailyMap.values())
+  const rows = Array.from(dailyMap.values())
     .sort((a, b) => new Date(a.scrapedAt) - new Date(b.scrapedAt))
     .slice(-30); // last 30 days
 
-  if (rows.length === 0) return `<svg width="960" height="520"></svg>`;
+  if (rows.length === 0) return `<svg width="960" height="400" xmlns="http://www.w3.org/2000/svg"><rect width="100%" height="100%" fill="#1a1c22"/></svg>`;
 
-  // -----------------------------------------------------------------
-  // Build candles
-  // Each day: open = previous day's close, close = today's rate.
-  // COLOR CONVENTION (standard financial chart):
-  //   Green (bullish)  = close > open  → LYD rate rose  (foreign currency costs more)
-  //   Red   (bearish)  = close < open  → LYD rate fell  (foreign currency costs less / dinar strengthened)
-  // The subtitle clarifies this for the reader.
-  // -----------------------------------------------------------------
+  // ── 2. Build candles ─────────────────────────────────────────────────────
+  // LIBYAN COLOR LOGIC (intentional, matches reference image):
+  //   GREEN = close < open  → rate fell → Dinar STRENGTHENED
+  //   RED   = close > open  → rate rose → Dinar WEAKENED
+  const GREEN       = '#22c55e';  // vibrant green  (dinar strengthens)
+  const GREEN_LIGHT = '#4ade80';
+  const RED         = '#ef4444';  // clear red      (dinar weakens)
+  const RED_LIGHT   = '#f87171';
+  const NEUTRAL     = '#94a3b8';
+
   const candles = [];
   for (let i = 0; i < rows.length; i++) {
     const close = rows[i].rates[mainCurrency];
     const open  = i === 0 ? close : rows[i - 1].rates[mainCurrency];
     const high  = Math.max(open, close);
     const low   = Math.min(open, close);
-    const date  = new Date(rows[i].scrapedAt);
-    // Standard: green when price closes higher (rate went up), red when lower
-    const bullish = close >= open;
-    const color      = bullish ? '#26a69a' : '#ef5350'; // teal-green / red
-    const colorLight = bullish ? '#4db6ac' : '#ff7043';
-    candles.push({ date, open, high, low, close, color, colorLight, bullish });
+    const ts    = new Date(rows[i].scrapedAt);
+    // Dinar-centric: green when rate drops (dinar stronger)
+    const dinarStrengthened = close < open;
+    const dinarWeakened     = close > open;
+    const color      = dinarStrengthened ? GREEN  : (dinarWeakened ? RED  : NEUTRAL);
+    const colorLight = dinarStrengthened ? GREEN_LIGHT : (dinarWeakened ? RED_LIGHT : NEUTRAL);
+    candles.push({ ts, open, high, low, close, color, colorLight, dinarStrengthened });
   }
 
-  // Y-axis range with comfortable padding
+  // ── 3. Y-axis: tight range around actual data ────────────────────────────
   const allVals = candles.flatMap(c => [c.high, c.low]);
   let minVal = Math.min(...allVals);
   let maxVal = Math.max(...allVals);
-  const range = maxVal - minVal || 0.01;
-  const pad0  = range * 0.12;
-  minVal -= pad0;
-  maxVal += pad0;
-  if (minVal < 0) minVal = 0;
+  const dataRange = maxVal - minVal || 0.05;
+  // Only add a small padding (15%) — keeps the chart tight like the reference
+  const vPad = dataRange * 0.15;
+  minVal = Math.max(0, minVal - vPad);
+  maxVal = maxVal + vPad;
 
-  // Nice Y ticks
-  const tickCount = 6;
-  const rawStep = (maxVal - minVal) / (tickCount - 1);
-  const magnitude = Math.pow(10, Math.floor(Math.log10(rawStep)));
-  const niceStep  = Math.ceil(rawStep / magnitude) * magnitude;
-  const niceMin   = Math.floor(minVal / niceStep) * niceStep;
-  const tickValues = [];
-  for (let i = 0; i <= tickCount; i++) {
-    const v = niceMin + i * niceStep;
-    if (v >= minVal - 1e-9 && v <= maxVal + 1e-9) tickValues.push(v);
+  // Nice round tick values
+  function niceNumber(range, round) {
+    const exp = Math.floor(Math.log10(range));
+    const f   = range / Math.pow(10, exp);
+    let nf;
+    if (round) { nf = f < 1.5 ? 1 : f < 3 ? 2 : f < 7 ? 5 : 10; }
+    else        { nf = f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10; }
+    return nf * Math.pow(10, exp);
+  }
+  const niceTickStep = niceNumber((maxVal - minVal) / 4, true);
+  const niceMinTick  = Math.floor(minVal / niceTickStep) * niceTickStep;
+  const tickValues   = [];
+  for (let v = niceMinTick; v <= maxVal + niceTickStep * 0.01; v = Math.round((v + niceTickStep) * 1e6) / 1e6) {
+    if (v >= minVal - 1e-9) tickValues.push(v);
+    if (tickValues.length >= 8) break;
   }
 
-  // Layout
-  const width  = 960;
-  const height = 520;
-  const pad    = { left: 80, right: 30, top: 80, bottom: 70 };
-  const plotW  = width  - pad.left - pad.right;
-  const plotH  = height - pad.top  - pad.bottom;
+  // ── 4. Layout ────────────────────────────────────────────────────────────
+  const W    = 960;
+  const H    = 420;
+  const pad  = { left: 68, right: 80, top: 72, bottom: 56 };
+  const plotW = W - pad.left - pad.right;
+  const plotH = H - pad.top  - pad.bottom;
 
-  const yFor = (v) => pad.top + (1 - (v - minVal) / (maxVal - minVal)) * plotH;
-  const xFor = (i) => {
-    if (candles.length === 1) return pad.left + plotW / 2;
-    return pad.left + (i / (candles.length - 1)) * plotW;
-  };
+  const yFor = v  => pad.top + (1 - (v - minVal) / (maxVal - minVal)) * plotH;
+  const xFor = i  => candles.length === 1
+    ? pad.left + plotW / 2
+    : pad.left + (i / (candles.length - 1)) * plotW;
 
-  const candleBodyW = Math.max(4, Math.min(18, (plotW / candles.length) * 0.55));
-  const halfW       = candleBodyW / 2;
+  // Candle width: narrower for more candles (like reference), capped nicely
+  const spacing   = candles.length > 1 ? plotW / (candles.length - 1) : plotW;
+  const bodyW     = Math.max(3, Math.min(14, spacing * 0.5));
+  const halfW     = bodyW / 2;
 
-  // ── Background panels (alternating subtle bands) ────────────────
-  const bands = [];
-  for (let i = 0; i < candles.length; i++) {
-    if (i % 2 === 0) continue;
-    const x0 = i === 0 ? pad.left : (xFor(i - 1) + xFor(i)) / 2;
-    const x1 = i === candles.length - 1 ? pad.left + plotW : (xFor(i) + xFor(i + 1)) / 2;
-    bands.push(`<rect x="${x0.toFixed(1)}" y="${pad.top}" width="${(x1 - x0).toFixed(1)}" height="${plotH}" fill="rgba(255,255,255,0.018)"/>`);
-  }
-
-  // ── Grid lines ───────────────────────────────────────────────────
+  // ── 5. Grid lines ────────────────────────────────────────────────────────
   const gridLines = [];
   for (const val of tickValues) {
     const y = yFor(val);
+    if (y < pad.top - 2 || y > pad.top + plotH + 2) continue;
     gridLines.push(
-      `<line x1="${pad.left}" y1="${y.toFixed(1)}" x2="${pad.left + plotW}" y2="${y.toFixed(1)}" stroke="#3a3d45" stroke-width="1" stroke-dasharray="4,3"/>`,
-      `<text x="${pad.left - 12}" y="${(y + 4).toFixed(1)}" text-anchor="end" font-family="'Segoe UI',Arial,sans-serif" font-size="12" fill="#72767d">${val.toFixed(3)}</text>`
+      `<line x1="${pad.left}" y1="${y.toFixed(1)}" x2="${pad.left + plotW}" y2="${y.toFixed(1)}" stroke="#2a2d35" stroke-width="1"/>`,
+      `<text x="${(pad.left - 8).toFixed(1)}" y="${(y + 4).toFixed(1)}" text-anchor="end" font-family="'Segoe UI',Arial,sans-serif" font-size="12" fill="#6b7280">${val.toFixed(2)}</text>`
     );
   }
 
-  // ── Candlestick bodies & wicks ───────────────────────────────────
-  const candlesSvg = [];
+  // ── 6. X-axis date labels — show "DD Mon" at day boundaries ─────────────
+  const xLabels   = [];
+  let   lastDay   = null;
+  // Collect unique day-boundary positions
+  const dayBoundaries = [];
+  for (let i = 0; i < candles.length; i++) {
+    const dayKey = candles[i].ts.toISOString().slice(0, 10);
+    if (dayKey !== lastDay) {
+      dayBoundaries.push({ i, ts: candles[i].ts });
+      lastDay = dayKey;
+    }
+  }
+  // Space them out: skip if too close
+  const minLabelSpacing = 60;
+  let lastLabelX = -999;
+  for (const { i, ts } of dayBoundaries) {
+    const x = xFor(i);
+    if (x - lastLabelX < minLabelSpacing && lastLabelX !== -999) continue;
+    const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const label  = `${ts.getUTCDate()} ${MONTHS[ts.getUTCMonth()]}`;
+    xLabels.push(
+      `<line x1="${x.toFixed(1)}" y1="${(pad.top + plotH).toFixed(1)}" x2="${x.toFixed(1)}" y2="${(pad.top + plotH + 6).toFixed(1)}" stroke="#374151" stroke-width="1"/>`,
+      `<text x="${x.toFixed(1)}" y="${(H - pad.bottom + 22).toFixed(1)}" text-anchor="middle" font-family="'Segoe UI',Arial,sans-serif" font-size="12" fill="#9ca3af">${svgEscape(label)}</text>`
+    );
+    lastLabelX = x;
+  }
+
+  // ── 7. Candlestick SVG elements ──────────────────────────────────────────
+  // All gradients are defined up front in <defs> to keep the SVG clean
+  const gradDefs   = [];
+  const candleElems = [];
+
   for (let i = 0; i < candles.length; i++) {
     const c      = candles[i];
     const x      = xFor(i);
-    const highY  = yFor(c.high);
-    const lowY   = yFor(c.low);
     const openY  = yFor(c.open);
     const closeY = yFor(c.close);
+    const highY  = yFor(c.high);
+    const lowY   = yFor(c.low);
     const bodyTop    = Math.min(openY, closeY);
     const bodyBottom = Math.max(openY, closeY);
     const bodyH      = Math.max(2, bodyBottom - bodyTop);
 
-    // Wick
-    if (c.high !== c.low) {
-      candlesSvg.push(`<line x1="${x.toFixed(1)}" y1="${highY.toFixed(1)}" x2="${x.toFixed(1)}" y2="${lowY.toFixed(1)}" stroke="${c.color}" stroke-width="1.5" stroke-linecap="round"/>`);
-    }
+    // Wick (same color as body, thin)
+    candleElems.push(
+      `<line x1="${x.toFixed(1)}" y1="${highY.toFixed(1)}" x2="${x.toFixed(1)}" y2="${lowY.toFixed(1)}" stroke="${c.color}" stroke-width="1.2" stroke-linecap="round"/>`
+    );
 
-    // Body with gradient fill for depth
-    const gradId = `cg${i}`;
-    candlesSvg.push(
-      `<defs><linearGradient id="${gradId}" x1="0" y1="0" x2="1" y2="0">` +
-        `<stop offset="0%" stop-color="${c.colorLight}"/>` +
-        `<stop offset="100%" stop-color="${c.color}"/>` +
-      `</linearGradient></defs>`,
-      `<rect x="${(x - halfW).toFixed(1)}" y="${bodyTop.toFixed(1)}" width="${candleBodyW.toFixed(1)}" height="${bodyH.toFixed(1)}" rx="2" ry="2" fill="url(#${gradId})" stroke="${c.color}" stroke-width="0.8"/>`
+    // Gradient for body
+    const gid = `g${i}`;
+    gradDefs.push(
+      `<linearGradient id="${gid}" x1="0" y1="0" x2="0" y2="1">` +
+        `<stop offset="0%" stop-color="${c.colorLight}" stop-opacity="1"/>` +
+        `<stop offset="100%" stop-color="${c.color}" stop-opacity="1"/>` +
+      `</linearGradient>`
+    );
+    candleElems.push(
+      `<rect x="${(x - halfW).toFixed(1)}" y="${bodyTop.toFixed(1)}" width="${bodyW.toFixed(1)}" height="${bodyH.toFixed(1)}" rx="1.5" fill="url(#${gid})" stroke="${c.color}" stroke-width="0.5"/>`
     );
   }
 
-  // ── Trend line (simple moving average of close prices) ───────────
-  const maLine = [];
-  const maWindow = Math.min(7, candles.length);
-  for (let i = maWindow - 1; i < candles.length; i++) {
-    const avg = candles.slice(i - maWindow + 1, i + 1).reduce((s, c) => s + c.close, 0) / maWindow;
-    const px  = xFor(i);
-    const py  = yFor(avg);
-    maLine.push(i === maWindow - 1 ? `M${px.toFixed(1)},${py.toFixed(1)}` : `L${px.toFixed(1)},${py.toFixed(1)}`);
-  }
-  const trendPath = maLine.length > 1
-    ? `<path d="${maLine.join(' ')}" fill="none" stroke="#f0c040" stroke-width="1.5" stroke-dasharray="5,3" opacity="0.7"/>`
-    : '';
-
-  // ── Latest price tag on right axis ──────────────────────────────
-  const last   = candles[candles.length - 1];
-  const lastY  = yFor(last.close);
-  const tagColor = last.bullish ? '#26a69a' : '#ef5350';
-  const priceTagW = 68;
-  const priceTag = [
-    `<line x1="${pad.left}" y1="${lastY.toFixed(1)}" x2="${pad.left + plotW}" y2="${lastY.toFixed(1)}" stroke="${tagColor}" stroke-width="1" stroke-dasharray="4,3" opacity="0.6"/>`,
-    `<rect x="${pad.left + plotW - 2}" y="${(lastY - 11).toFixed(1)}" width="${priceTagW}" height="22" rx="4" fill="${tagColor}"/>`,
-    `<text x="${(pad.left + plotW + priceTagW / 2 - 2).toFixed(1)}" y="${(lastY + 5).toFixed(1)}" text-anchor="middle" font-family="'Segoe UI',Arial,sans-serif" font-size="12" font-weight="700" fill="#ffffff">${last.close.toFixed(3)}</text>`
+  // ── 8. Latest price tag — pinned to right edge like the reference ────────
+  const last     = candles[candles.length - 1];
+  const lastY    = yFor(last.close);
+  const tagColor = last.dinarStrengthened ? GREEN : RED;
+  // Dashed horizontal line across the whole plot
+  const priceLineX2 = pad.left + plotW + pad.right - 2; // extends into right margin
+  const TAG_W = 62, TAG_H = 22, TAG_X = pad.left + plotW + 4;
+  const priceLine = `<line x1="${pad.left}" y1="${lastY.toFixed(1)}" x2="${(TAG_X - 2).toFixed(1)}" y2="${lastY.toFixed(1)}" stroke="${tagColor}" stroke-width="1" stroke-dasharray="3,3" opacity="0.55"/>`;
+  const priceTag  = [
+    priceLine,
+    `<rect x="${TAG_X}" y="${(lastY - TAG_H/2).toFixed(1)}" width="${TAG_W}" height="${TAG_H}" rx="4" fill="${tagColor}"/>`,
+    `<text x="${(TAG_X + TAG_W/2).toFixed(1)}" y="${(lastY + 5).toFixed(1)}" text-anchor="middle" font-family="'Segoe UI',Arial,sans-serif" font-size="12" font-weight="700" fill="#ffffff">${last.close.toFixed(2)}</text>`,
   ];
 
-  // ── X-axis date labels (show ~8 evenly spaced) ───────────────────
-  const xLabels = [];
-  const maxLabels = Math.min(8, candles.length);
-  const step = Math.max(1, Math.round(candles.length / maxLabels));
-  for (let i = 0; i < candles.length; i++) {
-    if (i % step !== 0 && i !== candles.length - 1) continue;
-    const d       = candles[i].date;
-    const dateStr = `${d.getDate()} ${['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getMonth()]}`;
-    xLabels.push(
-      `<text x="${xFor(i).toFixed(1)}" y="${height - pad.bottom + 22}" text-anchor="middle" font-family="'Segoe UI',Arial,sans-serif" font-size="11" fill="#72767d">${svgEscape(dateStr)}</text>`,
-      `<line x1="${xFor(i).toFixed(1)}" y1="${pad.top + plotH}" x2="${xFor(i).toFixed(1)}" y2="${pad.top + plotH + 5}" stroke="#3a3d45" stroke-width="1"/>`
-    );
-  }
+  // ── 9. Header block ──────────────────────────────────────────────────────
+  const SYM   = { USD: '$', EUR: '€', GBP: '£' };
+  const NAMES = { USD: 'US Dollar', EUR: 'Euro', GBP: 'British Pound' };
+  const sym   = SYM[mainCurrency]   || '';
+  const cName = NAMES[mainCurrency] || mainCurrency;
 
-  // ── Header ───────────────────────────────────────────────────────
-  const currencyNames  = { USD: 'US Dollar', EUR: 'Euro', GBP: 'British Pound' };
-  const currencySymbol = { USD: '$', EUR: '€', GBP: '£' };
-  const sym    = currencySymbol[mainCurrency] || '';
-  const cName  = currencyNames[mainCurrency]  || mainCurrency;
-  const delta  = candles.length > 1 ? last.close - candles[0].close : 0;
-  const deltaTxt = (delta >= 0 ? '+' : '') + delta.toFixed(3);
-  const deltaColor = delta >= 0 ? '#26a69a' : '#ef5350';
+  // Period delta: first candle vs last
+  const periodDelta    = candles.length > 1 ? last.close - candles[0].close : 0;
+  const deltaTxt       = (periodDelta > 0 ? '+' : '') + periodDelta.toFixed(3);
+  // For delta color: rate went down = dinar stronger = green; rate went up = red
+  const deltaColor     = periodDelta < 0 ? GREEN : (periodDelta > 0 ? RED : NEUTRAL);
+  const deltaArrow     = periodDelta < 0 ? '▼' : (periodDelta > 0 ? '▲' : '');
 
-  // ── Legend ───────────────────────────────────────────────────────
-  const legendY = pad.top - 28;
+  // Date range label
+  const first = candles[0].ts;
+  const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const dateRange = candles.length > 1
+    ? `${first.getUTCDate()} ${MONTHS[first.getUTCMonth()]} – ${last.ts.getUTCDate()} ${MONTHS[last.ts.getUTCMonth()]} ${last.ts.getUTCFullYear()}`
+    : `${last.ts.getUTCDate()} ${MONTHS[last.ts.getUTCMonth()]} ${last.ts.getUTCFullYear()}`;
+
+  // ── 10. Bottom legend ─────────────────────────────────────────────────────
+  const legY  = H - 14;
+  const legCX = W / 2;
   const legend = [
-    `<rect x="${pad.left + plotW - 200}" y="${legendY - 9}" width="12" height="12" rx="2" fill="#26a69a"/>`,
-    `<text x="${pad.left + plotW - 185}" y="${legendY}" font-family="'Segoe UI',Arial,sans-serif" font-size="11" fill="#72767d">Rate Up (Dinar Weaker)</text>`,
-    `<rect x="${pad.left + plotW - 60}" y="${legendY - 9}" width="12" height="12" rx="2" fill="#ef5350"/>`,
-    `<text x="${pad.left + plotW - 45}" y="${legendY}" font-family="'Segoe UI',Arial,sans-serif" font-size="11" fill="#72767d">Rate Down</text>`,
+    `<rect x="${legCX - 170}" y="${legY - 10}" width="12" height="12" rx="2" fill="${GREEN}"/>`,
+    `<text x="${legCX - 154}" y="${legY}" font-family="'Segoe UI',Arial,sans-serif" font-size="11" fill="${GREEN}">Green = Dinar Strengthens (Rate Falls)</text>`,
+    `<rect x="${legCX + 60}" y="${legY - 10}" width="12" height="12" rx="2" fill="${RED}"/>`,
+    `<text x="${legCX + 76}" y="${legY}" font-family="'Segoe UI',Arial,sans-serif" font-size="11" fill="${RED}">Red = Dinar Weakens (Rate Rises)</text>`,
   ].join('\n');
 
-  const maLegendY = legendY + 16;
-  const maLegend = maLine.length > 1
-    ? `<line x1="${pad.left + plotW - 200}" y1="${maLegendY - 4}" x2="${pad.left + plotW - 185}" y2="${maLegendY - 4}" stroke="#f0c040" stroke-width="1.5" stroke-dasharray="5,3" opacity="0.7"/>
-       <text x="${pad.left + plotW - 183}" y="${maLegendY}" font-family="'Segoe UI',Arial,sans-serif" font-size="11" fill="#72767d">${maWindow}-day MA</text>`
-    : '';
-
+  // ── 11. Assemble SVG ──────────────────────────────────────────────────────
   return `<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
+<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
   <defs>
-    <linearGradient id="bgGrad" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%"   stop-color="#1e2124"/>
-      <stop offset="100%" stop-color="#292b2f"/>
-    </linearGradient>
+    ${gradDefs.join('\n    ')}
     <clipPath id="plotClip">
       <rect x="${pad.left}" y="${pad.top}" width="${plotW}" height="${plotH}"/>
     </clipPath>
   </defs>
 
   <!-- Background -->
-  <rect width="${width}" height="${height}" fill="url(#bgGrad)" rx="12"/>
-  <rect x="${pad.left}" y="${pad.top}" width="${plotW}" height="${plotH}" fill="#1a1c1f" rx="4"/>
-
-  <!-- Alternating bands -->
-  ${bands.join('\n')}
+  <rect width="${W}" height="${H}" fill="#1a1c22" rx="10"/>
+  <!-- Plot area background -->
+  <rect x="${pad.left}" y="${pad.top}" width="${plotW}" height="${plotH}" fill="#14151a" rx="3"/>
 
   <!-- Grid -->
-  ${gridLines.join('\n')}
+  ${gridLines.join('\n  ')}
 
   <!-- Axis lines -->
-  <line x1="${pad.left}" y1="${pad.top}" x2="${pad.left}" y2="${pad.top + plotH}" stroke="#4e5058" stroke-width="1.5"/>
-  <line x1="${pad.left}" y1="${pad.top + plotH}" x2="${pad.left + plotW}" y2="${pad.top + plotH}" stroke="#4e5058" stroke-width="1.5"/>
+  <line x1="${pad.left}" y1="${pad.top}" x2="${pad.left}" y2="${pad.top + plotH}" stroke="#374151" stroke-width="1"/>
+  <line x1="${pad.left}" y1="${pad.top + plotH}" x2="${pad.left + plotW}" y2="${pad.top + plotH}" stroke="#374151" stroke-width="1"/>
 
-  <!-- Chart content (clipped) -->
+  <!-- Candles (clipped to plot area) -->
   <g clip-path="url(#plotClip)">
-    ${candlesSvg.join('\n')}
-    ${trendPath}
+    ${candleElems.join('\n    ')}
   </g>
 
-  <!-- Latest price tag (outside clip so it shows on right edge) -->
-  ${priceTag.join('\n')}
+  <!-- Price tag (outside clip, in right margin) -->
+  ${priceTag.join('\n  ')}
 
-  <!-- X labels -->
-  ${xLabels.join('\n')}
+  <!-- X-axis labels -->
+  ${xLabels.join('\n  ')}
 
-  <!-- Header -->
-  <text x="${pad.left}" y="30" font-family="'Segoe UI',Arial,sans-serif" font-size="18" font-weight="700" fill="#ffffff">${cName} / LYD</text>
-  <text x="${pad.left}" y="52" font-family="'Segoe UI',Arial,sans-serif" font-size="13" fill="#72767d">Libyan Black Market Rate · Last 30 Days</text>
-  <text x="${pad.left + 160}" y="30" font-family="'Segoe UI',Arial,sans-serif" font-size="22" font-weight="700" fill="#ffffff">${sym}${last.close.toFixed(3)} LYD</text>
-  <text x="${pad.left + 280}" y="30" font-family="'Segoe UI',Arial,sans-serif" font-size="14" font-weight="600" fill="${deltaColor}">${deltaTxt}</text>
+  <!-- ── Header ── -->
+  <!-- Currency name + date range -->
+  <text x="${pad.left}" y="26" font-family="'Segoe UI',Arial,sans-serif" font-size="15" font-weight="700" fill="#f9fafb">${svgEscape(cName)} / LYD</text>
+  <text x="${pad.left}" y="46" font-family="'Segoe UI',Arial,sans-serif" font-size="11" fill="#6b7280">${svgEscape(dateRange)}</text>
 
-  <!-- Legend -->
+  <!-- Latest rate (large, right-aligned in header) -->
+  <text x="${pad.left + plotW}" y="26" text-anchor="end" font-family="'Segoe UI',Arial,sans-serif" font-size="20" font-weight="700" fill="#f9fafb">${sym}${last.close.toFixed(2)} LYD</text>
+  <!-- Period delta badge -->
+  <text x="${pad.left + plotW}" y="46" text-anchor="end" font-family="'Segoe UI',Arial,sans-serif" font-size="12" font-weight="600" fill="${deltaColor}">${deltaArrow} ${svgEscape(deltaTxt)}</text>
+
+  <!-- ── Bottom legend ── -->
   ${legend}
-  ${maLegend}
 </svg>`;
 }
 
