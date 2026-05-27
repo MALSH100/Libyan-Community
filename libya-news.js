@@ -1,98 +1,64 @@
 // libya-news.js
 const { SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits } = require('discord.js');
-const axios = require('axios');
-const cheerio = require('cheerio');
+const { getLatestMessage, downloadVideoBuffer } = require('./telegram-client');
 
 // === CONFIGURATION ===
 const TELEGRAM_CHANNEL = process.env.TELEGRAM_CHANNEL || 'libyabreaking';
 const CHECK_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
 const MAX_HISTORY = 50;
 
-// === Core: fetch the latest message from the Telegram channel using public preview ===
-const { TelegramClient } = require('telegram');
-const { StringSession } = require('telegram/sessions');
-
-// You'll need to add these environment variables:
-// TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_SESSION (optional, will be created)
-const apiId = parseInt(process.env.TELEGRAM_API_ID);
-const apiHash = process.env.TELEGRAM_API_HASH;
-const sessionString = process.env.TELEGRAM_SESSION || '';
-
-// One global client instance
-let _client = null;
-
-async function getTelegramClient() {
-    if (_client) return _client;
-    const stringSession = new StringSession(sessionString);
-    _client = new TelegramClient(stringSession, apiId, apiHash, {
-        connectionRetries: 5,
-    });
-    await _client.start({
-        phoneNumber: async () => {
-            // On first run you'll need to provide your number interactively.
-            // After that, the session will be saved.
-            // For Railway, you may need to use a pre‑created session string.
-            throw new Error('Session not initialised. Please run locally to generate session string.');
-        },
-        phoneCode: async () => '',
-        password: async () => '',
-        onError: (err) => console.error(err),
-    });
-    const newSession = _client.session.save();
-    if (newSession !== sessionString) {
-        console.log('[News] New Telegram session string (add to env):', newSession);
-    }
-    return _client;
-}
-
+// === Core: fetch the latest message using GramJS ===
 async function getLatestLibyaNews() {
     try {
-        const client = await getTelegramClient();
-        const channel = await client.getEntity(TELEGRAM_CHANNEL); // e.g., 'libyabreaking'
-        const messages = await client.getMessages(channel, { limit: 1 });
-        if (!messages.length) return null;
-
-        const msg = messages[0];
-        const text = msg.message || '';
+        const message = await getLatestMessage(TELEGRAM_CHANNEL);
+        if (!message) {
+            console.log('[News] No messages found');
+            return null;
+        }
+        
+        const text = message.message || '';
         const lines = text.split('\n');
-        const title = lines[0] ? lines[0].slice(0, 100) : '📢 New post';
+        let title = lines[0] ? lines[0].slice(0, 100) : '📢 New post';
+        if (!title || title === '📢 New post') title = '📢 New post';
+        
         let description = text.slice(0, 2000);
         if (description.length > 2000) description = description.slice(0, 1997) + '...';
-
-        let mediaUrl = null;
-        // Photo
-        if (msg.photo) {
-            // Get the largest photo size
-            const sizes = msg.photo.sizes;
+        
+        // Media handling
+        let mediaBuffer = null;
+        let isVideo = false;
+        
+        // Check for video
+        if (message.video) {
+            mediaBuffer = await downloadVideoBuffer(message);
+            isVideo = true;
+        }
+        // Check for photo (optional, we'll keep as URL for efficiency)
+        let photoUrl = null;
+        if (message.photo && !mediaBuffer) {
+            const sizes = message.photo.sizes;
             if (sizes && sizes.length) {
                 const largest = sizes.reduce((max, sz) => (sz.size > max.size ? sz : max), sizes[0]);
-                // The library gives a file reference; we need to build a download URL
-                // For simplicity, you can use client.downloadMedia to get a buffer and upload to Discord
-                // But for an embed image, we can try to fetch the file reference URL
-                // For now, skip; you can download and re‑upload if needed.
+                photoUrl = largest.url;
             }
         }
-        // Video thumbnail
-        if (msg.video && msg.video.thumb) {
-            mediaUrl = msg.video.thumb.url;
-        } else if (msg.document && msg.document.thumb) {
-            mediaUrl = msg.document.thumb.url;
-        }
-
-        const postUrl = `https://t.me/${TELEGRAM_CHANNEL}/${msg.id}`;
-        const scrapedAt = new Date(msg.date * 1000).toISOString();
-
+        
+        const postUrl = `https://t.me/${TELEGRAM_CHANNEL}/${message.id}`;
+        const scrapedAt = new Date(message.date * 1000).toISOString();
+        
         return {
             title,
             description,
             url: postUrl,
-            mediaUrl,
+            mediaBuffer,
+            photoUrl,
+            isVideo,
             scrapedAt,
-            messageId: msg.id,
+            messageId: message.id,
             channelUsername: TELEGRAM_CHANNEL,
         };
     } catch (err) {
-        console.error('[News] GramJS error:', err.message);
+        console.error('[News] Telegram fetch error:', err.message);
         throw new Error(`Could not fetch latest news from Telegram: ${err.message}`);
     }
 }
@@ -111,7 +77,7 @@ function getNewsData(db, guildId) {
     return db[guildId].__news;
 }
 
-// === Post to Discord ===
+// === Post to Discord with full video embed ===
 async function postNewsUpdate(client, newsState, latestArticle, forced = false) {
     if (!newsState.channelId) return false;
     const channel = await client.channels.fetch(newsState.channelId).catch(() => null);
@@ -129,11 +95,24 @@ async function postNewsUpdate(client, newsState, latestArticle, forced = false) 
         .setTimestamp(new Date(latestArticle.scrapedAt))
         .setFooter({ text: `Posted in ${channelName}`, iconURL: telegramIconUrl });
 
-    if (latestArticle.mediaUrl) {
-        embed.setImage(latestArticle.mediaUrl);
+    // Prepare message options
+    const messageOptions = { embeds: [embed] };
+    
+    // If we have a video buffer, attach it
+    if (latestArticle.isVideo && latestArticle.mediaBuffer) {
+        // Create a filename with timestamp to avoid caching issues
+        const timestamp = Date.now();
+        const attachment = {
+            attachment: latestArticle.mediaBuffer,
+            name: `telegram_video_${timestamp}.mp4`,
+        };
+        messageOptions.files = [attachment];
+        // Embed will automatically show video player when attached
+    } else if (latestArticle.photoUrl) {
+        embed.setImage(latestArticle.photoUrl);
     }
 
-    await channel.send({ embeds: [embed] });
+    await channel.send(messageOptions);
     return true;
 }
 
