@@ -8,7 +8,7 @@ const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || 'YOUR_BOT_TOKEN_HER
 // All public Telegram channels to monitor (with or without @).
 // Add or remove channels from this array at any time.
 const TELEGRAM_CHANNELS = [
-    process.env.TELEGRAM_CHANNEL || '@your_channel_username',
+    process.env.TELEGRAM_CHANNEL || '@libyabreaking',
     '@almasartvlibya',
 ];
 
