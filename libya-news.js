@@ -83,39 +83,34 @@ async function postNewsUpdate(client, newsState, latestArticle, forced = false) 
     const channel = await client.channels.fetch(newsState.channelId).catch(() => null);
     if (!channel || !channel.isTextBased()) return false;
 
-    const channelName = latestArticle.channelUsername ? `@${latestArticle.channelUsername}` : 'Telegram';
-    const telegramIconUrl = 'https://telegram.org/img/t_logo.png';
-
+    // Simple embed without any Telegram branding
     const embed = new EmbedBuilder()
-        .setColor(0x229ED9)
-        .setAuthor({ name: '📢 Telegram Update', iconURL: telegramIconUrl })
+        .setColor(0x229ED9)   // keep the same blue (optional)
         .setTitle(latestArticle.title)
         .setDescription(latestArticle.description)
-        .setURL(latestArticle.url)
-        .setTimestamp(new Date(latestArticle.scrapedAt))
-        .setFooter({ text: `Posted in ${channelName}`, iconURL: telegramIconUrl });
+        .setTimestamp(new Date(latestArticle.scrapedAt));
 
-    // Prepare message options
+    // No author, no footer, no URL.
+
     const messageOptions = { embeds: [embed] };
     
-    // If we have a video buffer, attach it
+    // Attach video buffer if present
     if (latestArticle.isVideo && latestArticle.mediaBuffer) {
-        // Create a filename with timestamp to avoid caching issues
         const timestamp = Date.now();
         const attachment = {
             attachment: latestArticle.mediaBuffer,
-            name: `telegram_video_${timestamp}.mp4`,
+            name: `video_${timestamp}.mp4`,
         };
         messageOptions.files = [attachment];
-        // Embed will automatically show video player when attached
-    } else if (latestArticle.photoUrl) {
+    } 
+    // Else attach photo URL directly in embed
+    else if (latestArticle.photoUrl) {
         embed.setImage(latestArticle.photoUrl);
     }
 
     await channel.send(messageOptions);
     return true;
 }
-
 // === Main update function ===
 async function updateNews({ client, db, saveData, guildId, forcePost = false }) {
     const newsState = getNewsData(db, guildId);
