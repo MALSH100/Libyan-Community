@@ -1,135 +1,136 @@
 // libya-news.js
 const { SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits } = require('discord.js');
+const axios = require('axios');
+const cheerio = require('cheerio');
 
 // === CONFIGURATION ===
-// Your Telegram bot token from @BotFather
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || 'YOUR_BOT_TOKEN_HERE';
-
-// All public Telegram channels to monitor (with or without @).
-// Add or remove channels from this array at any time.
-const TELEGRAM_CHANNELS = [
-    process.env.TELEGRAM_CHANNEL || '@libyabreaking',
-    '@almasartvlibya',
-];
-
+const TELEGRAM_CHANNEL = process.env.TELEGRAM_CHANNEL || 'libyabreaking';
 const CHECK_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
 const MAX_HISTORY = 50;
 
-// Normalise a channel identifier — always prefix with @, lowercase
-function normaliseChannel(ch) {
-    ch = ch.trim();
-    return (ch.startsWith('@') ? ch : `@${ch}`).toLowerCase();
-}
-
-// Build a Set of normalised channel usernames for fast lookup
-const WATCHED_CHANNELS = new Set(TELEGRAM_CHANNELS.map(normaliseChannel));
-
-// === Core: single shared getUpdates call covers ALL channels at once ===
-// One poll → one API call → posts filtered per channel.
-let _lastTelegramUpdateId = null;
-
-async function fetchTelegramUpdates() {
-    const params = new URLSearchParams({
-        timeout: 0,
-        limit: 100,
-        allowed_updates: JSON.stringify(['channel_post']),
-    });
-    if (_lastTelegramUpdateId !== null) {
-        params.set('offset', _lastTelegramUpdateId + 1);
-    }
-    const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates?${params}`;
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`Telegram getUpdates HTTP ${res.status}`);
-    const data = await res.json();
-    if (!data.ok) throw new Error(`Telegram API error: ${data.description}`);
-    return data.result;
-}
-
-// Returns a Map<channelUsername, latestArticle> — one entry per channel
-// that had at least one new post. Channels with no new posts are absent.
-async function getLatestNewsByChannel() {
+// === Core: fetch the latest message from the Telegram channel using public preview ===
+async function getLatestLibyaNews() {
     try {
-        const updates = await fetchTelegramUpdates();
+        const url = `https://t.me/s/${TELEGRAM_CHANNEL}`;
+        const { data: html } = await axios.get(url, {
+            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+            timeout: 15000
+        });
+        const $ = cheerio.load(html);
 
-        if (updates.length > 0) {
-            _lastTelegramUpdateId = updates[updates.length - 1].update_id;
+        // Find all message widgets
+        const messages = $('.tgme_widget_message');
+        if (!messages.length) {
+            console.log('[News] No messages found on the page');
+            return null;
         }
 
-        // Group channel_post updates by channel username
-        const postsByChannel = new Map();
-        for (const u of updates) {
-            if (!u.channel_post) continue;
-            const chat = u.channel_post.chat;
-            const username = (chat.username || '').toLowerCase();
-            if (!username) continue;
-            if (!WATCHED_CHANNELS.has(`@${username}`)) continue;
-            if (!postsByChannel.has(username)) postsByChannel.set(username, []);
-            postsByChannel.get(username).push(u.channel_post);
+        // Find the newest non-pinned message by comparing datetime
+        let newestMsg = null;
+        let newestDate = null;
+        messages.each((i, elem) => {
+            const $msg = $(elem);
+            if ($msg.hasClass('tgme_widget_message_pinned')) return;
+            const timeElem = $msg.find('.tgme_widget_message_date time');
+            const dateTime = timeElem.attr('datetime');
+            if (dateTime) {
+                const msgDate = new Date(dateTime);
+                if (!newestDate || msgDate > newestDate) {
+                    newestDate = msgDate;
+                    newestMsg = $msg;
+                }
+            } else if (!newestMsg) {
+                newestMsg = $msg;
+            }
+        });
+        if (!newestMsg) newestMsg = messages.first();
+
+        const dataPost = newestMsg.attr('data-post');
+        const messageId = dataPost ? dataPost.split('/').pop() : '';
+
+        // Extract full text (preserve line breaks)
+        const textElem = newestMsg.find('.tgme_widget_message_text');
+        let fullText = '';
+        if (textElem.length) {
+            // Get HTML content
+            fullText = textElem.html() || '';
+            // Convert <br> to newline, then strip remaining HTML
+            fullText = fullText.replace(/<br\s*\/?>/g, '\n').replace(/<[^>]*>/g, '');
+            fullText = fullText.trim();
+        }
+        if (!fullText) fullText = '📷 Media post (no text)';
+
+        // Discord description limit: 4096, but we'll keep under 2000 to be safe
+        let description = fullText;
+        if (description.length > 2000) description = description.slice(0, 1997) + '...';
+
+        // Title: first line of the post
+        const firstLine = fullText.split('\n')[0];
+        let title = firstLine.length > 100 ? firstLine.slice(0, 97) + '...' : firstLine;
+        if (!title || title === '📷 Media post (no text)') title = '📢 New post';
+
+// Extract media URL (photo or video thumbnail)
+        // Helper: extract url("...") from background-image style
+        function extractBgUrl(style) {
+            if (!style) return null;
+            const match = style.match(/url\(["']?(.*?)["']?\)/);
+            return match ? match[1] : null;
         }
 
-        // For each channel, keep only the newest post and parse it
-        const result = new Map();
-        for (const [username, posts] of postsByChannel) {
-            posts.sort((a, b) => b.date - a.date);
-            result.set(username, parseTelegramPost(posts[0]));
+        // Extract media URL (photo or video thumbnail)
+        let mediaUrl = null;
+
+        // 1. PHOTO: background-image on .tgme_widget_message_photo_wrap
+        const photoWrap = newestMsg.find('.tgme_widget_message_photo_wrap');
+        if (photoWrap.length) {
+            const style = photoWrap.attr('style');
+            mediaUrl = extractBgUrl(style);
         }
 
-        return result; // empty Map = no new posts this cycle
+        // 2. VIDEO: background-image on .tgme_widget_message_video_thumb
+        if (!mediaUrl) {
+            const videoThumb = newestMsg.find('.tgme_widget_message_video_thumb');
+            if (videoThumb.length) {
+                const style = videoThumb.attr('style');
+                mediaUrl = extractBgUrl(style);
+            }
+        }
+
+        // 3. Fallback: any element with background-image
+        if (!mediaUrl) {
+            const anyMedia = newestMsg.find('[style*="background-image"]');
+            if (anyMedia.length) {
+                const style = anyMedia.first().attr('style');
+                mediaUrl = extractBgUrl(style);
+            }
+        }
+
+        // Convert protocol-relative URLs to https
+        if (mediaUrl && mediaUrl.startsWith('//')) {
+            mediaUrl = 'https:' + mediaUrl;
+        }
+
+        console.log(`[News] Media URL extracted: ${mediaUrl || 'none'}`);
+
+console.log(`[News] Media URL extracted: ${mediaUrl || 'none'}`);
+
+        const postUrl = `https://t.me/${TELEGRAM_CHANNEL}/${messageId}`;
+        const timeElem = newestMsg.find('.tgme_widget_message_date time');
+        const dateTime = timeElem.attr('datetime');
+        const scrapedAt = dateTime ? new Date(dateTime).toISOString() : new Date().toISOString();
+
+        return {
+            title,
+            description,
+            url: postUrl,
+            mediaUrl,
+            scrapedAt,
+            messageId,
+            channelUsername: TELEGRAM_CHANNEL,
+        };
     } catch (err) {
-        console.error('[News] Telegram fetch error:', err.message);
-        throw new Error('Could not fetch latest news from Telegram.');
-    }
-}
-
-// === Parse a Telegram channel_post into a normalised article object ===
-function parseTelegramPost(post) {
-    const chatUsername = post.chat.username || '';
-    const msgId        = post.message_id;
-
-    const url = chatUsername
-        ? `https://t.me/${chatUsername}/${msgId}`
-        : null;
-
-    const rawText = post.text || post.caption || '';
-    const lines   = rawText.split('\n').map(l => l.trim()).filter(Boolean);
-    const title   = lines[0]
-        ? (lines[0].length > 120 ? lines[0].slice(0, 117) + '...' : lines[0])
-        : '📢 New post';
-
-    let description = lines.slice(1).join(' ').trim();
-    if (description.length > 250) description = description.slice(0, 247) + '...';
-    if (!description) description = 'Click the link to read the full post on Telegram.';
-
-    let imageFileId = null;
-    if (post.photo && post.photo.length > 0) {
-        const largest = post.photo.reduce((best, p) =>
-            (p.file_size || 0) > (best.file_size || 0) ? p : best
-        , post.photo[0]);
-        imageFileId = largest.file_id;
-    } else if (post.document?.mime_type?.startsWith('image/')) {
-        imageFileId = post.document.file_id;
-    }
-
-    return {
-        title,
-        description,
-        url,
-        imageFileId,
-        scrapedAt:       new Date(post.date * 1000).toISOString(),
-        messageId:       msgId,
-        channelUsername: chatUsername,
-    };
-}
-
-// === Resolve a Telegram file_id to a public HTTPS URL ===
-async function resolveTelegramFileUrl(fileId) {
-    try {
-        const res  = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getFile?file_id=${fileId}`);
-        const data = await res.json();
-        if (!data.ok || !data.result?.file_path) return null;
-        return `https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/${data.result.file_path}`;
-    } catch {
-        return null;
+        console.error('[News] Scrape error:', err.message);
+        throw new Error(`Could not fetch latest news from Telegram: ${err.message}`);
     }
 }
 
@@ -139,44 +140,35 @@ function getNewsData(db, guildId) {
     if (!db[guildId].__news) {
         db[guildId].__news = {
             channelId: null,
-            // Per-source tracking: { [channelUsername]: lastPostedUrl }
-            lastPostedBySource: {},
+            lastPostedUrl: null,
             lastCheckedAt: null,
             history: [],
         };
     }
-    // Migrate old single-key format if present
-    if (db[guildId].__news.lastPostedUrl !== undefined && !db[guildId].__news.lastPostedBySource) {
-        db[guildId].__news.lastPostedBySource = {};
-        delete db[guildId].__news.lastPostedUrl;
-    }
     return db[guildId].__news;
 }
 
-// === Post a single article embed to Discord ===
-async function postNewsUpdate(client, newsState, article) {
+// === Post to Discord ===
+async function postNewsUpdate(client, newsState, latestArticle, forced = false) {
     if (!newsState.channelId) return false;
     const channel = await client.channels.fetch(newsState.channelId).catch(() => null);
     if (!channel || !channel.isTextBased()) return false;
 
-    let imageUrl = null;
-    if (article.imageFileId) {
-        imageUrl = await resolveTelegramFileUrl(article.imageFileId);
-    }
-
-    const channelName    = article.channelUsername ? `@${article.channelUsername}` : 'Telegram';
+    const channelName = latestArticle.channelUsername ? `@${latestArticle.channelUsername}` : 'Telegram';
     const telegramIconUrl = 'https://telegram.org/img/t_logo.png';
 
     const embed = new EmbedBuilder()
         .setColor(0x229ED9)
-        .setTitle(article.title)
-        .setDescription(article.description)
-        .setTimestamp(new Date(article.scrapedAt))
-        .setFooter({ text: `Posted in ${channelName}`, iconURL: telegramIconUrl })
-        .setAuthor({ name: '📢 Libya Channel Update' });
+        .setAuthor({ name: '📢 Telegram Update', iconURL: telegramIconUrl })
+        .setTitle(latestArticle.title)
+        .setDescription(latestArticle.description)
+        .setURL(latestArticle.url)
+        .setTimestamp(new Date(latestArticle.scrapedAt))
+        .setFooter({ text: `Posted in ${channelName}`, iconURL: telegramIconUrl });
 
-    if (article.url)  embed.setURL(article.url);
-    if (imageUrl)     embed.setImage(imageUrl);
+    if (latestArticle.mediaUrl) {
+        embed.setImage(latestArticle.mediaUrl);
+    }
 
     await channel.send({ embeds: [embed] });
     return true;
@@ -185,40 +177,30 @@ async function postNewsUpdate(client, newsState, article) {
 // === Main update function ===
 async function updateNews({ client, db, saveData, guildId, forcePost = false }) {
     const newsState = getNewsData(db, guildId);
-    newsState.lastCheckedAt  = new Date().toISOString();
-    newsState.lastPostedBySource = newsState.lastPostedBySource || {};
-    newsState.history        = newsState.history || [];
+    newsState.lastCheckedAt = new Date().toISOString();
 
-    // One API call fetches updates for all channels simultaneously
-    const newsByChannel = await getLatestNewsByChannel();
-
-    let anyPosted = false;
-    let anyNew    = false;
-
-    for (const [username, article] of newsByChannel) {
-        const articleKey  = article.url || String(article.messageId);
-        const lastPosted  = newsState.lastPostedBySource[username] || null;
-        const isNew       = articleKey !== lastPosted;
-
-        console.log(`[News] Guild ${guildId} | @${username}: isNew=${isNew}, last=${lastPosted}, current=${articleKey}`);
-
-        newsState.history.push(article);
-
-        if (forcePost || isNew) {
-            const posted = await postNewsUpdate(client, newsState, article);
-            if (posted) {
-                newsState.lastPostedBySource[username] = articleKey;
-                anyPosted = true;
-            }
-        }
-
-        if (isNew) anyNew = true;
+    const latestArticle = await getLatestLibyaNews();
+    if (!latestArticle) {
+        saveData(guildId);
+        return { latestArticle: null, posted: false, isNew: false };
     }
 
-    newsState.history = newsState.history.slice(-MAX_HISTORY);
-    saveData(guildId);
+    const articleKey = latestArticle.url;
+    const isNew = articleKey !== newsState.lastPostedUrl;
 
-    return { posted: anyPosted, isNew: anyNew, channelCount: newsByChannel.size };
+    console.log(`[News] Auto check for guild ${guildId}: isNew=${isNew}, lastUrl=${newsState.lastPostedUrl}, currentUrl=${articleKey}`);
+
+    newsState.history = newsState.history || [];
+    newsState.history.push(latestArticle);
+    newsState.history = newsState.history.slice(-MAX_HISTORY);
+
+    let posted = false;
+    if (forcePost || isNew) {
+        posted = await postNewsUpdate(client, newsState, latestArticle, forcePost);
+        if (posted) newsState.lastPostedUrl = articleKey;
+    }
+    saveData(guildId);
+    return { latestArticle, posted, isNew };
 }
 
 // === Admin helpers ===
@@ -279,7 +261,7 @@ module.exports = function initLibyaNews({ client, db, saveData }) {
             for (const guild of client.guilds.cache.values()) {
                 const newsState = getNewsData(db, guild.id);
                 if (newsState.channelId) {
-                    console.log(`📰 News updates active for guild ${guild.name} → channel ${newsState.channelId} | watching: ${[...WATCHED_CHANNELS].join(', ')}`);
+                    console.log(`📰 News updates active for guild ${guild.name} → channel ${newsState.channelId}`);
                     scheduleGuild(guild.id);
                 }
             }
@@ -302,8 +284,7 @@ module.exports = function initLibyaNews({ client, db, saveData }) {
                 saveData(guild.id);
                 scheduleGuild(guild.id);
 
-                const watchList = [...WATCHED_CHANNELS].join(', ');
-                await safeReply(interaction, { content: `📰 Updates from ${watchList} will post in ${channel}. Fetching latest posts...`, flags: 64 });
+                await safeReply(interaction, { content: `📰 News updates will post in ${channel}. Fetching latest news...`, flags: 64 });
                 await updateNews({ client, db, saveData, guildId: guild.id, forcePost: true });
                 return;
             }
@@ -312,9 +293,7 @@ module.exports = function initLibyaNews({ client, db, saveData }) {
                 if (!isAdmin(interaction)) return safeReply(interaction, { content: '❌ Only admins can refresh news.', flags: 64 });
                 await safeDefer(interaction, { flags: 64 });
                 const result = await updateNews({ client, db, saveData, guildId: guild.id, forcePost: true });
-                const statusText = result.posted
-                    ? `✅ Posted updates from ${result.channelCount} channel(s).`
-                    : 'ℹ️ No new posts found (or no Discord channel set).';
+                const statusText = result.posted ? '✅ Posted to configured channel.' : 'ℹ️ No new article found (or no channel set).';
                 return safeReply(interaction, { content: `📰 News refresh complete. ${statusText}` });
             }
         } catch (err) {
