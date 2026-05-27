@@ -17,7 +17,7 @@ async function getLatestLibyaNews() {
             timeout: 15000
         });
         const $ = cheerio.load(html);
-        
+
         // Find all message widgets
         const messages = $('.tgme_widget_message');
         if (!messages.length) {
@@ -30,9 +30,7 @@ async function getLatestLibyaNews() {
         let newestDate = null;
         messages.each((i, elem) => {
             const $msg = $(elem);
-            // Skip pinned messages
             if ($msg.hasClass('tgme_widget_message_pinned')) return;
-            
             const timeElem = $msg.find('.tgme_widget_message_date time');
             const dateTime = timeElem.attr('datetime');
             if (dateTime) {
@@ -42,35 +40,50 @@ async function getLatestLibyaNews() {
                     newestMsg = $msg;
                 }
             } else if (!newestMsg) {
-                // fallback to first non-pinned if no date
                 newestMsg = $msg;
             }
         });
-
-        // If still no message, fallback to the first message (may be pinned)
-        if (!newestMsg) {
-            newestMsg = messages.first();
-        }
+        if (!newestMsg) newestMsg = messages.first();
 
         const dataPost = newestMsg.attr('data-post');
         const messageId = dataPost ? dataPost.split('/').pop() : '';
 
-        // Extract text
+        // Extract full text (preserve line breaks)
         const textElem = newestMsg.find('.tgme_widget_message_text');
-        let text = textElem.text().trim();
-        if (!text) {
-            text = '📷 Media post';
+        let fullText = '';
+        if (textElem.length) {
+            // Get HTML content
+            fullText = textElem.html() || '';
+            // Convert <br> to newline, then strip remaining HTML
+            fullText = fullText.replace(/<br\s*\/?>/g, '\n').replace(/<[^>]*>/g, '');
+            fullText = fullText.trim();
         }
-        const lines = text.split('\n').filter(l => l.trim());
-        const title = lines[0] ? lines[0].slice(0, 120) : '📢 New post';
-        let description = lines.slice(1).join(' ').slice(0, 250);
-        if (!description) description = 'Click the link to read the full post on Telegram.';
+        if (!fullText) fullText = '📷 Media post (no text)';
 
-        // Extract image URL
-        let imageUrl = null;
-        const photoElem = newestMsg.find('.tgme_widget_message_photo img');
-        if (photoElem.length) {
-            imageUrl = photoElem.attr('src');
+        // Discord description limit: 4096, but we'll keep under 2000 to be safe
+        let description = fullText;
+        if (description.length > 2000) description = description.slice(0, 1997) + '...';
+
+        // Title: first line of the post
+        const firstLine = fullText.split('\n')[0];
+        let title = firstLine.length > 100 ? firstLine.slice(0, 97) + '...' : firstLine;
+        if (!title || title === '📷 Media post (no text)') title = '📢 New post';
+
+        // Extract media URL (photo or video thumbnail)
+        let mediaUrl = null;
+        const photoImg = newestMsg.find('.tgme_widget_message_photo img');
+        if (photoImg.length) {
+            mediaUrl = photoImg.attr('src');
+        } else {
+            const videoElem = newestMsg.find('.tgme_widget_message_video');
+            if (videoElem.length) {
+                const poster = videoElem.attr('poster');
+                if (poster) mediaUrl = poster;
+                else {
+                    const videoThumb = videoElem.find('img');
+                    if (videoThumb.length) mediaUrl = videoThumb.attr('src');
+                }
+            }
         }
 
         const postUrl = `https://t.me/${TELEGRAM_CHANNEL}/${messageId}`;
@@ -82,7 +95,7 @@ async function getLatestLibyaNews() {
             title,
             description,
             url: postUrl,
-            imageUrl,
+            mediaUrl,
             scrapedAt,
             messageId,
             channelUsername: TELEGRAM_CHANNEL,
@@ -118,15 +131,15 @@ async function postNewsUpdate(client, newsState, latestArticle, forced = false) 
 
     const embed = new EmbedBuilder()
         .setColor(0x229ED9)
+        .setAuthor({ name: '📢 Telegram Update', iconURL: telegramIconUrl })
         .setTitle(latestArticle.title)
         .setDescription(latestArticle.description)
         .setURL(latestArticle.url)
         .setTimestamp(new Date(latestArticle.scrapedAt))
-        .setFooter({ text: `Posted in ${channelName}`, iconURL: telegramIconUrl })
-        .setAuthor({ name: '📢 Libya Channel Update' });
+        .setFooter({ text: `Posted in ${channelName}`, iconURL: telegramIconUrl });
 
-    if (latestArticle.imageUrl) {
-        embed.setImage(latestArticle.imageUrl);
+    if (latestArticle.mediaUrl) {
+        embed.setImage(latestArticle.mediaUrl);
     }
 
     await channel.send({ embeds: [embed] });
