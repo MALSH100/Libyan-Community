@@ -9,115 +9,78 @@ const CHECK_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
 const MAX_HISTORY = 50;
 
 // === Core: fetch the latest message from the Telegram channel using public preview ===
+const { TelegramClient } = require('telegram');
+const { StringSession } = require('telegram/sessions');
+
+// You'll need to add these environment variables:
+// TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_SESSION (optional, will be created)
+const apiId = parseInt(process.env.TELEGRAM_API_ID);
+const apiHash = process.env.TELEGRAM_API_HASH;
+const sessionString = process.env.TELEGRAM_SESSION || '';
+
+// One global client instance
+let _client = null;
+
+async function getTelegramClient() {
+    if (_client) return _client;
+    const stringSession = new StringSession(sessionString);
+    _client = new TelegramClient(stringSession, apiId, apiHash, {
+        connectionRetries: 5,
+    });
+    await _client.start({
+        phoneNumber: async () => {
+            // On first run you'll need to provide your number interactively.
+            // After that, the session will be saved.
+            // For Railway, you may need to use a pre‑created session string.
+            throw new Error('Session not initialised. Please run locally to generate session string.');
+        },
+        phoneCode: async () => '',
+        password: async () => '',
+        onError: (err) => console.error(err),
+    });
+    const newSession = _client.session.save();
+    if (newSession !== sessionString) {
+        console.log('[News] New Telegram session string (add to env):', newSession);
+    }
+    return _client;
+}
+
 async function getLatestLibyaNews() {
     try {
-        const url = `https://t.me/s/${TELEGRAM_CHANNEL}`;
-        const { data: html } = await axios.get(url, {
-            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
-            timeout: 15000
-        });
-        const $ = cheerio.load(html);
+        const client = await getTelegramClient();
+        const channel = await client.getEntity(TELEGRAM_CHANNEL); // e.g., 'libyabreaking'
+        const messages = await client.getMessages(channel, { limit: 1 });
+        if (!messages.length) return null;
 
-        // Find all message widgets
-        const messages = $('.tgme_widget_message');
-        if (!messages.length) {
-            console.log('[News] No messages found on the page');
-            return null;
-        }
-
-        // Find the newest non-pinned message by comparing datetime
-        let newestMsg = null;
-        let newestDate = null;
-        messages.each((i, elem) => {
-            const $msg = $(elem);
-            if ($msg.hasClass('tgme_widget_message_pinned')) return;
-            const timeElem = $msg.find('.tgme_widget_message_date time');
-            const dateTime = timeElem.attr('datetime');
-            if (dateTime) {
-                const msgDate = new Date(dateTime);
-                if (!newestDate || msgDate > newestDate) {
-                    newestDate = msgDate;
-                    newestMsg = $msg;
-                }
-            } else if (!newestMsg) {
-                newestMsg = $msg;
-            }
-        });
-        if (!newestMsg) newestMsg = messages.first();
-
-        const dataPost = newestMsg.attr('data-post');
-        const messageId = dataPost ? dataPost.split('/').pop() : '';
-
-        // Extract full text (preserve line breaks)
-        const textElem = newestMsg.find('.tgme_widget_message_text');
-        let fullText = '';
-        if (textElem.length) {
-            // Get HTML content
-            fullText = textElem.html() || '';
-            // Convert <br> to newline, then strip remaining HTML
-            fullText = fullText.replace(/<br\s*\/?>/g, '\n').replace(/<[^>]*>/g, '');
-            fullText = fullText.trim();
-        }
-        if (!fullText) fullText = '📷 Media post (no text)';
-
-        // Discord description limit: 4096, but we'll keep under 2000 to be safe
-        let description = fullText;
+        const msg = messages[0];
+        const text = msg.message || '';
+        const lines = text.split('\n');
+        const title = lines[0] ? lines[0].slice(0, 100) : '📢 New post';
+        let description = text.slice(0, 2000);
         if (description.length > 2000) description = description.slice(0, 1997) + '...';
 
-        // Title: first line of the post
-        const firstLine = fullText.split('\n')[0];
-        let title = firstLine.length > 100 ? firstLine.slice(0, 97) + '...' : firstLine;
-        if (!title || title === '📷 Media post (no text)') title = '📢 New post';
-
-// Extract media URL (photo or video thumbnail)
-        // Helper: extract url("...") from background-image style
-        function extractBgUrl(style) {
-            if (!style) return null;
-            const match = style.match(/url\(["']?(.*?)["']?\)/);
-            return match ? match[1] : null;
-        }
-
-        // Extract media URL (photo or video thumbnail)
         let mediaUrl = null;
-
-        // 1. PHOTO: background-image on .tgme_widget_message_photo_wrap
-        const photoWrap = newestMsg.find('.tgme_widget_message_photo_wrap');
-        if (photoWrap.length) {
-            const style = photoWrap.attr('style');
-            mediaUrl = extractBgUrl(style);
-        }
-
-        // 2. VIDEO: background-image on .tgme_widget_message_video_thumb
-        if (!mediaUrl) {
-            const videoThumb = newestMsg.find('.tgme_widget_message_video_thumb');
-            if (videoThumb.length) {
-                const style = videoThumb.attr('style');
-                mediaUrl = extractBgUrl(style);
+        // Photo
+        if (msg.photo) {
+            // Get the largest photo size
+            const sizes = msg.photo.sizes;
+            if (sizes && sizes.length) {
+                const largest = sizes.reduce((max, sz) => (sz.size > max.size ? sz : max), sizes[0]);
+                // The library gives a file reference; we need to build a download URL
+                // For simplicity, you can use client.downloadMedia to get a buffer and upload to Discord
+                // But for an embed image, we can try to fetch the file reference URL
+                // For now, skip; you can download and re‑upload if needed.
             }
         }
-
-        // 3. Fallback: any element with background-image
-        if (!mediaUrl) {
-            const anyMedia = newestMsg.find('[style*="background-image"]');
-            if (anyMedia.length) {
-                const style = anyMedia.first().attr('style');
-                mediaUrl = extractBgUrl(style);
-            }
+        // Video thumbnail
+        if (msg.video && msg.video.thumb) {
+            mediaUrl = msg.video.thumb.url;
+        } else if (msg.document && msg.document.thumb) {
+            mediaUrl = msg.document.thumb.url;
         }
 
-        // Convert protocol-relative URLs to https
-        if (mediaUrl && mediaUrl.startsWith('//')) {
-            mediaUrl = 'https:' + mediaUrl;
-        }
-
-        console.log(`[News] Media URL extracted: ${mediaUrl || 'none'}`);
-
-console.log(`[News] Media URL extracted: ${mediaUrl || 'none'}`);
-
-        const postUrl = `https://t.me/${TELEGRAM_CHANNEL}/${messageId}`;
-        const timeElem = newestMsg.find('.tgme_widget_message_date time');
-        const dateTime = timeElem.attr('datetime');
-        const scrapedAt = dateTime ? new Date(dateTime).toISOString() : new Date().toISOString();
+        const postUrl = `https://t.me/${TELEGRAM_CHANNEL}/${msg.id}`;
+        const scrapedAt = new Date(msg.date * 1000).toISOString();
 
         return {
             title,
@@ -125,11 +88,11 @@ console.log(`[News] Media URL extracted: ${mediaUrl || 'none'}`);
             url: postUrl,
             mediaUrl,
             scrapedAt,
-            messageId,
+            messageId: msg.id,
             channelUsername: TELEGRAM_CHANNEL,
         };
     } catch (err) {
-        console.error('[News] Scrape error:', err.message);
+        console.error('[News] GramJS error:', err.message);
         throw new Error(`Could not fetch latest news from Telegram: ${err.message}`);
     }
 }
