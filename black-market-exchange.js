@@ -88,7 +88,14 @@ function parseRatesFromText(text) {
   // Log the raw text for debugging
   console.log('[Exchange] Page text sample (first 500 chars):\n', text.slice(0, 500));
   
+  // Check for holiday or no-update message
+  if (text.includes('no black market exchange rate updates') || text.includes('holiday')) {
+    console.log('[Exchange] Holiday or no update detected – returning null');
+    return null;
+  }
+  
   // Method 1: Direct patterns like "$1=08.32 LYD"
+  ...
   const directPatterns = [
     { currency: 'USD', regex: /\$1\s*=\s*(\d{1,2}(?:[.,]\d{1,2})?)\s*LYD/i },
     { currency: 'EUR', regex: /€1\s*=\s*(\d{1,2}(?:[.,]\d{1,2})?)\s*LYD/i },
@@ -163,7 +170,12 @@ async function scrapeFacebookRates() {
     }
     const text = await page.locator('body').innerText({ timeout: 15000 });
     const rates = parseRatesFromText(text);
-    if (!rates) throw new Error('Could not find USD/EUR/GBP rates.');
+    if (!rates) {
+      if (text.includes('no black market exchange rate updates') || text.includes('holiday')) {
+        throw new Error('No rates posted today (holiday or break). Skipping update.');
+      }
+      throw new Error('Could not find USD/EUR/GBP rates.');
+    }
     return { rates, scrapedAt: new Date().toISOString(), sourceUrl: SOURCE_URL, sample: text.slice(0, 1200) };
   } catch (error) {
     console.error('[Exchange] Scrape failed:', error.message);
@@ -518,8 +530,20 @@ async function postUpdate(client, guildId, exchangeData, latest, forced = false)
 async function updateRates({ client, db, saveData, guildId, forcePost = false }) {
   const exchangeData = getExchangeData(db, guildId);
   exchangeData.lastCheckedAt = new Date().toISOString();
-  const latest = await scrapeFacebookRates();
+  
+  let latest;
+  try {
+    latest = await scrapeFacebookRates();
+  } catch (err) {
+    if (err.message && err.message.includes('No rates posted today')) {
+      console.log('[Exchange] Skipping update:', err.message);
+      return { latest: null, posted: false, changed: false };
+    }
+    throw err;
+  }
+  
   const key = rateKey(latest.rates);
+  ...
   const changed = key !== exchangeData.lastPostedKey;
   exchangeData.lastRates = latest;
   exchangeData.history = exchangeData.history || [];
