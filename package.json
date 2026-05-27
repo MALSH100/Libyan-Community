@@ -12,6 +12,7 @@
     "playwright": "^1.52.0",
     "rss-parser": "^3.13.0",
     "telegram-scraper": "^1.0.0",
-      "telegram": "^2.0.0"
+      "telegram": "^2.0.0",
+      "@vitalets/google-translate-api": "^9.0.0"
   }
 }
