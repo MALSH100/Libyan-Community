@@ -470,8 +470,8 @@ let _allCommands = null; // reset on each startup — always re-registers
 const getPokemonCommands = require('./pokemon-commands');
 const initYarayt = require('./yarayt');
 const initBlackMarketExchange = require('./black-market-exchange');
-const initLibyaNews = require('./libya-news');
-const initJobs = require('./jobs');
+//const initLibyaNews = require('./libya-news');
+//const initJobs = require('./jobs');
 //const initTranslator = require('./translator');
 
 function getAllCommands() {
@@ -1981,10 +1981,10 @@ initYarayt({ client, db, saveData, awardLP });
 initBlackMarketExchange({ client, db, saveData });
 
 // Libya News System
-initLibyaNews({ client, db, saveData });
+//initLibyaNews({ client, db, saveData });
 
 //Job System
-initJobs({ client, db, saveData });
+//initJobs({ client, db, saveData });
 
 // Translator (reaction-based Arabic → English)
 //initTranslator(client, db, saveData);
