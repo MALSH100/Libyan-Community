@@ -472,6 +472,7 @@ const initYarayt = require('./yarayt');
 const initBlackMarketExchange = require('./black-market-exchange');
 const initLibyaNews = require('./libya-news');
 const initJobs = require('./jobs');
+const initTranslator = require('./translator'); 
 
 function getAllCommands() {
   if (_allCommands) return _allCommands;
@@ -1978,6 +1979,9 @@ initLibyaNews({ client, db, saveData });
 
 //Job System
 initJobs({ client, db, saveData });
+
+// Translator (reaction-based Arabic → English)
+initTranslator(client);
 
 // ─── Login ────────────────────────────────────────────────────────────────────
 
