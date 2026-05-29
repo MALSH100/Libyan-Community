@@ -7,8 +7,9 @@ const MAX_HISTORY = 50;
 
 // Colour per source for embed visuals
 const SOURCE_COLORS = {
-    opensooq:   0x2B5B84,
-    hiringcafe: 0x1DB954,
+    opensooq:    0x2B5B84,
+    hiringcafe:  0x1DB954,
+    libyanjobs:  0xE63946,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -364,6 +365,123 @@ async function fetchHiringCafeJobs() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Source 3 — LibyanJobs.ly (axios — no JS rendering needed)
+//
+// libyanjobs.ly is a standard WordPress/PHP site that renders job cards in
+// plain HTML, so we can use a simple axios GET instead of Playwright.
+// The listing page: https://libyanjobs.ly/jobs/?display=list
+//
+// EXACT SELECTORS (from real devtools HTML):
+//   Card root:  article[data-url]  (class includes "loadmore-item")
+//   URL:        article[data-url]          → full absolute URL
+//   Title:      h3.loop-item-title a       → job title (may be Arabic)
+//   Company:    span.job-company a span    → company name
+//   Location:   span.job-location a em     → "Tripoli / طرابلس"
+//   Timestamp:  time.entry-date[datetime]  → ISO 8601, e.g. "2026-05-29T17:36:33+02:00"
+//   Ago text:   span.job-date-ago          → "6 hours ago" (fallback only)
+//   Job ID:     last path segment of data-url, e.g. "business-development-551925"
+// ─────────────────────────────────────────────────────────────────────────────
+async function fetchLibyanJobsJobs() {
+    const LIST_URL = 'https://libyanjobs.ly/jobs/?display=list';
+
+    try {
+        const axios    = require('axios');
+        const cheerio  = require('cheerio');
+
+        const response = await axios.get(LIST_URL, {
+            timeout: 20000,
+            headers: {
+                'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+                'Accept':          'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-GB,en;q=0.9',
+            },
+        });
+
+        const $ = cheerio.load(response.data);
+
+        function parseRelative(text) {
+            const m = (text || '').match(/(\d+)\s+(minute|hour|day|week)s?/i);
+            if (!m) return null;
+            const v = parseInt(m[1]);
+            const u = m[2].toLowerCase();
+            if (u === 'minute') return Date.now() - v * 60_000;
+            if (u === 'hour')   return Date.now() - v * 3_600_000;
+            if (u === 'day')    return Date.now() - v * 86_400_000;
+            if (u === 'week')   return Date.now() - v * 604_800_000;
+            return null;
+        }
+
+        const jobs = [];
+
+        $('article[data-url]').each((_, el) => {
+            const art = $(el);
+
+            // ── URL ───────────────────────────────────────────────────────────
+            const url = art.attr('data-url');
+            if (!url) return;
+
+            // ── Title ─────────────────────────────────────────────────────────
+            const title = art.find('h3.loop-item-title a').text().trim();
+            if (!title) return;
+
+            // ── Company ───────────────────────────────────────────────────────
+            const company = art.find('span.job-company a span').first().text().trim();
+
+            // ── Location ──────────────────────────────────────────────────────
+            // "Tripoli / طرابلس" — keep the full string, it's informative
+            const location = art.find('span.job-location a em').text().trim() || 'Libya';
+
+            // ── Timestamp ─────────────────────────────────────────────────────
+            // Prefer the ISO datetime attribute on <time> — exact to the second.
+            // Fall back to the "X hours ago" badge text if datetime is missing.
+            let postedAt = null;
+            const datetimeAttr = art.find('time.entry-date').attr('datetime');
+            if (datetimeAttr) {
+                const parsed = Date.parse(datetimeAttr);
+                if (!isNaN(parsed)) postedAt = parsed;
+            }
+            if (postedAt === null) {
+                const agoText = art.find('span.job-date-ago').text().trim();
+                postedAt = parseRelative(agoText) ?? Date.now();
+            }
+
+            // ── Job ID ────────────────────────────────────────────────────────
+            // Last non-empty path segment of the URL, e.g. "business-development-551925"
+            const idSlug = url.split('/').filter(Boolean).pop() || String(Date.now());
+
+            jobs.push({
+                id:       `libyanjobs_${idSlug}`,
+                title,
+                url,
+                location,
+                company,
+                postedAt,
+                source:   'libyanjobs',
+            });
+        });
+
+        if (!jobs.length) {
+            console.warn('[Jobs] LibyanJobs: no cards found');
+            return [];
+        }
+
+        jobs.sort((a, b) => b.postedAt - a.postedAt);
+
+        console.log(`[Jobs] LibyanJobs: found ${jobs.length} jobs, latest: "${jobs[0].title}" @ ${jobs[0].location}`);
+
+        const top = jobs[0];
+        return [{
+            ...top,
+            postedAt: new Date(top.postedAt),
+        }];
+
+    } catch (err) {
+        console.error('[Jobs] LibyanJobs error:', err.message);
+        return [];
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Combine all sources → return the single most recent job across all of them.
 // Each source runs in parallel; failures are isolated.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -371,6 +489,7 @@ async function getLatestJob() {
     const results = await Promise.allSettled([
         fetchOpenSooqJobs(),
         fetchHiringCafeJobs(),
+        fetchLibyanJobsJobs(),
     ]);
 
     const allJobs = [];
@@ -429,8 +548,9 @@ async function postJobsUpdate(client, jobsState, job) {
 
     // Friendly source label
     const sourceLabels = {
-        opensooq:  '🔵 OpenSooq',
-        hiringcafe:'🟢 Hiring.cafe',
+        opensooq:   '🔵 OpenSooq',
+        hiringcafe: '🟢 Hiring.cafe',
+        libyanjobs: '🔴 LibyanJobs',
     };
     const sourceLabel = sourceLabels[job.source] || job.source;
 
