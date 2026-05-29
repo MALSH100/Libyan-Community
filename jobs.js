@@ -630,15 +630,17 @@ function getJobsData(db, guildId) {
             history: [],
         };
     }
-    // Migrate old data from previous versions
+    // Ensure all array fields exist — must come BEFORE any .length/.includes calls
+    // so that saved data from older versions without these fields doesn't crash.
     const s = db[guildId].__jobs;
-    if (s.lastPostedId && !s.postedIds.length) {
-        s.postedIds = [s.lastPostedId];
-        delete s.lastPostedId;
-    }
     if (!s.postedIds)    s.postedIds    = [];
     if (!s.postedUrls)   s.postedUrls   = [];
     if (!s.postedTitles) s.postedTitles = [];
+    // Migrate lastPostedId from the original single-ID version
+    if (s.lastPostedId) {
+        if (!s.postedIds.includes(s.lastPostedId)) s.postedIds.push(s.lastPostedId);
+        delete s.lastPostedId;
+    }
     return s;
 }
 
