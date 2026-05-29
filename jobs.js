@@ -279,8 +279,6 @@ async function fetchCareerjetJobs() {
 // public API or RSS.  Playwright is the only reliable approach.
 // ─────────────────────────────────────────────────────────────────────────────
 async function fetchHiringCafeJobs() {
-    // Libya search sorted by date.
-    // IMPORTANT: The searchState must encode Libya's exact location object.
     const SEARCH_STATE = encodeURIComponent(JSON.stringify({
         locations: [{
             id: 'thY1yZQBoEtHp_8UEq3V',
@@ -307,164 +305,134 @@ async function fetchHiringCafeJobs() {
 
             await page.goto(URL, { waitUntil: 'networkidle', timeout: 45000 });
 
-            // Wait for job cards — each card has a "Job Posting" link
-            await page.waitForSelector('a[href^="/job/"]', { timeout: 20000 }).catch(() => {});
-            // Extra beat for React to finish rendering all text nodes
-            await page.waitForTimeout(2000);
+            // Wait for job cards to render — card roots are div.rounded-xl.shadow
+            await page.waitForSelector('div.rounded-xl.border.border-gray-200.shadow', {
+                timeout: 20000,
+            }).catch(() => {});
+            await page.waitForTimeout(1500);
 
             const jobs = await page.evaluate(() => {
-                // ── HOW THE DOM IS STRUCTURED ─────────────────────────────────
-                // hiring.cafe renders every job as a card.  In plain text the
-                // card's innerText reads (in this exact order):
+                // ── EXACT SELECTORS FROM REAL HTML (devtools-verified) ────────
                 //
-                //   [0]  "4h"              ← time badge  (or "1d", "30m" etc.)
-                //   [1]  "Save"
-                //   [2]  "Mark Applied"
-                //   [3]  "Hide"
-                //   [4]  "Liaison Officer for Libya…"   ← JOB TITLE
-                //   [5]  "Remote, Libya"                ← LOCATION
-                //   [6]  "RemoteFull Time"              ← work type (concatenated)
-                //   [7]  "Green Climate Fund"           ← COMPANY NAME (clean)
-                //   [8]  "Green Climate Fund: Intl org providing climate finance."
-                //   [9]  "5+ YOE…requirements…"
-                //   [10] "skill1, skill2"
-                //   [11] "Job Posting"    ← text of <a href="/job/ID">
-                //   [12] "View all"       ← text of <a href="/org/domain">
+                // Card root:
+                //   div.rounded-xl.border.border-gray-200.shadow
                 //
-                // KEY BUGS FIXED:
-                //   • Title was being read from the /job/ link whose text is
-                //     literally "Job Posting" — title is at index 4.
-                //   • Location was matched via "Libya" regex which also hit the
-                //     job title line ("Liaison Officer for Libya") — location is
-                //     always at index 5, immediately after the title.
-                //   • Company was read from /org/ link whose text is "View all"
-                //     — the company name is the img[alt] of the favicon, or
-                //     the plain text at index 7 (before the colon-description).
-                //   • Timestamp was parsed from fuzzy badge text which could
-                //     match salary numbers — use <time datetime="ISO"> instead,
-                //     or the badge at index 0 as a reliable fallback.
+                // Time badge (desktop, always rendered even if visually hidden):
+                //   div.absolute.top-2.right-2 > span
+                //   → plain text like "23h", "4h", "1d", "3mo"
+                //
+                // Title:
+                //   span.font-bold.line-clamp-3   (or span[class*="line-clamp-3"])
+                //   → "Liaison Officer for Libya (Remote (Remote), KR)"
+                //
+                // Location:
+                //   The span.line-clamp-2 that sits inside the div containing
+                //   the location-pin SVG (path starting with "M15 10.5a3 3")
+                //   → "Tripoli, /, Libyan Arab Jamahiriya"
+                //
+                // Company:
+                //   img[alt]  inside the card  — alt IS the company name
+                //   → alt="Green Climate Fund"
+                //
+                // Job URL:
+                //   a[href^="/job/"]  inside the card
                 // ─────────────────────────────────────────────────────────────
 
-                function parseTimeBadge(badge) {
-                    // "4h" → hours, "2d" → days, "30m" → minutes, "1d" → 1 day
-                    const m = badge.match(/^(\d+)\s*([mhd])$/i);
+                function parseBadge(badge) {
+                    // Handles: "23h", "4h", "1d", "30m", "3mo", "2w"
+                    badge = badge.trim();
+                    const m = badge.match(/^(\d+)\s*(m(?:o)?|h|d|w)$/i);
                     if (!m) return null;
                     const v = parseInt(m[1]);
                     const u = m[2].toLowerCase();
-                    if (u === 'm') return Date.now() - v * 60_000;
-                    if (u === 'h') return Date.now() - v * 3_600_000;
-                    if (u === 'd') return Date.now() - v * 86_400_000;
+                    const now = Date.now();
+                    // "mo" = months (approx 30d), "w" = weeks
+                    if (u === 'm')  return now - v * 60_000;           // minutes
+                    if (u === 'mo') return now - v * 30 * 86_400_000;  // months
+                    if (u === 'h')  return now - v * 3_600_000;        // hours
+                    if (u === 'd')  return now - v * 86_400_000;       // days
+                    if (u === 'w')  return now - v * 7 * 86_400_000;   // weeks
                     return null;
                 }
 
-                // Find the card root for a given element.
-                // We look for the ancestor that contains BOTH a time badge
-                // AND a /job/ link — that is the card boundary.
-                function findCardRoot(el) {
-                    let node = el;
-                    for (let i = 0; i < 12; i++) {
-                        if (!node.parentElement) break;
-                        node = node.parentElement;
-                        // Card root has both a job link and a time badge text
-                        const hasJobLink = !!node.querySelector('a[href^="/job/"]');
-                        const hasTimeBadge = /^\d+[mhd]$/im.test(
-                            (node.firstChild?.textContent || '').trim()
-                        ) || !!node.querySelector('time[datetime]');
-                        if (hasJobLink && hasTimeBadge) return node;
-                    }
-                    // Fallback: 5 levels up
-                    node = el;
-                    for (let i = 0; i < 5; i++) {
-                        if (!node.parentElement) break;
-                        node = node.parentElement;
-                    }
-                    return node;
-                }
+                // Location-pin SVG path signature (from the real HTML)
+                const LOC_PIN_PATH = 'M15 10.5a3 3';
 
-                const jobLinks = Array.from(document.querySelectorAll('a[href^="/job/"]'));
-                const seenHrefs = new Set();
+                const cards = Array.from(
+                    document.querySelectorAll('div.rounded-xl.border.border-gray-200.shadow')
+                );
+
                 const results = [];
 
-                for (const jobLink of jobLinks) {
-                    const href = jobLink.href;
-                    if (!href || seenHrefs.has(href)) continue;
-                    seenHrefs.add(href);
+                for (const card of cards) {
+                    // ── Job URL ───────────────────────────────────────────────
+                    const jobAnchor = card.querySelector('a[href^="/job/"]');
+                    if (!jobAnchor) continue;
+                    const href = jobAnchor.href;
+                    if (!href) continue;
 
-                    const card = findCardRoot(jobLink);
-
-                    // ── Split card text into clean lines ──────────────────────
-                    // We strip blank lines and collapse whitespace within lines.
-                    const lines = Array.from(card.innerText.split('\n'))
-                        .map(l => l.trim())
-                        .filter(l => l.length > 0);
-
-                    // ── Timestamp ─────────────────────────────────────────────
-                    // Prefer <time datetime="ISO"> for exact precision.
+                    // ── Time badge ────────────────────────────────────────────
+                    // The desktop badge is in:
+                    //   div.absolute.top-2.right-2 ... > span
+                    // It is always present in the DOM (just hidden on mobile via CSS).
                     let postedAt = null;
-                    const timeEl = card.querySelector('time[datetime]');
-                    if (timeEl) {
-                        const dt = timeEl.getAttribute('datetime');
-                        const parsed = Date.parse(dt);
-                        if (!isNaN(parsed)) postedAt = parsed;
+                    const timeDivDesktop = card.querySelector(
+                        'div.absolute.top-2.right-2 span, div[class*="top-2"][class*="right-2"] span'
+                    );
+                    if (timeDivDesktop) {
+                        postedAt = parseBadge(timeDivDesktop.textContent);
                     }
+                    // Mobile badge fallback: first <span> inside the mobile time div
                     if (postedAt === null) {
-                        // Fall back to the time badge — always at lines[0]
-                        // e.g. "4h", "1d", "30m"
-                        const badge = lines[0] || '';
-                        postedAt = parseTimeBadge(badge) ?? Date.now();
-                    }
-
-                    // ── Title ─────────────────────────────────────────────────
-                    // Fixed positional index: always at lines[4].
-                    // Sanity-guard: if lines[4] looks like a UI token, scan forward.
-                    const UI_TOKENS = /^(save|mark applied|hide|job posting|view all|remotefull time|remotepart time|remote|full time|part time|contract|onsite|hybrid|\d+[mhd]|\d+\+\s*yoe|\$[\d,kyr\/\s\-]+)$/i;
-                    let title = '';
-                    // Start searching from index 4 (after time/Save/MarkApplied/Hide)
-                    for (let i = 4; i < Math.min(lines.length, 8); i++) {
-                        if (lines[i] && lines[i].length >= 4 && !UI_TOKENS.test(lines[i])) {
-                            title = lines[i];
-                            break;
+                        const mobileSpans = card.querySelectorAll('div.md\\:hidden span');
+                        for (const sp of mobileSpans) {
+                            const t = parseBadge(sp.textContent);
+                            if (t !== null) { postedAt = t; break; }
                         }
                     }
+                    if (postedAt === null) postedAt = Date.now();
+
+                    // ── Title ─────────────────────────────────────────────────
+                    // span with both font-bold and line-clamp-3 classes
+                    const titleEl = card.querySelector(
+                        'span.font-bold.line-clamp-3, span[class*="line-clamp-3"][class*="font-bold"]'
+                    );
+                    if (!titleEl) continue;
+                    const title = titleEl.textContent.trim();
                     if (!title) continue;
 
                     // ── Location ──────────────────────────────────────────────
-                    // Always at lines[5] — immediately after the title.
-                    // We find where the title landed and take the next line.
+                    // span.line-clamp-2 that is a sibling of the location-pin SVG
+                    // The pin SVG path starts with "M15 10.5a3 3"
                     let location = 'Libya';
-                    const titleIdx = lines.indexOf(title);
-                    if (titleIdx !== -1 && titleIdx + 1 < lines.length) {
-                        const candidate = lines[titleIdx + 1];
-                        // Location lines look like "City, Country" or "Remote, Libya"
-                        // They are NOT a UI token and are reasonably short
-                        if (candidate && !UI_TOKENS.test(candidate) && candidate.length <= 80) {
-                            location = candidate;
+                    const allSpansLineclamp2 = card.querySelectorAll('span.line-clamp-2');
+                    for (const sp of allSpansLineclamp2) {
+                        // Check that the parent div contains a location-pin SVG
+                        const parentDiv = sp.parentElement;
+                        if (!parentDiv) continue;
+                        const svgPaths = parentDiv.querySelectorAll('path');
+                        let hasLocPin = false;
+                        for (const path of svgPaths) {
+                            if ((path.getAttribute('d') || '').startsWith(LOC_PIN_PATH)) {
+                                hasLocPin = true;
+                                break;
+                            }
+                        }
+                        if (hasLocPin) {
+                            location = sp.textContent.trim();
+                            break;
                         }
                     }
 
                     // ── Company ───────────────────────────────────────────────
-                    // The favicon <img alt="Company Name"> is the most reliable
-                    // source. Fallback: the text node at lines[7], which is the
-                    // clean company name before the "Company: description" line.
+                    // img[alt] inside the card — alt attribute is the company name
                     let company = '';
-                    const faviconImg = card.querySelector('img[alt]');
-                    if (faviconImg) {
-                        company = faviconImg.getAttribute('alt').trim();
-                    }
-                    if (!company) {
-                        // Find the line after the work-type line (RemoteFull Time etc.)
-                        // Work-type is always at titleIdx + 2
-                        const workTypeIdx = titleIdx + 2;
-                        if (workTypeIdx + 1 < lines.length) {
-                            const candidate = lines[workTypeIdx + 1];
-                            // Company name: not a UI token, not a description (no colon)
-                            if (candidate && !UI_TOKENS.test(candidate) && !candidate.includes(':')) {
-                                company = candidate;
-                            }
-                        }
+                    const logoImg = card.querySelector('img[alt]');
+                    if (logoImg) {
+                        company = logoImg.getAttribute('alt').trim();
                     }
 
-                    // ── Job ID from URL ───────────────────────────────────────
+                    // ── Job ID ────────────────────────────────────────────────
                     const jobId = href.split('/job/')[1]?.split(/[/?#]/)[0] || String(Date.now());
 
                     results.push({
@@ -480,21 +448,22 @@ async function fetchHiringCafeJobs() {
                 return results;
             });
 
-            if (!jobs.length) return [];
+            if (!jobs.length) {
+                console.warn('[Jobs] HiringCafe: no cards found');
+                return [];
+            }
 
             // Sort by most recent first
             jobs.sort((a, b) => b.postedAt - a.postedAt);
 
-            // Deduplicate by job ID
-            const seenIds = new Set();
-            const unique = [];
-            for (const j of jobs) {
-                if (!seenIds.has(j.id)) { seenIds.add(j.id); unique.push(j); }
+            // Log all found jobs for debugging
+            console.log(`[Jobs] HiringCafe found ${jobs.length} cards:`);
+            for (const j of jobs.slice(0, 5)) {
+                const ago = Math.round((Date.now() - j.postedAt) / 3_600_000 * 10) / 10;
+                console.log(`  [${ago}h ago] ${j.title} | ${j.location} | ${j.company}`);
             }
 
-            const top = unique[0];
-            console.log(`[Jobs] HiringCafe best: "${top.title}" @ ${top.location} | ${new Date(top.postedAt).toISOString()}`);
-
+            const top = jobs[0];
             return [{
                 id: top.id,
                 title: top.title,
