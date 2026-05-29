@@ -159,6 +159,85 @@ async function fetchOpenSooqJobs() {
 // headers to get past the bot-detection page and scrape the listing cards.
 // ─────────────────────────────────────────────────────────────────────────────
 async function fetchCareerjetJobs() {
+    // Careerjet has an official public API that requires no key and is never
+    // bot-detected. affid can be any string — it is only used for affiliate
+    // tracking and does not gate access to results.
+    const API_URL =
+        'https://api.careerjet.net/search?' +
+        'affid=libya_discord_bot' +
+        '&locale_code=en_LY' +
+        '&keywords=' +
+        '&location=Libya' +
+        '&sort=date' +
+        '&pagesize=10';
+
+    try {
+        const axios = require('axios');
+        const response = await axios.get(API_URL, {
+            timeout: 15000,
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (compatible; LibyaJobsBot/1.0)',
+                'Accept': 'application/json',
+            },
+        });
+
+        const data = response.data;
+
+        // API returns: { type: "JOBS", hits: N, jobs: [...] }
+        // Each job: { title, url, company, locations, date, salary, description }
+        if (!data || !Array.isArray(data.jobs) || data.jobs.length === 0) {
+            // Fallback: scrape the page directly if the API returns nothing
+            return await fetchCareerjetScrape();
+        }
+
+        const jobs = data.jobs.map((j, idx) => {
+            // Date: API returns ISO string or "X days ago" style string
+            let postedAt = Date.now();
+            if (j.date) {
+                const parsed = Date.parse(j.date);
+                if (!isNaN(parsed)) {
+                    postedAt = parsed;
+                } else {
+                    const rel = j.date.match(/(\d+)\s+(minute|hour|day|week)s?/i);
+                    if (rel) {
+                        const v = parseInt(rel[1]);
+                        const u = rel[2].toLowerCase();
+                        if (u === 'minute') postedAt = Date.now() - v * 60_000;
+                        else if (u === 'hour')   postedAt = Date.now() - v * 3_600_000;
+                        else if (u === 'day')    postedAt = Date.now() - v * 86_400_000;
+                        else if (u === 'week')   postedAt = Date.now() - v * 604_800_000;
+                    }
+                }
+            }
+
+            const idSlug = (j.url || '').split('/').filter(Boolean).pop() || `cj_${idx}`;
+
+            return {
+                id: `careerjet_${idSlug}`,
+                title: (j.title || '').trim(),
+                location: (j.locations || 'Libya').trim(),
+                company: (j.company || '').trim(),
+                url: j.url && j.url.startsWith('http') ? j.url : `https://www.careerjet.ly${j.url || ''}`,
+                postedAt,
+                source: 'careerjet',
+            };
+        }).filter(j => j.title && j.url);
+
+        if (!jobs.length) return await fetchCareerjetScrape();
+
+        jobs.sort((a, b) => b.postedAt - a.postedAt);
+        console.log(`[Jobs] Careerjet API: found ${jobs.length} jobs, latest: "${jobs[0].title}"`);
+        return [{ ...jobs[0], postedAt: new Date(jobs[0].postedAt) }];
+
+    } catch (err) {
+        console.error('[Jobs] Careerjet API error:', err.message, '— trying scrape fallback');
+        return await fetchCareerjetScrape();
+    }
+}
+
+// Fallback scraper using Playwright with the exact selectors from the real HTML.
+// Only called when the API fails. Uses stealth tricks to avoid bot detection.
+async function fetchCareerjetScrape() {
     try {
         return await withBrowser(async (browser) => {
             const context = await browser.newContext({
@@ -167,106 +246,141 @@ async function fetchCareerjetJobs() {
                     'AppleWebKit/537.36 (KHTML, like Gecko) ' +
                     'Chrome/124.0.0.0 Safari/537.36',
                 locale: 'en-GB',
+                viewport: { width: 1280, height: 800 },
                 extraHTTPHeaders: {
                     'Accept-Language': 'en-GB,en;q=0.9',
                     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    'Sec-Fetch-Dest': 'document',
+                    'Sec-Fetch-Mode': 'navigate',
+                    'Sec-Fetch-Site': 'none',
+                    'Upgrade-Insecure-Requests': '1',
                 },
+            });
+
+            // Remove navigator.webdriver flag that Playwright sets by default
+            await context.addInitScript(() => {
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
             });
 
             const page = await context.newPage();
 
-            // Block heavy assets
+            // Only block media — keep stylesheets so the page renders normally
+            // (blocking stylesheets can trigger bot detection heuristics)
             await page.route('**/*', (route) => {
                 const type = route.request().resourceType();
-                if (['image', 'media', 'font', 'stylesheet'].includes(type)) return route.abort();
+                if (['media', 'font'].includes(type)) return route.abort();
                 return route.continue();
             });
+
+            // Small random delay to appear more human
+            await page.waitForTimeout(500 + Math.floor(Math.random() * 800));
 
             await page.goto('https://www.careerjet.ly/jobs?s=&l=Libya&sort=date', {
                 waitUntil: 'domcontentloaded',
                 timeout: 30000,
             });
 
-            // If we hit the bot-detection page, bail out gracefully
+            // Check for bot detection
             const bodyText = await page.innerText('body').catch(() => '');
             if (bodyText.includes('unusual traffic') || bodyText.includes('robot')) {
-                console.warn('[Jobs] Careerjet: bot-detection page hit, skipping this cycle.');
+                console.warn('[Jobs] Careerjet: bot-detection hit on scrape fallback too');
                 return [];
             }
 
-            const jobs = await page.evaluate(() => {
-                // Careerjet job cards: <article class="job clicky"> or <li> containing <header>
-                const articles = Array.from(
-                    document.querySelectorAll('article.job, ul.jobs li')
-                );
+            // Wait for job cards — exact selector from the real HTML
+            await page.waitForSelector('article.job', { timeout: 10000 }).catch(() => {});
 
+            const jobs = await page.evaluate(() => {
+                // ── EXACT SELECTORS FROM REAL CAREERJET HTML ─────────────────
+                // Card:     article.job  (or article.job.clicky)
+                // URL:      article[data-url]  → relative path like /jobad/lydcf...
+                // Title:    header h2 a  — or a[title] attribute for clean name
+                // Company:  p.company a
+                // Location: ul.location li  (text after the SVG icon)
+                // Date:     footer span.badge  → "3 days ago"
+                // ─────────────────────────────────────────────────────────────
+
+                function parseRelative(text) {
+                    const m = text.match(/(\d+)\s+(minute|hour|day|week)s?/i);
+                    if (!m) return null;
+                    const v = parseInt(m[1]);
+                    const u = m[2].toLowerCase();
+                    if (u === 'minute') return Date.now() - v * 60_000;
+                    if (u === 'hour')   return Date.now() - v * 3_600_000;
+                    if (u === 'day')    return Date.now() - v * 86_400_000;
+                    if (u === 'week')   return Date.now() - v * 604_800_000;
+                    return null;
+                }
+
+                const articles = Array.from(document.querySelectorAll('article.job'));
                 const results = [];
 
                 for (const art of articles) {
-                    // Title & URL
-                    const titleEl = art.querySelector('h2 a, header h2 a, .title a');
-                    if (!titleEl) continue;
-                    const title = titleEl.innerText.trim();
-                    const url   = titleEl.href;
-                    if (!url || !title) continue;
+                    // URL — prefer data-url attribute, fall back to link href
+                    const dataUrl = art.getAttribute('data-url');
+                    const titleAnchor = art.querySelector('header h2 a');
+                    if (!titleAnchor) continue;
 
-                    // Company
-                    const companyEl = art.querySelector('.company, p.company');
+                    // Title: use the title attribute (cleanest) or innerText
+                    const title = (titleAnchor.getAttribute('title') || titleAnchor.innerText).trim();
+                    if (!title) continue;
+
+                    const relPath = dataUrl || titleAnchor.getAttribute('href') || '';
+                    const url = relPath.startsWith('http')
+                        ? relPath
+                        : `https://www.careerjet.ly${relPath}`;
+
+                    // Company: p.company a
+                    const companyEl = art.querySelector('p.company a');
                     const company = companyEl ? companyEl.innerText.trim() : '';
 
-                    // Location
-                    const locEl = art.querySelector('.location, p.location');
-                    const location = locEl ? locEl.innerText.trim() : 'Libya';
-
-                    // Posted date — Careerjet shows "X days ago" or an absolute date
-                    let postedAt = Date.now();
-                    const dateEl = art.querySelector('.date, p.date, time');
-                    if (dateEl) {
-                        const raw = dateEl.innerText.trim();
-                        // "X days ago" / "X hours ago"
-                        const relMatch = raw.match(/(\d+)\s+(hour|day|week)s?\s+ago/i);
-                        if (relMatch) {
-                            const v = parseInt(relMatch[1]);
-                            const u = relMatch[2].toLowerCase();
-                            if (u === 'hour')   postedAt = Date.now() - v * 3_600_000;
-                            else if (u === 'day')  postedAt = Date.now() - v * 86_400_000;
-                            else if (u === 'week') postedAt = Date.now() - v * 604_800_000;
-                        } else {
-                            // Try parsing absolute date strings like "29 May 2026"
-                            const parsed = Date.parse(raw);
-                            if (!isNaN(parsed)) postedAt = parsed;
-                        }
+                    // Location: ul.location li — strip the SVG icon text
+                    const locEl = art.querySelector('ul.location li');
+                    let location = 'Libya';
+                    if (locEl) {
+                        // Clone and remove SVG so we get clean text
+                        const clone = locEl.cloneNode(true);
+                        clone.querySelectorAll('svg').forEach(s => s.remove());
+                        location = clone.textContent.trim() || 'Libya';
                     }
 
-                    // Unique ID from URL slug
-                    const idSlug = url.split('/').filter(Boolean).pop() || String(Date.now());
+                    // Date: footer span.badge (contains clock SVG + "3 days ago")
+                    let postedAt = Date.now();
+                    const badgeEl = art.querySelector('footer span.badge');
+                    if (badgeEl) {
+                        const clone = badgeEl.cloneNode(true);
+                        clone.querySelectorAll('svg').forEach(s => s.remove());
+                        const dateText = clone.textContent.trim();
+                        const rel = parseRelative(dateText);
+                        if (rel !== null) postedAt = rel;
+                    }
 
-                    results.push({ title, url, location, company, postedAt, id: `careerjet_${idSlug}` });
+                    const idSlug = relPath.split('/').filter(Boolean).pop() || String(Date.now());
+                    results.push({
+                        id: `careerjet_${idSlug}`,
+                        title,
+                        url,
+                        location,
+                        company,
+                        postedAt,
+                    });
                 }
 
                 return results;
             });
 
             if (!jobs.length) return [];
-
             jobs.sort((a, b) => b.postedAt - a.postedAt);
+            console.log(`[Jobs] Careerjet scrape: found ${jobs.length} jobs, latest: "${jobs[0].title}"`);
             const top = jobs[0];
-
-            return [{
-                id: top.id,
-                title: top.title,
-                location: top.location,
-                company: top.company || '',
-                url: top.url,
-                postedAt: new Date(top.postedAt),
-                source: 'careerjet',
-            }];
+            return [{ ...top, postedAt: new Date(top.postedAt), source: 'careerjet' }];
         });
     } catch (err) {
-        console.error('[Jobs] Careerjet error:', err.message);
+        console.error('[Jobs] Careerjet scrape error:', err.message);
         return [];
     }
 }
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Source 3 — Hiring.cafe (Playwright)
@@ -509,19 +623,21 @@ function getJobsData(db, guildId) {
     if (!db[guildId].__jobs) {
         db[guildId].__jobs = {
             channelId: null,
-            postedIds: [],        // replaces lastPostedId — stores last N posted IDs
-            postedTitles: [],     // title fingerprints so same job from 2 sources isn't re-posted
+            postedIds:     [],  // source-specific IDs (opensooq_X, careerjet_X etc.)
+            postedUrls:    [],  // stable job page URLs — most reliable dedup key
+            postedTitles:  [],  // normalised title fingerprints for cross-source dedup
             lastCheckedAt: null,
             history: [],
         };
     }
-    // Migrate old data: if lastPostedId exists from a previous version, carry it over
+    // Migrate old data from previous versions
     const s = db[guildId].__jobs;
     if (s.lastPostedId && !s.postedIds.length) {
         s.postedIds = [s.lastPostedId];
         delete s.lastPostedId;
     }
     if (!s.postedIds)    s.postedIds    = [];
+    if (!s.postedUrls)   s.postedUrls   = [];
     if (!s.postedTitles) s.postedTitles = [];
     return s;
 }
@@ -583,13 +699,15 @@ async function updateJobs({ client, db, saveData, guildId, forcePost = false }) 
         return { posted: false, isNew: false };
     }
 
-    // A job is considered already-posted if:
-    //   (a) its exact source ID is in postedIds, OR
-    //   (b) its title fingerprint matches a recently posted title
+    // A job is considered already-posted if ANY of these match:
+    //   (a) its exact source ID is in postedIds
+    //   (b) its URL is in postedUrls  ← most reliable for hiring.cafe repeat posts
+    //   (c) its title fingerprint matches a recently posted title
     //       (catches the same listing appearing on multiple sources)
     const fp = titleFingerprint(latest.title);
     const alreadyPosted =
         jobsState.postedIds.includes(latest.id) ||
+        jobsState.postedUrls.includes(latest.url) ||
         jobsState.postedTitles.includes(fp);
 
     const isNew = !alreadyPosted;
@@ -602,11 +720,13 @@ async function updateJobs({ client, db, saveData, guildId, forcePost = false }) 
     if (forcePost || isNew) {
         posted = await postJobsUpdate(client, jobsState, latest);
         if (posted) {
-            // Record both the ID and the title fingerprint
+            // Record the ID, URL, and title fingerprint
             jobsState.postedIds.push(latest.id);
+            jobsState.postedUrls.push(latest.url);
             jobsState.postedTitles.push(fp);
             // Keep only the last 200 entries so the arrays don't grow forever
             jobsState.postedIds    = jobsState.postedIds.slice(-200);
+            jobsState.postedUrls   = jobsState.postedUrls.slice(-200);
             jobsState.postedTitles = jobsState.postedTitles.slice(-200);
         }
     }
