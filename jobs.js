@@ -509,12 +509,28 @@ function getJobsData(db, guildId) {
     if (!db[guildId].__jobs) {
         db[guildId].__jobs = {
             channelId: null,
-            lastPostedId: null,
+            postedIds: [],        // replaces lastPostedId — stores last N posted IDs
+            postedTitles: [],     // title fingerprints so same job from 2 sources isn't re-posted
             lastCheckedAt: null,
             history: [],
         };
     }
-    return db[guildId].__jobs;
+    // Migrate old data: if lastPostedId exists from a previous version, carry it over
+    const s = db[guildId].__jobs;
+    if (s.lastPostedId && !s.postedIds.length) {
+        s.postedIds = [s.lastPostedId];
+        delete s.lastPostedId;
+    }
+    if (!s.postedIds)    s.postedIds    = [];
+    if (!s.postedTitles) s.postedTitles = [];
+    return s;
+}
+
+// Normalise a job title into a fingerprint for cross-source duplicate detection.
+// Strips punctuation, extra spaces, and lowercases so that minor formatting
+// differences between sources don't prevent a match.
+function titleFingerprint(title) {
+    return title.toLowerCase().replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -567,16 +583,32 @@ async function updateJobs({ client, db, saveData, guildId, forcePost = false }) 
         return { posted: false, isNew: false };
     }
 
-    const isNew = latest.id !== jobsState.lastPostedId;
+    // A job is considered already-posted if:
+    //   (a) its exact source ID is in postedIds, OR
+    //   (b) its title fingerprint matches a recently posted title
+    //       (catches the same listing appearing on multiple sources)
+    const fp = titleFingerprint(latest.title);
+    const alreadyPosted =
+        jobsState.postedIds.includes(latest.id) ||
+        jobsState.postedTitles.includes(fp);
+
+    const isNew = !alreadyPosted;
 
     jobsState.history = jobsState.history || [];
-    jobsState.history.push(latest);
+    jobsState.history.push({ ...latest, postedAt: latest.postedAt.toISOString() });
     jobsState.history = jobsState.history.slice(-MAX_HISTORY);
 
     let posted = false;
     if (forcePost || isNew) {
         posted = await postJobsUpdate(client, jobsState, latest);
-        if (posted) jobsState.lastPostedId = latest.id;
+        if (posted) {
+            // Record both the ID and the title fingerprint
+            jobsState.postedIds.push(latest.id);
+            jobsState.postedTitles.push(fp);
+            // Keep only the last 200 entries so the arrays don't grow forever
+            jobsState.postedIds    = jobsState.postedIds.slice(-200);
+            jobsState.postedTitles = jobsState.postedTitles.slice(-200);
+        }
     }
 
     saveData(guildId);
