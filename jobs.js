@@ -7,8 +7,7 @@ const MAX_HISTORY = 50;
 
 // Colour per source for embed visuals
 const SOURCE_COLORS = {
-    opensooq:  0x2B5B84,
-    careerjet: 0xE8612C,
+    opensooq:   0x2B5B84,
     hiringcafe: 0x1DB954,
 };
 
@@ -153,240 +152,7 @@ async function fetchOpenSooqJobs() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Source 2 — Careerjet (Playwright with stealth headers)
-//
-// Careerjet blocks plain HTTP clients.  We use Playwright with realistic
-// headers to get past the bot-detection page and scrape the listing cards.
-// ─────────────────────────────────────────────────────────────────────────────
-async function fetchCareerjetJobs() {
-    // Careerjet has an official public API that requires no key and is never
-    // bot-detected. affid can be any string — it is only used for affiliate
-    // tracking and does not gate access to results.
-    // Careerjet API docs: https://www.careerjet.com/partners/api/
-    // Correct host is public.api.careerjet.net, path is /search
-    // locale_code en_LY targets the Libya site (careerjet.ly)
-    const API_URL =
-        'https://public.api.careerjet.net/search?' +
-        'affid=73f7f75049a63e4dbbeaad53d1b5f11d' +
-        '&locale_code=en_LY' +
-        '&keywords=' +
-        '&location=Libya' +
-        '&sort=date' +
-        '&pagesize=10';
-
-    try {
-        const axios = require('axios');
-        const response = await axios.get(API_URL, {
-            timeout: 15000,
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (compatible; LibyaJobsBot/1.0)',
-                'Accept': 'application/json',
-            },
-        });
-
-        const data = response.data;
-
-        // API returns: { type: "JOBS", hits: N, jobs: [...] }
-        // Each job: { title, url, company, locations, date, salary, description }
-        if (!data || !Array.isArray(data.jobs) || data.jobs.length === 0) {
-            // Fallback: scrape the page directly if the API returns nothing
-            return await fetchCareerjetScrape();
-        }
-
-        const jobs = data.jobs.map((j, idx) => {
-            // Date: API returns ISO string or "X days ago" style string
-            let postedAt = Date.now();
-            if (j.date) {
-                const parsed = Date.parse(j.date);
-                if (!isNaN(parsed)) {
-                    postedAt = parsed;
-                } else {
-                    const rel = j.date.match(/(\d+)\s+(minute|hour|day|week)s?/i);
-                    if (rel) {
-                        const v = parseInt(rel[1]);
-                        const u = rel[2].toLowerCase();
-                        if (u === 'minute') postedAt = Date.now() - v * 60_000;
-                        else if (u === 'hour')   postedAt = Date.now() - v * 3_600_000;
-                        else if (u === 'day')    postedAt = Date.now() - v * 86_400_000;
-                        else if (u === 'week')   postedAt = Date.now() - v * 604_800_000;
-                    }
-                }
-            }
-
-            const idSlug = (j.url || '').split('/').filter(Boolean).pop() || `cj_${idx}`;
-
-            return {
-                id: `careerjet_${idSlug}`,
-                title: (j.title || '').trim(),
-                location: (j.locations || 'Libya').trim(),
-                company: (j.company || '').trim(),
-                url: j.url && j.url.startsWith('http') ? j.url : `https://www.careerjet.ly${j.url || ''}`,
-                postedAt,
-                source: 'careerjet',
-            };
-        }).filter(j => j.title && j.url);
-
-        if (!jobs.length) return await fetchCareerjetScrape();
-
-        jobs.sort((a, b) => b.postedAt - a.postedAt);
-        console.log(`[Jobs] Careerjet API: found ${jobs.length} jobs, latest: "${jobs[0].title}"`);
-        return [{ ...jobs[0], postedAt: new Date(jobs[0].postedAt) }];
-
-    } catch (err) {
-        console.error('[Jobs] Careerjet API error:', err.message, '— trying scrape fallback');
-        return await fetchCareerjetScrape();
-    }
-}
-
-// Fallback scraper using Playwright with the exact selectors from the real HTML.
-// Only called when the API fails. Uses stealth tricks to avoid bot detection.
-async function fetchCareerjetScrape() {
-    try {
-        return await withBrowser(async (browser) => {
-            const context = await browser.newContext({
-                userAgent:
-                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ' +
-                    'AppleWebKit/537.36 (KHTML, like Gecko) ' +
-                    'Chrome/124.0.0.0 Safari/537.36',
-                locale: 'en-GB',
-                viewport: { width: 1280, height: 800 },
-                extraHTTPHeaders: {
-                    'Accept-Language': 'en-GB,en;q=0.9',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                    'Sec-Fetch-Dest': 'document',
-                    'Sec-Fetch-Mode': 'navigate',
-                    'Sec-Fetch-Site': 'none',
-                    'Upgrade-Insecure-Requests': '1',
-                },
-            });
-
-            // Remove navigator.webdriver flag that Playwright sets by default
-            await context.addInitScript(() => {
-                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-            });
-
-            const page = await context.newPage();
-
-            // Only block media — keep stylesheets so the page renders normally
-            // (blocking stylesheets can trigger bot detection heuristics)
-            await page.route('**/*', (route) => {
-                const type = route.request().resourceType();
-                if (['media', 'font'].includes(type)) return route.abort();
-                return route.continue();
-            });
-
-            // Small random delay to appear more human
-            await page.waitForTimeout(500 + Math.floor(Math.random() * 800));
-
-            await page.goto('https://www.careerjet.ly/jobs?s=&l=Libya&sort=date', {
-                waitUntil: 'domcontentloaded',
-                timeout: 30000,
-            });
-
-            // Check for bot detection
-            const bodyText = await page.innerText('body').catch(() => '');
-            if (bodyText.includes('unusual traffic') || bodyText.includes('robot')) {
-                console.warn('[Jobs] Careerjet: bot-detection hit on scrape fallback too');
-                return [];
-            }
-
-            // Wait for job cards — exact selector from the real HTML
-            await page.waitForSelector('article.job', { timeout: 10000 }).catch(() => {});
-
-            const jobs = await page.evaluate(() => {
-                // ── EXACT SELECTORS FROM REAL CAREERJET HTML ─────────────────
-                // Card:     article.job  (or article.job.clicky)
-                // URL:      article[data-url]  → relative path like /jobad/lydcf...
-                // Title:    header h2 a  — or a[title] attribute for clean name
-                // Company:  p.company a
-                // Location: ul.location li  (text after the SVG icon)
-                // Date:     footer span.badge  → "3 days ago"
-                // ─────────────────────────────────────────────────────────────
-
-                function parseRelative(text) {
-                    const m = text.match(/(\d+)\s+(minute|hour|day|week)s?/i);
-                    if (!m) return null;
-                    const v = parseInt(m[1]);
-                    const u = m[2].toLowerCase();
-                    if (u === 'minute') return Date.now() - v * 60_000;
-                    if (u === 'hour')   return Date.now() - v * 3_600_000;
-                    if (u === 'day')    return Date.now() - v * 86_400_000;
-                    if (u === 'week')   return Date.now() - v * 604_800_000;
-                    return null;
-                }
-
-                const articles = Array.from(document.querySelectorAll('article.job'));
-                const results = [];
-
-                for (const art of articles) {
-                    // URL — prefer data-url attribute, fall back to link href
-                    const dataUrl = art.getAttribute('data-url');
-                    const titleAnchor = art.querySelector('header h2 a');
-                    if (!titleAnchor) continue;
-
-                    // Title: use the title attribute (cleanest) or innerText
-                    const title = (titleAnchor.getAttribute('title') || titleAnchor.innerText).trim();
-                    if (!title) continue;
-
-                    const relPath = dataUrl || titleAnchor.getAttribute('href') || '';
-                    const url = relPath.startsWith('http')
-                        ? relPath
-                        : `https://www.careerjet.ly${relPath}`;
-
-                    // Company: p.company a
-                    const companyEl = art.querySelector('p.company a');
-                    const company = companyEl ? companyEl.innerText.trim() : '';
-
-                    // Location: ul.location li — strip the SVG icon text
-                    const locEl = art.querySelector('ul.location li');
-                    let location = 'Libya';
-                    if (locEl) {
-                        // Clone and remove SVG so we get clean text
-                        const clone = locEl.cloneNode(true);
-                        clone.querySelectorAll('svg').forEach(s => s.remove());
-                        location = clone.textContent.trim() || 'Libya';
-                    }
-
-                    // Date: footer span.badge (contains clock SVG + "3 days ago")
-                    let postedAt = Date.now();
-                    const badgeEl = art.querySelector('footer span.badge');
-                    if (badgeEl) {
-                        const clone = badgeEl.cloneNode(true);
-                        clone.querySelectorAll('svg').forEach(s => s.remove());
-                        const dateText = clone.textContent.trim();
-                        const rel = parseRelative(dateText);
-                        if (rel !== null) postedAt = rel;
-                    }
-
-                    const idSlug = relPath.split('/').filter(Boolean).pop() || String(Date.now());
-                    results.push({
-                        id: `careerjet_${idSlug}`,
-                        title,
-                        url,
-                        location,
-                        company,
-                        postedAt,
-                    });
-                }
-
-                return results;
-            });
-
-            if (!jobs.length) return [];
-            jobs.sort((a, b) => b.postedAt - a.postedAt);
-            console.log(`[Jobs] Careerjet scrape: found ${jobs.length} jobs, latest: "${jobs[0].title}"`);
-            const top = jobs[0];
-            return [{ ...top, postedAt: new Date(top.postedAt), source: 'careerjet' }];
-        });
-    } catch (err) {
-        console.error('[Jobs] Careerjet scrape error:', err.message);
-        return [];
-    }
-}
-
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Source 3 — Hiring.cafe (Playwright)
+// Source 2 — Hiring.cafe (Playwright)
 //
 // Hiring.cafe is a fully client-side React SPA.  The Libya search state is
 // encoded in a large URL query param.  We navigate to that URL, wait for the
@@ -604,7 +370,6 @@ async function fetchHiringCafeJobs() {
 async function getLatestJob() {
     const results = await Promise.allSettled([
         fetchOpenSooqJobs(),
-        fetchCareerjetJobs(),
         fetchHiringCafeJobs(),
     ]);
 
@@ -626,7 +391,7 @@ function getJobsData(db, guildId) {
     if (!db[guildId].__jobs) {
         db[guildId].__jobs = {
             channelId: null,
-            postedIds:     [],  // source-specific IDs (opensooq_X, careerjet_X etc.)
+            postedIds:     [],  // source-specific IDs
             postedUrls:    [],  // stable job page URLs — most reliable dedup key
             postedTitles:  [],  // normalised title fingerprints for cross-source dedup
             lastCheckedAt: null,
@@ -665,7 +430,6 @@ async function postJobsUpdate(client, jobsState, job) {
     // Friendly source label
     const sourceLabels = {
         opensooq:  '🔵 OpenSooq',
-        careerjet: '🟠 Careerjet',
         hiringcafe:'🟢 Hiring.cafe',
     };
     const sourceLabel = sourceLabels[job.source] || job.source;
