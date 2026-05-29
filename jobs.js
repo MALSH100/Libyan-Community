@@ -279,7 +279,8 @@ async function fetchCareerjetJobs() {
 // public API or RSS.  Playwright is the only reliable approach.
 // ─────────────────────────────────────────────────────────────────────────────
 async function fetchHiringCafeJobs() {
-    // Libya search, sorted by date
+    // Libya search sorted by date.
+    // IMPORTANT: The searchState must encode Libya's exact location object.
     const SEARCH_STATE = encodeURIComponent(JSON.stringify({
         locations: [{
             id: 'thY1yZQBoEtHp_8UEq3V',
@@ -302,57 +303,76 @@ async function fetchHiringCafeJobs() {
                     'AppleWebKit/537.36 (KHTML, like Gecko) ' +
                     'Chrome/124.0.0.0 Safari/537.36',
             });
-
             const page = await context.newPage();
 
-            // Intercept hiring.cafe's internal API calls so we can also log
-            // what the network returns — useful for future debugging.
             await page.goto(URL, { waitUntil: 'networkidle', timeout: 45000 });
 
-            // Wait until job cards are visible.  Each card contains a
-            // "Job Posting" link whose href starts with /job/.
+            // Wait for job cards — each card has a "Job Posting" link
             await page.waitForSelector('a[href^="/job/"]', { timeout: 20000 }).catch(() => {});
+            // Extra beat for React to finish rendering all text nodes
+            await page.waitForTimeout(2000);
 
-            // Give React one extra beat to finish rendering text nodes
-            await page.waitForTimeout(1500);
-
-            // Dump the full card HTML so we can parse it precisely.
-            // Strategy:
-            //   1. Find every <a href="/job/..."> (the "Job Posting" CTA link).
-            //   2. Walk UP the DOM until we hit a container that also holds a
-            //      <time datetime="..."> element — that is the card root.
-            //   3. Inside that card root, extract:
-            //        • title  — the largest / first heading-like text node,
-            //                   NOT the "Job Posting" link text itself
-            //        • time   — prefer <time datetime="ISO"> for exact ms;
-            //                   fall back to the visible "Xh / Xd" badge text
-            //        • location — the text node that contains the city/country,
-            //                   which typically follows the work-type badge
-            //        • company — text from <a href="/org/...">
             const jobs = await page.evaluate(() => {
-                // ── helpers ──────────────────────────────────────────────────
-                function parseRelative(text) {
-                    // Matches "4h", "2d", "30m", "3 hours ago", "1 day ago" etc.
-                    const m = text.match(/(\d+)\s*(m(?:in(?:ute)?s?)?|h(?:(?:ou)?rs?)?|d(?:(?:ay)?s?)?)/i);
+                // ── HOW THE DOM IS STRUCTURED ─────────────────────────────────
+                // hiring.cafe renders every job as a card.  In plain text the
+                // card's innerText reads (in this exact order):
+                //
+                //   [0]  "4h"              ← time badge  (or "1d", "30m" etc.)
+                //   [1]  "Save"
+                //   [2]  "Mark Applied"
+                //   [3]  "Hide"
+                //   [4]  "Liaison Officer for Libya…"   ← JOB TITLE
+                //   [5]  "Remote, Libya"                ← LOCATION
+                //   [6]  "RemoteFull Time"              ← work type (concatenated)
+                //   [7]  "Green Climate Fund"           ← COMPANY NAME (clean)
+                //   [8]  "Green Climate Fund: Intl org providing climate finance."
+                //   [9]  "5+ YOE…requirements…"
+                //   [10] "skill1, skill2"
+                //   [11] "Job Posting"    ← text of <a href="/job/ID">
+                //   [12] "View all"       ← text of <a href="/org/domain">
+                //
+                // KEY BUGS FIXED:
+                //   • Title was being read from the /job/ link whose text is
+                //     literally "Job Posting" — title is at index 4.
+                //   • Location was matched via "Libya" regex which also hit the
+                //     job title line ("Liaison Officer for Libya") — location is
+                //     always at index 5, immediately after the title.
+                //   • Company was read from /org/ link whose text is "View all"
+                //     — the company name is the img[alt] of the favicon, or
+                //     the plain text at index 7 (before the colon-description).
+                //   • Timestamp was parsed from fuzzy badge text which could
+                //     match salary numbers — use <time datetime="ISO"> instead,
+                //     or the badge at index 0 as a reliable fallback.
+                // ─────────────────────────────────────────────────────────────
+
+                function parseTimeBadge(badge) {
+                    // "4h" → hours, "2d" → days, "30m" → minutes, "1d" → 1 day
+                    const m = badge.match(/^(\d+)\s*([mhd])$/i);
                     if (!m) return null;
                     const v = parseInt(m[1]);
-                    const u = m[2][0].toLowerCase();
+                    const u = m[2].toLowerCase();
                     if (u === 'm') return Date.now() - v * 60_000;
                     if (u === 'h') return Date.now() - v * 3_600_000;
                     if (u === 'd') return Date.now() - v * 86_400_000;
                     return null;
                 }
 
-                function cardRoot(el) {
-                    // Walk up until we find an element that has a <time> child
-                    // OR until we've gone 10 levels — whichever comes first.
+                // Find the card root for a given element.
+                // We look for the ancestor that contains BOTH a time badge
+                // AND a /job/ link — that is the card boundary.
+                function findCardRoot(el) {
                     let node = el;
-                    for (let i = 0; i < 10; i++) {
+                    for (let i = 0; i < 12; i++) {
                         if (!node.parentElement) break;
                         node = node.parentElement;
-                        if (node.querySelector('time[datetime]')) return node;
+                        // Card root has both a job link and a time badge text
+                        const hasJobLink = !!node.querySelector('a[href^="/job/"]');
+                        const hasTimeBadge = /^\d+[mhd]$/im.test(
+                            (node.firstChild?.textContent || '').trim()
+                        ) || !!node.querySelector('time[datetime]');
+                        if (hasJobLink && hasTimeBadge) return node;
                     }
-                    // Fallback: return 5 levels up
+                    // Fallback: 5 levels up
                     node = el;
                     for (let i = 0; i < 5; i++) {
                         if (!node.parentElement) break;
@@ -361,96 +381,90 @@ async function fetchHiringCafeJobs() {
                     return node;
                 }
 
-                // ── collect cards ─────────────────────────────────────────────
-                // hiring.cafe renders each job as a block that contains:
-                //   • A <time datetime="..."> with the ISO post date
-                //   • An <a href="/job/ID">Job Posting</a> CTA
-                //   • An <a href="/org/domain">Company name</a> CTA
-                //   • Visible text lines: title, location, work-type, etc.
-
                 const jobLinks = Array.from(document.querySelectorAll('a[href^="/job/"]'));
-                const seen = new Set();
+                const seenHrefs = new Set();
                 const results = [];
 
                 for (const jobLink of jobLinks) {
                     const href = jobLink.href;
-                    if (!href || seen.has(href)) continue;
-                    seen.add(href);
+                    if (!href || seenHrefs.has(href)) continue;
+                    seenHrefs.add(href);
 
-                    const card = cardRoot(jobLink);
+                    const card = findCardRoot(jobLink);
 
-                    // ── 1. Timestamp ──────────────────────────────────────────
-                    let postedAt = Date.now();
+                    // ── Split card text into clean lines ──────────────────────
+                    // We strip blank lines and collapse whitespace within lines.
+                    const lines = Array.from(card.innerText.split('\n'))
+                        .map(l => l.trim())
+                        .filter(l => l.length > 0);
+
+                    // ── Timestamp ─────────────────────────────────────────────
+                    // Prefer <time datetime="ISO"> for exact precision.
+                    let postedAt = null;
                     const timeEl = card.querySelector('time[datetime]');
                     if (timeEl) {
-                        const iso = timeEl.getAttribute('datetime');
-                        const parsed = Date.parse(iso);
-                        if (!isNaN(parsed)) {
-                            postedAt = parsed;
-                        } else {
-                            // datetime attr may be relative text too
-                            const rel = parseRelative(iso || timeEl.innerText);
-                            if (rel !== null) postedAt = rel;
-                        }
-                    } else {
-                        // Fall back to badge text like "4h" or "2d"
-                        const rel = parseRelative(card.innerText);
-                        if (rel !== null) postedAt = rel;
+                        const dt = timeEl.getAttribute('datetime');
+                        const parsed = Date.parse(dt);
+                        if (!isNaN(parsed)) postedAt = parsed;
+                    }
+                    if (postedAt === null) {
+                        // Fall back to the time badge — always at lines[0]
+                        // e.g. "4h", "1d", "30m"
+                        const badge = lines[0] || '';
+                        postedAt = parseTimeBadge(badge) ?? Date.now();
                     }
 
-                    // ── 2. Title ──────────────────────────────────────────────
-                    // The title is NOT inside the /job/ link — it's a heading
-                    // element or a prominent text node in the card.
-                    // hiring.cafe typically uses: h2, h3, or a div with role heading,
-                    // or the first substantial text child of the card.
+                    // ── Title ─────────────────────────────────────────────────
+                    // Fixed positional index: always at lines[4].
+                    // Sanity-guard: if lines[4] looks like a UI token, scan forward.
+                    const UI_TOKENS = /^(save|mark applied|hide|job posting|view all|remotefull time|remotepart time|remote|full time|part time|contract|onsite|hybrid|\d+[mhd]|\d+\+\s*yoe|\$[\d,kyr\/\s\-]+)$/i;
                     let title = '';
-                    const headingEl = card.querySelector('h1, h2, h3, h4, [role="heading"]');
-                    if (headingEl) {
-                        title = headingEl.innerText.trim();
-                    }
-                    if (!title) {
-                        // Split card text into lines, discard tiny tokens and
-                        // known UI labels, pick the first real sentence.
-                        const skipPatterns = /^(\d+[hmd]|save|hide|mark applied|job posting|view all|full time|part time|contract|remote|onsite|hybrid|\d+\+\s*yoe|\$[\d,k/yr]+)$/i;
-                        const lines = card.innerText.split('\n').map(l => l.trim()).filter(Boolean);
-                        for (const line of lines) {
-                            if (line.length >= 8 && !skipPatterns.test(line)) {
-                                title = line;
-                                break;
-                            }
+                    // Start searching from index 4 (after time/Save/MarkApplied/Hide)
+                    for (let i = 4; i < Math.min(lines.length, 8); i++) {
+                        if (lines[i] && lines[i].length >= 4 && !UI_TOKENS.test(lines[i])) {
+                            title = lines[i];
+                            break;
                         }
                     }
-                    if (!title || title.length < 3) continue;
+                    if (!title) continue;
 
-                    // ── 3. Location ───────────────────────────────────────────
-                    // Location in hiring.cafe looks like:
-                    //   "Tripoli, Libya" or "Libya" or "Remote, Libya"
-                    // It is a plain text node — NOT a link.
-                    // We scan all text lines and pick the one that contains
-                    // "Libya" (case-insensitive).  We want the FULL line, not
-                    // just the word "Libya", so we get city info too.
+                    // ── Location ──────────────────────────────────────────────
+                    // Always at lines[5] — immediately after the title.
+                    // We find where the title landed and take the next line.
                     let location = 'Libya';
-                    const cardLines = card.innerText.split('\n').map(l => l.trim()).filter(Boolean);
-                    for (const line of cardLines) {
-                        if (/libya/i.test(line) && line.length <= 80) {
-                            // Make sure it's not a UI label like "Save Search"
-                            if (!/save|search|apply|hide|posted|company/i.test(line)) {
-                                location = line;
-                                break;
+                    const titleIdx = lines.indexOf(title);
+                    if (titleIdx !== -1 && titleIdx + 1 < lines.length) {
+                        const candidate = lines[titleIdx + 1];
+                        // Location lines look like "City, Country" or "Remote, Libya"
+                        // They are NOT a UI token and are reasonably short
+                        if (candidate && !UI_TOKENS.test(candidate) && candidate.length <= 80) {
+                            location = candidate;
+                        }
+                    }
+
+                    // ── Company ───────────────────────────────────────────────
+                    // The favicon <img alt="Company Name"> is the most reliable
+                    // source. Fallback: the text node at lines[7], which is the
+                    // clean company name before the "Company: description" line.
+                    let company = '';
+                    const faviconImg = card.querySelector('img[alt]');
+                    if (faviconImg) {
+                        company = faviconImg.getAttribute('alt').trim();
+                    }
+                    if (!company) {
+                        // Find the line after the work-type line (RemoteFull Time etc.)
+                        // Work-type is always at titleIdx + 2
+                        const workTypeIdx = titleIdx + 2;
+                        if (workTypeIdx + 1 < lines.length) {
+                            const candidate = lines[workTypeIdx + 1];
+                            // Company name: not a UI token, not a description (no colon)
+                            if (candidate && !UI_TOKENS.test(candidate) && !candidate.includes(':')) {
+                                company = candidate;
                             }
                         }
                     }
 
-                    // ── 4. Company ────────────────────────────────────────────
-                    let company = '';
-                    const orgLink = card.querySelector('a[href^="/org/"]');
-                    if (orgLink) {
-                        // The org link text is "Company name: short description"
-                        // We only want the name before the colon.
-                        company = orgLink.innerText.split(':')[0].trim();
-                    }
-
-                    // ── 5. Job ID ─────────────────────────────────────────────
+                    // ── Job ID from URL ───────────────────────────────────────
                     const jobId = href.split('/job/')[1]?.split(/[/?#]/)[0] || String(Date.now());
 
                     results.push({
@@ -468,16 +482,19 @@ async function fetchHiringCafeJobs() {
 
             if (!jobs.length) return [];
 
+            // Sort by most recent first
             jobs.sort((a, b) => b.postedAt - a.postedAt);
 
-            // Deduplicate by ID
-            const seen = new Set();
+            // Deduplicate by job ID
+            const seenIds = new Set();
             const unique = [];
             for (const j of jobs) {
-                if (!seen.has(j.id)) { seen.add(j.id); unique.push(j); }
+                if (!seenIds.has(j.id)) { seenIds.add(j.id); unique.push(j); }
             }
 
             const top = unique[0];
+            console.log(`[Jobs] HiringCafe best: "${top.title}" @ ${top.location} | ${new Date(top.postedAt).toISOString()}`);
+
             return [{
                 id: top.id,
                 title: top.title,
