@@ -162,9 +162,12 @@ async function fetchCareerjetJobs() {
     // Careerjet has an official public API that requires no key and is never
     // bot-detected. affid can be any string — it is only used for affiliate
     // tracking and does not gate access to results.
+    // Careerjet API docs: https://www.careerjet.com/partners/api/
+    // Correct host is public.api.careerjet.net, path is /search
+    // locale_code en_LY targets the Libya site (careerjet.ly)
     const API_URL =
-        'https://api.careerjet.net/search?' +
-        'affid=libya_discord_bot' +
+        'https://public.api.careerjet.net/search?' +
+        'affid=73f7f75049a63e4dbbeaad53d1b5f11d' +
         '&locale_code=en_LY' +
         '&keywords=' +
         '&location=Libya' +
