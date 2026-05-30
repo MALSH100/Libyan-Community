@@ -642,6 +642,12 @@ const jobsCommands = [
         .setDescription('Manually check for new jobs across all sources (Admin only)')
         .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
         .setDMPermission(false),
+
+    new SlashCommandBuilder()
+        .setName('jobs-test-reliefweb')
+        .setDescription('Test the ReliefWeb API and show what it finds (Admin only)')
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+        .setDMPermission(false),
 ].map(cmd => cmd.toJSON());
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -700,6 +706,38 @@ module.exports = function initJobs({ client, db, saveData }) {
                 });
                 await updateJobs({ client, db, saveData, guildId: guild.id, forcePost: true });
                 return;
+            }
+
+            // ── /jobs-test-reliefweb ─────────────────────────────────────────
+            if (commandName === 'jobs-test-reliefweb') {
+                if (!isAdmin(interaction)) {
+                    return safeReply(interaction, { content: '❌ Admin only.', flags: 64 });
+                }
+                await safeDefer(interaction, { flags: 64 });
+                try {
+                    const jobs = await fetchReliefWebJobs();
+                    if (!jobs.length) {
+                        return safeReply(interaction, {
+                            content: '⚠️ ReliefWeb returned no jobs. Check logs for details.',
+                        });
+                    }
+                    const j = jobs[0];
+                    const ts = Math.floor(j.postedAt.getTime() / 1000);
+                    return safeReply(interaction, {
+                        content:
+                            `✅ **ReliefWeb API is working!**\n\n` +
+                            `**Title:** ${j.title}\n` +
+                            `**Organisation:** ${j.company || 'N/A'}\n` +
+                            `**Posted:** <t:${ts}:R>\n` +
+                            `**URL:** ${j.url}\n` +
+                            `**ID:** ${j.id}\n\n` +
+                            `_This was not posted to the channel — use \/jobs-refresh to post._`,
+                    });
+                } catch (err) {
+                    return safeReply(interaction, {
+                        content: `❌ ReliefWeb test failed: ${err.message.slice(0, 200)}`,
+                    });
+                }
             }
 
             // ── /jobs-refresh ────────────────────────────────────────────────
