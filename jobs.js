@@ -418,6 +418,16 @@ async function fetchLibyanJobsJobs() {
             // Wait for job cards — article[data-url] is the card root
             await page.waitForSelector('article[data-url]', { timeout: 15000 }).catch(() => {});
 
+            // ── DIAGNOSTIC: log what the page actually contains ───────────────
+            const pageTitle   = await page.title().catch(() => '(no title)');
+            const articleCount = await page.$$eval('article', els => els.length).catch(() => 0);
+            const dataUrlCount = await page.$$eval('article[data-url]', els => els.length).catch(() => 0);
+            const bodySnippet  = await page.evaluate(() => document.body?.innerText?.slice(0, 300) ?? '').catch(() => '');
+            console.log(`[Jobs] LibyanJobs page title: "${pageTitle}"`);
+            console.log(`[Jobs] LibyanJobs articles found: ${articleCount} total, ${dataUrlCount} with data-url`);
+            console.log(`[Jobs] LibyanJobs body snippet: ${bodySnippet.replace(/\n/g, ' ').slice(0, 200)}`);
+            // ─────────────────────────────────────────────────────────────────
+
             const jobs = await page.evaluate(() => {
                 // ── EXACT SELECTORS FROM REAL HTML ────────────────────────────
                 // Card:      article[data-url]
