@@ -259,35 +259,73 @@ async function runPOTD(client, db, saveData, awardLP, guildId, forced = false) {
     // ── Build the announcement embed ──────────────────────────────────────────
 
     // Detect image to show in the embed, checking three sources in priority order:
-    //   1. File attachment with image content type (uploaded directly to Discord)
-    //   2. Image URL embedded in message content (linked image, cdn.discordapp.com,
-    //      i.imgur.com, tenor.com GIFs, media.discordapp.net, etc.)
-    //   3. An embed on the original message that already has an image
-    const IMAGE_URL_PATTERN = /https?:\/\/\S+\.(?:png|jpe?g|gif|webp)(\?\S*)?/i;
-    const MEDIA_DOMAIN_PATTERN = /https?:\/\/(?:cdn\.discordapp\.com|media\.discordapp\.net|i\.imgur\.com|tenor\.com|c\.tenor\.com|giphy\.com|media\.giphy\.com)\S+/i;
+    //   1. File attachment uploaded directly to Discord
+    //   2. Image/GIF URL in message text — unwrapping Discord proxy URLs if needed
+    //   3. Image from an embed already on the original message
+    //
+    // Discord's setImage() only supports: png, jpg, gif, webp
+    // It does NOT support: mp4, webm, mov — those are filtered out.
+    // Discord often wraps external media in a proxy:
+    //   https://images-ext-1.discordapp.net/external/HASH/https/real.domain/file.gif
+    // We unwrap these to get the real URL so Discord can render them.
+
+    function unwrapDiscordProxy(url) {
+        // Matches: https://images-ext-N.discordapp.net/external/HASH/https/domain/path
+        const proxyMatch = url.match(/images-ext-\d+\.discordapp\.net\/external\/[^/]+\/(https?)\/(.*)/i);
+        if (proxyMatch) return `${proxyMatch[1]}://${proxyMatch[2]}`;
+        return url;
+    }
+
+    function isRenderableImage(url) {
+        // Only allow formats Discord can actually display in an embed image
+        const clean = url.split('?')[0].toLowerCase();
+        return /\.(png|jpe?g|gif|webp)$/.test(clean);
+    }
+
+    // Regex for direct image URLs anywhere in text
+    const IMAGE_URL_RE = /https?:\/\/\S+\.(?:png|jpe?g|gif|webp)(\?[^\s]*)?/gi;
+    // Regex for known media domains (may or may not end in image extension)
+    const MEDIA_DOMAIN_RE = /https?:\/\/(?:cdn\.discordapp\.com|media\.discordapp\.net|images-ext-\d+\.discordapp\.net|i\.imgur\.com|c\.tenor\.com|media\.tenor\.com|media\.giphy\.com)\S+/gi;
 
     let embedImage = null;
 
-    // 1. Uploaded file attachment
+    // 1. Uploaded file attachment (png/jpg/gif/webp only)
     const imageAttachment = [...winner.attachments.values()].find(a =>
-        a.contentType?.startsWith('image/') || /\.(png|jpe?g|gif|webp)$/i.test(a.name || '')
+        (a.contentType?.startsWith('image/') && !a.contentType?.includes('video')) ||
+        /\.(png|jpe?g|gif|webp)$/i.test(a.name || '')
     );
     if (imageAttachment) {
         embedImage = imageAttachment.url;
     }
 
-    // 2. Image URL or media link in message text
+    // 2. Image URL in message text — unwrap proxy, skip videos
     if (!embedImage && winner.content) {
-        const mediaMatch = winner.content.match(MEDIA_DOMAIN_PATTERN)
-                        || winner.content.match(IMAGE_URL_PATTERN);
-        if (mediaMatch) embedImage = mediaMatch[0];
+        const candidates = [
+            ...(winner.content.match(MEDIA_DOMAIN_RE) || []),
+            ...(winner.content.match(IMAGE_URL_RE)    || []),
+        ];
+        for (const raw of candidates) {
+            const real = unwrapDiscordProxy(raw);
+            if (isRenderableImage(real)) {
+                embedImage = real;
+                break;
+            }
+        }
     }
 
-    // 3. Image already on an embed in the original message
+    // 3. Image from an existing embed on the original message
     if (!embedImage && winner.embeds.length) {
         for (const e of winner.embeds) {
-            const src = e.image?.url || e.thumbnail?.url || e.video?.url;
-            if (src) { embedImage = src; break; }
+            // prefer thumbnail over image — thumbnails are usually the GIF/image preview
+            const candidates = [e.thumbnail?.url, e.image?.url].filter(Boolean);
+            for (const raw of candidates) {
+                const real = unwrapDiscordProxy(raw);
+                if (isRenderableImage(real)) {
+                    embedImage = real;
+                    break;
+                }
+            }
+            if (embedImage) break;
         }
     }
 
