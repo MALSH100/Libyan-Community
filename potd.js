@@ -257,15 +257,56 @@ async function runPOTD(client, db, saveData, awardLP, guildId, forced = false) {
     }
 
     // ── Build the announcement embed ──────────────────────────────────────────
-    // Reconstruct what the winning post contained
+
+    // Detect image to show in the embed, checking three sources in priority order:
+    //   1. File attachment with image content type (uploaded directly to Discord)
+    //   2. Image URL embedded in message content (linked image, cdn.discordapp.com,
+    //      i.imgur.com, tenor.com GIFs, media.discordapp.net, etc.)
+    //   3. An embed on the original message that already has an image
+    const IMAGE_URL_PATTERN = /https?:\/\/\S+\.(?:png|jpe?g|gif|webp)(\?\S*)?/i;
+    const MEDIA_DOMAIN_PATTERN = /https?:\/\/(?:cdn\.discordapp\.com|media\.discordapp\.net|i\.imgur\.com|tenor\.com|c\.tenor\.com|giphy\.com|media\.giphy\.com)\S+/i;
+
+    let embedImage = null;
+
+    // 1. Uploaded file attachment
+    const imageAttachment = [...winner.attachments.values()].find(a =>
+        a.contentType?.startsWith('image/') || /\.(png|jpe?g|gif|webp)$/i.test(a.name || '')
+    );
+    if (imageAttachment) {
+        embedImage = imageAttachment.url;
+    }
+
+    // 2. Image URL or media link in message text
+    if (!embedImage && winner.content) {
+        const mediaMatch = winner.content.match(MEDIA_DOMAIN_PATTERN)
+                        || winner.content.match(IMAGE_URL_PATTERN);
+        if (mediaMatch) embedImage = mediaMatch[0];
+    }
+
+    // 3. Image already on an embed in the original message
+    if (!embedImage && winner.embeds.length) {
+        for (const e of winner.embeds) {
+            const src = e.image?.url || e.thumbnail?.url || e.video?.url;
+            if (src) { embedImage = src; break; }
+        }
+    }
+
+    // Build the text preview — strip raw image URLs from content so they
+    // don't appear as ugly links in the quoted block when we're already
+    // showing them as the embed image.
+    let postContent = winner.content || '';
+    if (embedImage && postContent) {
+        postContent = postContent.replace(embedImage, '').trim();
+    }
+
     let postPreview = '';
-    if (winner.content) {
-        postPreview = winner.content.length > 300
-            ? winner.content.slice(0, 297) + '...'
-            : winner.content;
-    } else if (winner.attachments.size) {
+    if (postContent) {
+        postPreview = postContent.length > 300
+            ? postContent.slice(0, 297) + '...'
+            : postContent;
+    } else if (!embedImage && winner.attachments.size) {
         postPreview = `📎 *${winner.attachments.size} attachment(s)*`;
-    } else if (winner.embeds.length) {
+    } else if (!embedImage && winner.embeds.length) {
         postPreview = `🔗 *Embedded content*`;
     }
 
@@ -288,11 +329,8 @@ async function runPOTD(client, db, saveData, awardLP, guildId, forced = false) {
 
     if (streakText) embed.addFields({ name: '\u200b', value: streakText });
 
-    // If the winning post had an image attachment, show it in the embed
-    const imageAttachment = [...winner.attachments.values()].find(a =>
-        a.contentType?.startsWith('image/')
-    );
-    if (imageAttachment) embed.setImage(imageAttachment.url);
+    // Apply the detected image to the embed
+    if (embedImage) embed.setImage(embedImage);
 
     await announceChannel.send({ content: `<@${winnerId}>`, embeds: [embed] }).catch(() => {});
 
