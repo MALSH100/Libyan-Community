@@ -472,6 +472,7 @@ const initYarayt = require('./yarayt');
 const initBlackMarketExchange = require('./black-market-exchange');
 //const initLibyaNews = require('./libya-news');
 const initJobs = require('./jobs');
+const { initPOTD } = require('./potd');
 //const initTranslator = require('./translator');
 
 function getAllCommands() {
@@ -482,6 +483,7 @@ function getAllCommands() {
   let newsCommands = [];
   let jobsCommands = [];
   let translatorCommands = [];   // ADD
+  let potdCommands = [];
   try {
     pokeCommands = getPokemonCommands();
   } catch (e) {
@@ -508,11 +510,16 @@ function getAllCommands() {
     console.error('Could not load jobs.js commands:', e.message);
   }
   try {
+    potdCommands = require('./potd').commands || [];
+  } catch (e) {
+    console.error('Could not load potd.js commands:', e.message);
+  }
+  try {
     translatorCommands = initTranslator.commands || [];   // ADD
   } catch (e) {
     console.error('Could not load translator.js commands:', e.message);
   }
-  _allCommands = [...commands, ...pokeCommands, ...yaraytCommands, ...exchangeCommands, ...newsCommands, ...jobsCommands, ...translatorCommands];   // ADD ...translatorCommands  // ← ADD ...jobsCommands
+  _allCommands = [...commands, ...pokeCommands, ...yaraytCommands, ...exchangeCommands, ...newsCommands, ...jobsCommands, ...potdCommands, ...translatorCommands];   // ADD ...translatorCommands  // ← ADD ...jobsCommands
   console.log(`📋 Command list built: ${_allCommands.map(c => c.name).join(', ')}`);
   return _allCommands;
 }
@@ -1985,6 +1992,9 @@ initBlackMarketExchange({ client, db, saveData });
 
 //Job System
 initJobs({ client, db, saveData });
+
+// Post of the Day
+initPOTD({ client, db, saveData, awardLP });
 
 // Translator (reaction-based Arabic → English)
 //initTranslator(client, db, saveData);
