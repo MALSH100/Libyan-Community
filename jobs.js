@@ -9,6 +9,7 @@ const MAX_HISTORY = 50;
 const SOURCE_COLORS = {
     opensooq:   0x2B5B84,
     hiringcafe: 0x1DB954,
+    reliefweb:  0xF2642D,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -364,6 +365,98 @@ async function fetchHiringCafeJobs() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Source 3 — ReliefWeb (official REST API)
+//
+// api.reliefweb.int is a dedicated API subdomain — no Cloudflare, no scraping,
+// plain axios JSON.  Filter is country=Libya, sorted by date descending.
+//
+// API fields used:
+//   title          → fields.title
+//   organisation   → fields.source[0].name
+//   date posted    → fields.date.created  (exact ISO 8601)
+//   url            → "https://reliefweb.int" + fields.url_alias
+//   location       → hardcoded "Libya" (site doesn't expose city data)
+//   id             → data[].id
+//
+// NOTE: appname "apidoc" is the official placeholder used in ReliefWeb docs.
+// Swap it for your approved appname once you receive the confirmation email.
+// ─────────────────────────────────────────────────────────────────────────────
+async function fetchReliefWebJobs() {
+    // When your appname is approved, replace "apidoc" below with your appname.
+    const APPNAME = process.env.RELIEFWEB_APPNAME || 'apidoc';
+
+    const API_URL =
+        'https://api.reliefweb.int/v2/jobs' +
+        '?appname=' + APPNAME +
+        '&filter[field]=country' +
+        '&filter[value]=Libya' +
+        '&sort[]=date:desc' +
+        '&limit=10' +
+        '&fields[include][]=title' +
+        '&fields[include][]=date' +
+        '&fields[include][]=source' +
+        '&fields[include][]=url_alias';
+
+    try {
+        const axios = require('axios');
+        const response = await axios.get(API_URL, {
+            timeout: 15000,
+            headers: {
+                'Accept': 'application/json',
+                'User-Agent': 'LibyaJobsDiscordBot/1.0',
+            },
+        });
+
+        const data = response.data;
+
+        if (!data?.data?.length) {
+            console.warn('[Jobs] ReliefWeb: no jobs returned from API');
+            return [];
+        }
+
+        const jobs = data.data.map(item => {
+            const f = item.fields;
+
+            // Exact ISO timestamp — far more reliable than any badge scraping
+            const postedAt = f?.date?.created
+                ? Date.parse(f.date.created)
+                : Date.now();
+
+            // Organisation name — source is an array, take the first
+            const company = f?.source?.[0]?.name || '';
+
+            // Full URL from the alias field
+            const url = f?.url_alias
+                ? `https://reliefweb.int${f.url_alias}`
+                : `https://reliefweb.int/job/${item.id}`;
+
+            return {
+                id:       `reliefweb_${item.id}`,
+                title:    (f?.title || '').trim(),
+                url,
+                location: 'Libya',
+                company,
+                postedAt,
+                source:   'reliefweb',
+            };
+        }).filter(j => j.title && j.url);
+
+        if (!jobs.length) return [];
+
+        jobs.sort((a, b) => b.postedAt - a.postedAt);
+
+        console.log(`[Jobs] ReliefWeb: ${jobs.length} jobs found, latest: "${jobs[0].title}" by ${jobs[0].company}`);
+
+        const top = jobs[0];
+        return [{ ...top, postedAt: new Date(top.postedAt) }];
+
+    } catch (err) {
+        console.error('[Jobs] ReliefWeb error:', err.message);
+        return [];
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Combine all sources → return the single most recent job across all of them.
 // Each source runs in parallel; failures are isolated.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -371,6 +464,7 @@ async function getLatestJob() {
     const results = await Promise.allSettled([
         fetchOpenSooqJobs(),
         fetchHiringCafeJobs(),
+        fetchReliefWebJobs(),
     ]);
 
     const allJobs = [];
@@ -431,6 +525,7 @@ async function postJobsUpdate(client, jobsState, job) {
     const sourceLabels = {
         opensooq:  '🔵 OpenSooq',
         hiringcafe:'🟢 Hiring.cafe',
+        reliefweb: '🟠 ReliefWeb',
     };
     const sourceLabel = sourceLabels[job.source] || job.source;
 
