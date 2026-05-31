@@ -473,7 +473,7 @@ const initBlackMarketExchange = require('./black-market-exchange');
 //const initLibyaNews = require('./libya-news');
 const initJobs = require('./jobs');
 const { initPOTD } = require('./potd');
-//const initTranslator = require('./translator');
+const initTranslator = require('./translator');
 
 function getAllCommands() {
   if (_allCommands) return _allCommands;
@@ -1997,7 +1997,7 @@ initJobs({ client, db, saveData });
 initPOTD({ client, db, saveData, awardLP });
 
 // Translator (reaction-based Arabic → English)
-//initTranslator(client, db, saveData);
+initTranslator(client, db, saveData);
 
 // ─── Login ────────────────────────────────────────────────────────────────────
 
