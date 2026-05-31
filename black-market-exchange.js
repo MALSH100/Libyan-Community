@@ -147,15 +147,27 @@ function isLoginPage(url, bodyText) {
 }
 
 async function scrapeFacebookRates() {
-  const { chromium } = require('playwright');
+  // playwright-extra + stealth plugin defeats Facebook's headless browser detection.
+  // Install with: npm install playwright-extra puppeteer-extra-plugin-stealth
+  const { chromium: chromiumExtra } = require('playwright-extra');
+  const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+  chromiumExtra.use(StealthPlugin());
+
   let browser, context, page;
   try {
-    browser = await chromium.launch({
+    browser = await chromiumExtra.launch({
       headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-blink-features=AutomationControlled'],
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-blink-features=AutomationControlled',
+        '--disable-features=IsolateOrigins,site-per-process',
+        '--window-size=1365,900',
+      ],
     });
 
-    // FIX 2: Reuse saved cookies/session if available
+    // Reuse saved session cookies if available to skip login
     const storageState = fs.existsSync(COOKIE_PATH) ? COOKIE_PATH : undefined;
     if (storageState) {
       console.log('[Exchange] Reusing saved Facebook session from', COOKIE_PATH);
@@ -163,25 +175,39 @@ async function scrapeFacebookRates() {
 
     context = await browser.newContext({
       viewport: { width: 1365, height: 900 },
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
       locale: 'en-GB',
+      timezoneId: 'Africa/Tripoli',
       storageState,
+      extraHTTPHeaders: {
+        'Accept-Language': 'en-GB,en;q=0.9',
+      },
+    });
+
+    // Mask webdriver property at the page level as an extra measure
+    await context.addInitScript(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+      Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+      Object.defineProperty(navigator, 'languages', { get: () => ['en-GB', 'en'] });
+      window.chrome = { runtime: {} };
     });
 
     page = await context.newPage();
-    await page.goto(SOURCE_URL, { waitUntil: 'domcontentloaded', timeout: 45000 });
-    await page.waitForTimeout(5000);
+
+    // Go to the exchange page
+    await page.goto(SOURCE_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await page.waitForTimeout(6000);
 
     const currentUrl = page.url();
-    // FIX 1: Check by URL *and* page content — Facebook sometimes serves the
-    // login wall inline without changing the URL
     const earlyText = await page.locator('body').innerText({ timeout: 10000 }).catch(() => '');
+    console.log('[Exchange] Initial URL:', currentUrl);
+    console.log('[Exchange] Initial body length:', earlyText.length);
 
     if (isLoginPage(currentUrl, earlyText)) {
-      console.log('[Exchange] Login wall detected. Attempting to log in...');
+      console.log('[Exchange] Login wall detected. Logging in...');
 
-      // Dismiss any cookie consent / overlay that intercepts pointer events
-      // Facebook renders a __fb-light-mode overlay div that blocks clicks
-      const overlayDismissSelectors = [
+      // Dismiss cookie/consent overlays first
+      const overlaySelectors = [
         '[data-testid="cookie-policy-manage-dialog-accept-button"]',
         'button[title="Allow all cookies"]',
         'div[aria-label="Allow all cookies"]',
@@ -190,98 +216,101 @@ async function scrapeFacebookRates() {
         'button:has-text("Allow all")',
         'button:has-text("Only allow essential cookies")',
       ];
-      for (const sel of overlayDismissSelectors) {
+      for (const sel of overlaySelectors) {
         try {
           const btn = page.locator(sel).first();
           if (await btn.isVisible({ timeout: 2000 })) {
             await btn.click({ timeout: 5000 });
-            console.log('[Exchange] Dismissed overlay/cookie banner:', sel);
-            await page.waitForTimeout(1000);
+            console.log('[Exchange] Dismissed overlay:', sel);
+            await page.waitForTimeout(1500);
             break;
           }
-        } catch { /* not present, try next */ }
+        } catch { /* not present */ }
       }
 
-      // Fill email
-      await page.waitForSelector('input[type="email"], input[name="email"], #email', { timeout: 10000 });
-      await page.locator('input[type="email"], input[name="email"], #email').first().fill(process.env.FACEBOOK_EMAIL);
+      // Type email character by character to mimic human input
+      const emailInput = page.locator('input[type="email"], input[name="email"], #email').first();
+      await emailInput.waitFor({ timeout: 10000 });
+      await emailInput.click();
+      await page.waitForTimeout(300);
+      for (const char of process.env.FACEBOOK_EMAIL) {
+        await page.keyboard.type(char, { delay: 80 + Math.random() * 60 });
+      }
+      await page.waitForTimeout(500 + Math.random() * 300);
 
-      // Fill password
-      await page.locator('input[type="password"], input[name="pass"], #pass').first().fill(process.env.FACEBOOK_PASSWORD);
-      await page.waitForTimeout(500);
+      // Tab to password and type it
+      await page.keyboard.press('Tab');
+      await page.waitForTimeout(300);
+      for (const char of process.env.FACEBOOK_PASSWORD) {
+        await page.keyboard.type(char, { delay: 80 + Math.random() * 60 });
+      }
+      await page.waitForTimeout(500 + Math.random() * 300);
 
-      // Click login — try locator first, fall back to keyboard Enter, then JS click
-      const loginLocator = page.locator('button[type="submit"], button[name="login"], #loginbutton').first();
-      const loginVisible = await loginLocator.isVisible({ timeout: 3000 }).catch(() => false);
+      // Submit
+      const loginBtn = page.locator('button[type="submit"], button[name="login"], #loginbutton').first();
+      const loginVisible = await loginBtn.isVisible({ timeout: 3000 }).catch(() => false);
       if (loginVisible) {
-        // Use force:true to bypass any remaining overlay interception
-        await loginLocator.click({ force: true, timeout: 15000 });
+        await loginBtn.click({ force: true, timeout: 15000 });
       } else {
-        console.log('[Exchange] Login button not visible, pressing Enter');
         await page.keyboard.press('Enter');
       }
 
       await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
-      await page.waitForTimeout(3000);
+      await page.waitForTimeout(4000);
 
-      // Dismiss "Save login info?" prompt if it appears
-      const saveInfoLocator = page.locator('button[value="1"], button[data-testid="save-login-button"]').first();
-      if (await saveInfoLocator.isVisible({ timeout: 3000 }).catch(() => false)) {
-        await saveInfoLocator.click({ force: true, timeout: 5000 }).catch(() => {});
+      // Dismiss "Save login info?" if shown
+      const saveBtn = page.locator('button[value="1"], button[data-testid="save-login-button"]').first();
+      if (await saveBtn.isVisible({ timeout: 3000 }).catch(() => false)) {
+        await saveBtn.click({ force: true }).catch(() => {});
+        await page.waitForTimeout(2000);
       }
-      await page.waitForTimeout(2000);
 
-      // Persist the session so next scrape reuses cookies
+      // Save session for next time
       await context.storageState({ path: COOKIE_PATH });
-      console.log('[Exchange] Login successful. Session saved to', COOKIE_PATH);
+      console.log('[Exchange] Login successful. Session saved.');
     }
 
-    // After login (or if already logged in), wait for the page to actually render
-    // content before scrolling. Facebook is a SPA — the DOM loads but content
-    // is injected asynchronously, so we wait for a known content landmark.
-    console.log('[Exchange] Waiting for page content to render...');
+    // If we got redirected to the home feed after login, go back to the exchange page
+    const afterLoginUrl = page.url();
+    if (!afterLoginUrl.includes('100064752788893') && !afterLoginUrl.includes('Dollar-Euro-Pound')) {
+      console.log('[Exchange] Redirected away from exchange page, navigating back...');
+      await page.goto(SOURCE_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+      await page.waitForTimeout(6000);
+    }
+
+    // Wait for real post content to appear in the DOM
+    console.log('[Exchange] Waiting for post content...');
     try {
-      // Wait for any post/article content to appear — indicates the feed loaded
-      await page.waitForSelector(
-        '[role="article"], [data-pagelet="ProfileTilesFeed"], [data-pagelet="page_insights"], .x1yztbdb, [role="main"]',
-        { timeout: 20000 }
-      );
+      await page.waitForSelector('[role="article"], [role="main"] [data-ad-comet-preview], [role="main"]', { timeout: 25000 });
     } catch {
-      // Selector didn't match — give the page extra time and hope for the best
-      console.log('[Exchange] Content landmark not found, waiting 8s extra...');
+      console.log('[Exchange] Article selector timed out, continuing anyway...');
       await page.waitForTimeout(8000);
     }
 
-    // Now navigate directly to the page to ensure we're on the right URL
-    // (after login Facebook sometimes redirects to the home feed)
-    const postLoginUrl = page.url();
-    if (!postLoginUrl.includes('100064752788893') && !postLoginUrl.includes('Dollar-Euro-Pound')) {
-      console.log('[Exchange] Post-login URL is not the exchange page, navigating back...');
-      await page.goto(SOURCE_URL, { waitUntil: 'domcontentloaded', timeout: 45000 });
-      await page.waitForTimeout(5000);
-      try {
-        await page.waitForSelector(
-          '[role="article"], [data-pagelet="ProfileTilesFeed"], [role="main"]',
-          { timeout: 20000 }
-        );
-      } catch {
-        await page.waitForTimeout(8000);
-      }
-    }
-
-    for (let i = 0; i < 4; i++) {
-      await page.mouse.wheel(0, 900);
+    // Scroll to load lazy content
+    for (let i = 0; i < 5; i++) {
+      await page.mouse.wheel(0, 800);
       await page.waitForTimeout(1500);
     }
-
-    // Extra settle time after scrolling
     await page.waitForTimeout(3000);
 
-    const text = await page.locator('body').innerText({ timeout: 15000 });
+    const finalUrl = page.url();
+    const text = await page.locator('body').innerText({ timeout: 15000 }).catch(() => '');
+    const html = await page.content().catch(() => '');
 
-    // Extra guard: if after login we still see the login wall, bail clearly
-    if (isLoginPage(page.url(), text)) {
-      throw new Error('Still on login page after login attempt — check FACEBOOK_EMAIL / FACEBOOK_PASSWORD env vars.');
+    console.log('[Exchange] Final URL:', finalUrl);
+    console.log('[Exchange] Body text length:', text.length);
+    console.log('[Exchange] Body text (first 2000 chars):\n', text.slice(0, 2000));
+    if (text.length < 200) {
+      console.log('[Exchange] HTML (first 3000 chars):\n', html.slice(0, 3000));
+    }
+
+    if (isLoginPage(finalUrl, text)) {
+      throw new Error('Still on login page after login attempt - check FACEBOOK_EMAIL / FACEBOOK_PASSWORD env vars.');
+    }
+
+    if (text.length < 100) {
+      throw new Error(`Page body is empty (${text.length} chars) - stealth may not be installed or Facebook is serving a challenge. HTML logged above.`);
     }
 
     const rates = parseRatesFromText(text);
