@@ -15,7 +15,7 @@ function getUserTranslatorPref(db, guildId, userId) {
     if (!db[guildId]) db[guildId] = {};
     if (!db[guildId].__translator) db[guildId].__translator = {};
     if (db[guildId].__translator[userId] === undefined) {
-        db[guildId].__translator[userId] = true; // enabled by default
+        db[guildId].__translator[userId] = false; // disabled by default
     }
     return db[guildId].__translator[userId];
 }
