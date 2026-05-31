@@ -223,86 +223,11 @@ async function scrapeFacebookRates() {
     const earlyText = await page.locator('body').innerText({ timeout: 10000 }).catch(() => '');
     console.log('[Exchange] Final URL after loading attempts:', currentUrl);
 
-     if (isLoginPage(currentUrl, earlyText)) {
+    if (isLoginPage(currentUrl, earlyText)) {
       console.log('[Exchange] Login wall detected. Logging in...');
 
-      // Dismiss cookie/consent overlays first
-      const overlaySelectors = [
-        '[data-testid="cookie-policy-manage-dialog-accept-button"]',
-        'button[title="Allow all cookies"]',
-        'div[aria-label="Allow all cookies"]',
-        '[data-cookiebanner="accept_button"]',
-        'button:has-text("Accept All")',
-        'button:has-text("Allow all")',
-        'div[role="dialog"] button:has-text("Accept")',
-        'div[role="dialog"] button:has-text("Allow")',
-      ];
-      for (const sel of overlaySelectors) {
-        try {
-          const btn = page.locator(sel).first();
-          if (await btn.isVisible({ timeout: 2000 })) {
-            await btn.click({ timeout: 5000 });
-            console.log('[Exchange] Dismissed overlay:', sel);
-            await page.waitForTimeout(1500);
-            break;
-          }
-        } catch { /* not present */ }
-      }
-
-      await page.waitForTimeout(2000);
-
-      // Try to click email field – use JavaScript click if blocked
-      const emailInput = page.locator('input[type="email"], input[name="email"], #email').first();
-      await emailInput.waitFor({ timeout: 10000 });
-      try {
-        await emailInput.click({ timeout: 5000 });
-      } catch {
-        console.log('[Exchange] Normal click blocked, using JavaScript click...');
-        await page.evaluate(() => {
-          const input = document.querySelector('input[type="email"], input[name="email"], #email');
-          if (input) input.click();
-        });
-      }
-      await page.waitForTimeout(300);
-      for (const char of process.env.FACEBOOK_EMAIL) {
-        await page.keyboard.type(char, { delay: 80 + Math.random() * 60 });
-      }
-      await page.waitForTimeout(500 + Math.random() * 300);
-
-      // Tab to password
-      await page.keyboard.press('Tab');
-      await page.waitForTimeout(300);
-      for (const char of process.env.FACEBOOK_PASSWORD) {
-        await page.keyboard.type(char, { delay: 80 + Math.random() * 60 });
-      }
-      await page.waitForTimeout(500 + Math.random() * 300);
-
-      // Submit
-      const loginBtn = page.locator('button[type="submit"], button[name="login"], #loginbutton').first();
-      if (await loginBtn.isVisible({ timeout: 3000 }).catch(() => false)) {
-        await loginBtn.click({ force: true, timeout: 15000 });
-      } else {
-        await page.keyboard.press('Enter');
-      }
-
-      await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
-      await page.waitForTimeout(4000);
-
-      // Dismiss "Save login info?" if shown
-      const saveBtn = page.locator('button[value="1"], button[data-testid="save-login-button"]').first();
-      if (await saveBtn.isVisible({ timeout: 3000 }).catch(() => false)) {
-        await saveBtn.click({ force: true }).catch(() => {});
-        await page.waitForTimeout(2000);
-      }
-
-      // Save session for next time
-      await context.storageState({ path: COOKIE_PATH });
-      console.log('[Exchange] Login successful. Session saved.');
-
-      // After login, wait and check for challenge page
-            // --- Begin actual login code ---
-      // Dismiss cookie overlays
-      const overlaySelectors = [
+      // --- Dismiss cookie/consent overlays (only once) ---
+      const overlayBtns = [
         '[data-testid="cookie-policy-manage-dialog-accept-button"]',
         'button[title="Allow all cookies"]',
         'div[aria-label="Allow all cookies"]',
@@ -312,7 +237,7 @@ async function scrapeFacebookRates() {
         'div[role="dialog"] button:has-text("Accept")',
         'div[role="dialog"] button:has-text("OK")',
       ];
-      for (const sel of overlaySelectors) {
+      for (const sel of overlayBtns) {
         try {
           const btn = page.locator(sel).first();
           if (await btn.isVisible({ timeout: 2000 })) {
@@ -324,7 +249,7 @@ async function scrapeFacebookRates() {
         } catch {}
       }
 
-      // Fill email
+      // --- Fill email ---
       const emailInput = page.locator('input[type="email"], input[name="email"], #email').first();
       await emailInput.waitFor({ timeout: 10000 });
       await emailInput.click();
@@ -334,7 +259,7 @@ async function scrapeFacebookRates() {
       }
       await page.waitForTimeout(500 + Math.random() * 300);
 
-      // Fill password
+      // --- Fill password ---
       const passInput = page.locator('input[type="password"], input[name="pass"], #pass').first();
       await passInput.waitFor({ timeout: 5000 });
       await passInput.click();
@@ -343,7 +268,7 @@ async function scrapeFacebookRates() {
       }
       await page.waitForTimeout(500 + Math.random() * 300);
 
-      // Submit
+      // --- Submit ---
       const loginBtn = page.locator('button[type="submit"], button[name="login"], #loginbutton').first();
       const loginVisible = await loginBtn.isVisible({ timeout: 3000 }).catch(() => false);
       if (loginVisible) {
@@ -355,14 +280,14 @@ async function scrapeFacebookRates() {
       await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
       await page.waitForTimeout(4000);
 
-      // Dismiss "Save login info?" if shown
+      // --- Dismiss "Save login info?" ---
       const saveBtn = page.locator('button[value="1"], button[data-testid="save-login-button"]').first();
       if (await saveBtn.isVisible({ timeout: 3000 }).catch(() => false)) {
         await saveBtn.click();
         await page.waitForTimeout(2000);
       }
 
-      // Save session cookies
+      // --- Save session cookies ---
       await context.storageState({ path: COOKIE_PATH });
       console.log('[Exchange] Login successful. Session saved.');
 
@@ -372,7 +297,7 @@ async function scrapeFacebookRates() {
         throw new Error('Two‑factor authentication (2FA) is enabled on this Facebook account. Please disable 2FA for the bot account.');
       }
 
-      // Re-check for empty body after login
+      // --- Re-check for empty body after login ---
       const afterLoginText = await page.locator('body').innerText({ timeout: 15000 }).catch(() => '');
       if (afterLoginText.length < 100 && (afterLoginText.includes('Checking your browser') || afterLoginText.includes('security'))) {
         throw new Error('Login succeeded but Facebook returned a challenge page. Manual intervention required.');
