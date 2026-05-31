@@ -698,47 +698,21 @@ async function postUpdate(client, guildId, exchangeData, latest, forced = false)
     files.push(chartFile);
     embed.setImage('attachment://libya-exchange-chart-USD.png');
     row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('chart_usd').setLabel('$ USD').setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId('chart_eur').setLabel('€ EUR').setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId('chart_gbp').setLabel('£ GBP').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId(`chart_usd_${guildId}`).setLabel('$ USD').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId(`chart_eur_${guildId}`).setLabel('€ EUR').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId(`chart_gbp_${guildId}`).setLabel('£ GBP').setStyle(ButtonStyle.Primary),
     );
   }
 
   const message = await channel.send({ embeds: [embed], files, components: row ? [row] : [] });
 
-  if (row && message) {
-    const filter = i => ['chart_usd', 'chart_eur', 'chart_gbp'].includes(i.customId);
-    const collector = message.createMessageComponentCollector({ filter, time: 300000 });
-
-    collector.on('collect', async i => {
-      try {
-        let currency = 'USD';
-        if (i.customId === 'chart_eur') currency = 'EUR';
-        if (i.customId === 'chart_gbp') currency = 'GBP';
-
-        // Acknowledge the click immediately so Discord doesn't show "interaction failed"
-        await i.deferUpdate();
-
-        const newChart = await chartAttachment(exchangeData, currency);
-        const updatedEmbed = EmbedBuilder.from(embed)
-          .setImage(`attachment://libya-exchange-chart-${currency}.png`);
-
-        // FIX 3: Edit the shared message directly rather than i.editReply()
-        // This ensures all users see the update, not just whoever clicked
-        await message.edit({
-          embeds: [updatedEmbed],
-          files: [newChart],
-          components: [row],
-          attachments: [], // clear the previous chart image so the new one takes over
-        });
-      } catch (err) {
-        console.error('[Exchange] Button error:', err);
-        await i.followUp({ content: 'Failed to update chart.', ephemeral: true }).catch(() => {});
-      }
-    });
-
-    collector.on('end', () => message.edit({ components: [] }).catch(() => {}));
-  }
+  // No local collector – buttons will be handled globally.
+  // We need to store the exchangeData and embed reference? The global handler will fetch exchangeData again.
+  // To keep the chart updating correctly, we save the message ID and guild ID in a Map for quick access,
+  // but we can also re‑fetch exchangeData from the database when the button is clicked (same as before).
+  // Simpler: let the global handler call `chartAttachment` with the current history.
+  // The button's customId already includes the currency, but we also need to know which guild's exchangeData to use.
+  // We'll encode the guildId in the customId as well.
   return true;
 }
 
@@ -851,9 +825,47 @@ module.exports = function initBlackMarketExchange({ client, db, saveData }) {
         });
         return safeReply(interaction, { content: msg, flags: 64 });
       }
-    } catch (err) {
-      console.error(`Exchange command failed (${commandName}):`, err);
-      return safeReply(interaction, { content: `❌ Exchange error: ${err.message?.slice(0, 200)}`, flags: 64 });
+    // Handle button clicks (global, no timeout)
+    if (interaction.isButton()) {
+      const customId = interaction.customId;
+      if (customId.startsWith('chart_usd_') || customId.startsWith('chart_eur_') || customId.startsWith('chart_gbp_')) {
+        await interaction.deferUpdate(); // acknowledge the click immediately
+
+        // Extract currency and guildId from customId
+        let currency = 'USD';
+        if (customId.startsWith('chart_eur_')) currency = 'EUR';
+        if (customId.startsWith('chart_gbp_')) currency = 'GBP';
+        const guildId = customId.split('_').pop();
+
+        // Get the exchange data for this guild
+        const exchangeData = getExchangeData(db, guildId);
+        if (!exchangeData.history || exchangeData.history.length < 2) {
+          await interaction.followUp({ content: 'Not enough history to update chart.', ephemeral: true });
+          return;
+        }
+
+        // Generate the new chart for the selected currency
+        const newChart = await chartAttachment(exchangeData, currency);
+
+        // Find the original message (the interaction is on that message)
+        const message = interaction.message;
+        if (!message) {
+          await interaction.followUp({ content: 'Could not find original message.', ephemeral: true });
+          return;
+        }
+
+        // Update the embed's image and keep the same buttons (they stay forever)
+        const embed = message.embeds[0];
+        const updatedEmbed = EmbedBuilder.from(embed)
+          .setImage(`attachment://libya-exchange-chart-${currency}.png`);
+
+        await message.edit({
+          embeds: [updatedEmbed],
+          files: [newChart],
+          components: message.components, // keep existing buttons
+        });
+        return;
+      }
     }
   });
 };
