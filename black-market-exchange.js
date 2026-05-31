@@ -178,21 +178,60 @@ async function scrapeFacebookRates() {
 
     if (isLoginPage(currentUrl, earlyText)) {
       console.log('[Exchange] Login wall detected. Attempting to log in...');
+
+      // Dismiss any cookie consent / overlay that intercepts pointer events
+      // Facebook renders a __fb-light-mode overlay div that blocks clicks
+      const overlayDismissSelectors = [
+        '[data-testid="cookie-policy-manage-dialog-accept-button"]',
+        'button[title="Allow all cookies"]',
+        'div[aria-label="Allow all cookies"]',
+        '[data-cookiebanner="accept_button"]',
+        'button:has-text("Accept All")',
+        'button:has-text("Allow all")',
+        'button:has-text("Only allow essential cookies")',
+      ];
+      for (const sel of overlayDismissSelectors) {
+        try {
+          const btn = page.locator(sel).first();
+          if (await btn.isVisible({ timeout: 2000 })) {
+            await btn.click({ timeout: 5000 });
+            console.log('[Exchange] Dismissed overlay/cookie banner:', sel);
+            await page.waitForTimeout(1000);
+            break;
+          }
+        } catch { /* not present, try next */ }
+      }
+
+      // Fill email
       await page.waitForSelector('input[type="email"], input[name="email"], #email', { timeout: 10000 });
-      const emailInput = await page.$('input[type="email"], input[name="email"], #email');
-      if (emailInput) await emailInput.fill(process.env.FACEBOOK_EMAIL);
-      const passInput = await page.$('input[type="password"], input[name="pass"], #pass');
-      if (passInput) await passInput.fill(process.env.FACEBOOK_PASSWORD);
-      const loginButton = await page.$('button[type="submit"], button[name="login"], #loginbutton, div[aria-label="Log in"]');
-      if (loginButton) await loginButton.click();
-      else await page.keyboard.press('Enter');
+      await page.locator('input[type="email"], input[name="email"], #email').first().fill(process.env.FACEBOOK_EMAIL);
+
+      // Fill password
+      await page.locator('input[type="password"], input[name="pass"], #pass').first().fill(process.env.FACEBOOK_PASSWORD);
+      await page.waitForTimeout(500);
+
+      // Click login — try locator first, fall back to keyboard Enter, then JS click
+      const loginLocator = page.locator('button[type="submit"], button[name="login"], #loginbutton').first();
+      const loginVisible = await loginLocator.isVisible({ timeout: 3000 }).catch(() => false);
+      if (loginVisible) {
+        // Use force:true to bypass any remaining overlay interception
+        await loginLocator.click({ force: true, timeout: 15000 });
+      } else {
+        console.log('[Exchange] Login button not visible, pressing Enter');
+        await page.keyboard.press('Enter');
+      }
+
       await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
       await page.waitForTimeout(3000);
-      const saveInfoBtn = await page.$('button[value="1"], button[data-testid="save-login-button"]');
-      if (saveInfoBtn) await saveInfoBtn.click();
+
+      // Dismiss "Save login info?" prompt if it appears
+      const saveInfoLocator = page.locator('button[value="1"], button[data-testid="save-login-button"]').first();
+      if (await saveInfoLocator.isVisible({ timeout: 3000 }).catch(() => false)) {
+        await saveInfoLocator.click({ force: true, timeout: 5000 }).catch(() => {});
+      }
       await page.waitForTimeout(2000);
 
-      // FIX 2: Persist the session so next scrape doesn't need to log in again
+      // Persist the session so next scrape reuses cookies
       await context.storageState({ path: COOKIE_PATH });
       console.log('[Exchange] Login successful. Session saved to', COOKIE_PATH);
     }
