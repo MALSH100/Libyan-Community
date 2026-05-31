@@ -236,10 +236,46 @@ async function scrapeFacebookRates() {
       console.log('[Exchange] Login successful. Session saved to', COOKIE_PATH);
     }
 
+    // After login (or if already logged in), wait for the page to actually render
+    // content before scrolling. Facebook is a SPA — the DOM loads but content
+    // is injected asynchronously, so we wait for a known content landmark.
+    console.log('[Exchange] Waiting for page content to render...');
+    try {
+      // Wait for any post/article content to appear — indicates the feed loaded
+      await page.waitForSelector(
+        '[role="article"], [data-pagelet="ProfileTilesFeed"], [data-pagelet="page_insights"], .x1yztbdb, [role="main"]',
+        { timeout: 20000 }
+      );
+    } catch {
+      // Selector didn't match — give the page extra time and hope for the best
+      console.log('[Exchange] Content landmark not found, waiting 8s extra...');
+      await page.waitForTimeout(8000);
+    }
+
+    // Now navigate directly to the page to ensure we're on the right URL
+    // (after login Facebook sometimes redirects to the home feed)
+    const postLoginUrl = page.url();
+    if (!postLoginUrl.includes('100064752788893') && !postLoginUrl.includes('Dollar-Euro-Pound')) {
+      console.log('[Exchange] Post-login URL is not the exchange page, navigating back...');
+      await page.goto(SOURCE_URL, { waitUntil: 'domcontentloaded', timeout: 45000 });
+      await page.waitForTimeout(5000);
+      try {
+        await page.waitForSelector(
+          '[role="article"], [data-pagelet="ProfileTilesFeed"], [role="main"]',
+          { timeout: 20000 }
+        );
+      } catch {
+        await page.waitForTimeout(8000);
+      }
+    }
+
     for (let i = 0; i < 4; i++) {
       await page.mouse.wheel(0, 900);
-      await page.waitForTimeout(1000);
+      await page.waitForTimeout(1500);
     }
+
+    // Extra settle time after scrolling
+    await page.waitForTimeout(3000);
 
     const text = await page.locator('body').innerText({ timeout: 15000 });
 
