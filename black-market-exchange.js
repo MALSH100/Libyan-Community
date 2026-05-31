@@ -2,6 +2,9 @@
 // LIBYAN BLACK MARKET EXCHANGE RATE
 // =============================================================================
 
+const fs = require('fs');
+const path = require('path');
+
 const {
   SlashCommandBuilder,
   EmbedBuilder,
@@ -17,6 +20,7 @@ const SCRAPE_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 const MAX_HISTORY = 120;
 const CHART_POINTS = 30;
 const CURRENCIES = ['USD', 'EUR', 'GBP'];
+const COOKIE_PATH = path.resolve('./fb-session.json');
 
 const exchangeCommands = [
   new SlashCommandBuilder()
@@ -36,7 +40,7 @@ const exchangeCommands = [
     .setDescription('Admin: scrape Facebook now and post the latest exchange rate')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
     .setDMPermission(false),
-  
+
   new SlashCommandBuilder()
     .setName('exchange-debug')
     .setDescription('Admin: show last 5 exchange rate entries (for debugging)')
@@ -45,7 +49,7 @@ const exchangeCommands = [
 ].map(c => c.toJSON());
 
 // ----------------------------------------------------------------------
-// Data & helper functions (unchanged)
+// Data & helper functions
 // ----------------------------------------------------------------------
 function getExchangeData(db, guildId) {
   if (!db[guildId]) db[guildId] = {};
@@ -84,15 +88,15 @@ function findRateNearKeyword(text, keywords) {
 
 function parseRatesFromText(text) {
   const rates = { USD: null, EUR: null, GBP: null };
-  
+
   console.log('[Exchange] Page text sample (first 500 chars):\n', text.slice(0, 500));
-  
-  // Check for holiday or no‑update message
+
+  // Check for holiday or no-update message
   if (text.includes('no black market exchange rate updates') || text.includes('holiday')) {
     console.log('[Exchange] Holiday or no update detected – skipping');
     return null;
   }
-  
+
   const directPatterns = [
     { currency: 'USD', regex: /\$1\s*=\s*(\d{1,2}(?:[.,]\d{1,2})?)\s*LYD/i },
     { currency: 'EUR', regex: /€1\s*=\s*(\d{1,2}(?:[.,]\d{1,2})?)\s*LYD/i },
@@ -102,7 +106,7 @@ function parseRatesFromText(text) {
     const match = text.match(p.regex);
     if (match) rates[p.currency] = num(match[1]);
   }
-  
+
   const nearSymbol = [
     { currency: 'USD', regex: /\$\s*(\d{1,2}(?:[.,]\d{1,2})?)/i },
     { currency: 'EUR', regex: /€\s*(\d{1,2}(?:[.,]\d{1,2})?)/i },
@@ -114,18 +118,32 @@ function parseRatesFromText(text) {
       if (match) rates[p.currency] = num(match[1]);
     }
   }
-  
+
   if (rates.USD === null) rates.USD = findRateNearKeyword(text, ['dollar', 'usd', '$']);
   if (rates.EUR === null) rates.EUR = findRateNearKeyword(text, ['euro', 'eur', '€']);
   if (rates.GBP === null) rates.GBP = findRateNearKeyword(text, ['pound', 'gbp', 'sterling', '£']);
-  
+
   if (CURRENCIES.every(c => rates[c] === null)) {
     console.error('❌ All parsing methods failed. Full text sample (first 1000 chars):\n', text.slice(0, 1000));
     return null;
   }
-  
+
   console.log(`✅ Parsed rates: USD=${rates.USD}, EUR=${rates.EUR}, GBP=${rates.GBP}`);
   return rates;
+}
+
+// ----------------------------------------------------------------------
+// FIX 1: Content-based login detection helper
+// ----------------------------------------------------------------------
+function isLoginPage(url, bodyText) {
+  if (url.includes('login') || url.includes('checkpoint')) return true;
+  const t = bodyText.toLowerCase();
+  return (
+    t.includes('email address or phone number') ||
+    t.includes('forgotten password') ||
+    t.includes('log in to facebook') ||
+    t.includes('create new account') && t.includes('log in')
+  );
 }
 
 async function scrapeFacebookRates() {
@@ -136,13 +154,30 @@ async function scrapeFacebookRates() {
       headless: true,
       args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-blink-features=AutomationControlled'],
     });
-    context = await browser.newContext({ viewport: { width: 1365, height: 900 }, locale: 'en-GB' });
+
+    // FIX 2: Reuse saved cookies/session if available
+    const storageState = fs.existsSync(COOKIE_PATH) ? COOKIE_PATH : undefined;
+    if (storageState) {
+      console.log('[Exchange] Reusing saved Facebook session from', COOKIE_PATH);
+    }
+
+    context = await browser.newContext({
+      viewport: { width: 1365, height: 900 },
+      locale: 'en-GB',
+      storageState,
+    });
+
     page = await context.newPage();
     await page.goto(SOURCE_URL, { waitUntil: 'domcontentloaded', timeout: 45000 });
     await page.waitForTimeout(5000);
+
     const currentUrl = page.url();
-    if (currentUrl.includes('login') || currentUrl.includes('checkpoint')) {
-      console.log('[Exchange] Login required. Attempting to log in...');
+    // FIX 1: Check by URL *and* page content — Facebook sometimes serves the
+    // login wall inline without changing the URL
+    const earlyText = await page.locator('body').innerText({ timeout: 10000 }).catch(() => '');
+
+    if (isLoginPage(currentUrl, earlyText)) {
+      console.log('[Exchange] Login wall detected. Attempting to log in...');
       await page.waitForSelector('input[type="email"], input[name="email"], #email', { timeout: 10000 });
       const emailInput = await page.$('input[type="email"], input[name="email"], #email');
       if (emailInput) await emailInput.fill(process.env.FACEBOOK_EMAIL);
@@ -156,13 +191,24 @@ async function scrapeFacebookRates() {
       const saveInfoBtn = await page.$('button[value="1"], button[data-testid="save-login-button"]');
       if (saveInfoBtn) await saveInfoBtn.click();
       await page.waitForTimeout(2000);
-      console.log('[Exchange] Login successful.');
+
+      // FIX 2: Persist the session so next scrape doesn't need to log in again
+      await context.storageState({ path: COOKIE_PATH });
+      console.log('[Exchange] Login successful. Session saved to', COOKIE_PATH);
     }
+
     for (let i = 0; i < 4; i++) {
       await page.mouse.wheel(0, 900);
       await page.waitForTimeout(1000);
     }
+
     const text = await page.locator('body').innerText({ timeout: 15000 });
+
+    // Extra guard: if after login we still see the login wall, bail clearly
+    if (isLoginPage(page.url(), text)) {
+      throw new Error('Still on login page after login attempt — check FACEBOOK_EMAIL / FACEBOOK_PASSWORD env vars.');
+    }
+
     const rates = parseRatesFromText(text);
     if (!rates) {
       if (text.includes('no black market exchange rate updates') || text.includes('holiday')) {
@@ -236,9 +282,9 @@ function buildChartSvg(history, mainCurrency = 'USD') {
   // LIBYAN COLOR LOGIC (intentional, matches reference image):
   //   GREEN = close < open  → rate fell → Dinar STRENGTHENED
   //   RED   = close > open  → rate rose → Dinar WEAKENED
-  const GREEN       = '#22c55e';  // vibrant green  (dinar strengthens)
+  const GREEN       = '#22c55e';
   const GREEN_LIGHT = '#4ade80';
-  const RED         = '#ef4444';  // clear red      (dinar weakens)
+  const RED         = '#ef4444';
   const RED_LIGHT   = '#f87171';
   const NEUTRAL     = '#94a3b8';
 
@@ -249,7 +295,6 @@ function buildChartSvg(history, mainCurrency = 'USD') {
     const high  = Math.max(open, close);
     const low   = Math.min(open, close);
     const ts    = new Date(rows[i].scrapedAt);
-    // Dinar-centric: green when rate drops (dinar stronger)
     const dinarStrengthened = close < open;
     const dinarWeakened     = close > open;
     const color      = dinarStrengthened ? GREEN  : (dinarWeakened ? RED  : NEUTRAL);
@@ -262,12 +307,10 @@ function buildChartSvg(history, mainCurrency = 'USD') {
   let minVal = Math.min(...allVals);
   let maxVal = Math.max(...allVals);
   const dataRange = maxVal - minVal || 0.05;
-  // Only add a small padding (15%) — keeps the chart tight like the reference
   const vPad = dataRange * 0.15;
   minVal = Math.max(0, minVal - vPad);
   maxVal = maxVal + vPad;
 
-  // Nice round tick values
   function niceNumber(range, round) {
     const exp = Math.floor(Math.log10(range));
     const f   = range / Math.pow(10, exp);
@@ -296,7 +339,6 @@ function buildChartSvg(history, mainCurrency = 'USD') {
     ? pad.left + plotW / 2
     : pad.left + (i / (candles.length - 1)) * plotW;
 
-  // Candle width: narrower for more candles (like reference), capped nicely
   const spacing   = candles.length > 1 ? plotW / (candles.length - 1) : plotW;
   const bodyW     = Math.max(3, Math.min(14, spacing * 0.5));
   const halfW     = bodyW / 2;
@@ -312,10 +354,9 @@ function buildChartSvg(history, mainCurrency = 'USD') {
     );
   }
 
-  // ── 6. X-axis date labels — show "DD Mon" at day boundaries ─────────────
+  // ── 6. X-axis date labels ─────────────────────────────────────────────────
   const xLabels   = [];
   let   lastDay   = null;
-  // Collect unique day-boundary positions
   const dayBoundaries = [];
   for (let i = 0; i < candles.length; i++) {
     const dayKey = candles[i].ts.toISOString().slice(0, 10);
@@ -324,7 +365,6 @@ function buildChartSvg(history, mainCurrency = 'USD') {
       lastDay = dayKey;
     }
   }
-  // Space them out: skip if too close
   const minLabelSpacing = 60;
   let lastLabelX = -999;
   for (const { i, ts } of dayBoundaries) {
@@ -340,7 +380,6 @@ function buildChartSvg(history, mainCurrency = 'USD') {
   }
 
   // ── 7. Candlestick SVG elements ──────────────────────────────────────────
-  // All gradients are defined up front in <defs> to keep the SVG clean
   const gradDefs   = [];
   const candleElems = [];
 
@@ -355,12 +394,10 @@ function buildChartSvg(history, mainCurrency = 'USD') {
     const bodyBottom = Math.max(openY, closeY);
     const bodyH      = Math.max(2, bodyBottom - bodyTop);
 
-    // Wick (same color as body, thin)
     candleElems.push(
       `<line x1="${x.toFixed(1)}" y1="${highY.toFixed(1)}" x2="${x.toFixed(1)}" y2="${lowY.toFixed(1)}" stroke="${c.color}" stroke-width="1.2" stroke-linecap="round"/>`
     );
 
-    // Gradient for body
     const gid = `g${i}`;
     gradDefs.push(
       `<linearGradient id="${gid}" x1="0" y1="0" x2="0" y2="1">` +
@@ -373,12 +410,10 @@ function buildChartSvg(history, mainCurrency = 'USD') {
     );
   }
 
-  // ── 8. Latest price tag — pinned to right edge like the reference ────────
+  // ── 8. Latest price tag ───────────────────────────────────────────────────
   const last     = candles[candles.length - 1];
   const lastY    = yFor(last.close);
   const tagColor = last.dinarStrengthened ? GREEN : RED;
-  // Dashed horizontal line across the whole plot
-  const priceLineX2 = pad.left + plotW + pad.right - 2; // extends into right margin
   const TAG_W = 62, TAG_H = 22, TAG_X = pad.left + plotW + 4;
   const priceLine = `<line x1="${pad.left}" y1="${lastY.toFixed(1)}" x2="${(TAG_X - 2).toFixed(1)}" y2="${lastY.toFixed(1)}" stroke="${tagColor}" stroke-width="1" stroke-dasharray="3,3" opacity="0.55"/>`;
   const priceTag  = [
@@ -387,20 +422,17 @@ function buildChartSvg(history, mainCurrency = 'USD') {
     `<text x="${(TAG_X + TAG_W/2).toFixed(1)}" y="${(lastY + 5).toFixed(1)}" text-anchor="middle" font-family="'Segoe UI',Arial,sans-serif" font-size="12" font-weight="700" fill="#ffffff">${last.close.toFixed(2)}</text>`,
   ];
 
-  // ── 9. Header block ──────────────────────────────────────────────────────
+  // ── 9. Header block ───────────────────────────────────────────────────────
   const SYM   = { USD: '$', EUR: '€', GBP: '£' };
   const NAMES = { USD: 'US Dollar', EUR: 'Euro', GBP: 'British Pound' };
   const sym   = SYM[mainCurrency]   || '';
   const cName = NAMES[mainCurrency] || mainCurrency;
 
-  // Period delta: first candle vs last
   const periodDelta    = candles.length > 1 ? last.close - candles[0].close : 0;
   const deltaTxt       = (periodDelta > 0 ? '+' : '') + periodDelta.toFixed(3);
-  // For delta color: rate went down = dinar stronger = green; rate went up = red
   const deltaColor     = periodDelta < 0 ? GREEN : (periodDelta > 0 ? RED : NEUTRAL);
   const deltaArrow     = periodDelta < 0 ? '▼' : (periodDelta > 0 ? '▲' : '');
 
-  // Date range label
   const first = candles[0].ts;
   const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
   const dateRange = candles.length > 1
@@ -450,17 +482,13 @@ function buildChartSvg(history, mainCurrency = 'USD') {
   <!-- X-axis labels -->
   ${xLabels.join('\n  ')}
 
-  <!-- ── Header ── -->
-  <!-- Currency name + date range -->
+  <!-- Header -->
   <text x="${pad.left}" y="26" font-family="'Segoe UI',Arial,sans-serif" font-size="15" font-weight="700" fill="#f9fafb">${svgEscape(cName)} / LYD</text>
   <text x="${pad.left}" y="46" font-family="'Segoe UI',Arial,sans-serif" font-size="11" fill="#6b7280">${svgEscape(dateRange)}</text>
-
-  <!-- Latest rate (large, right-aligned in header) -->
   <text x="${pad.left + plotW}" y="26" text-anchor="end" font-family="'Segoe UI',Arial,sans-serif" font-size="20" font-weight="700" fill="#f9fafb">${sym}${last.close.toFixed(2)} LYD</text>
-  <!-- Period delta badge -->
   <text x="${pad.left + plotW}" y="46" text-anchor="end" font-family="'Segoe UI',Arial,sans-serif" font-size="12" font-weight="600" fill="${deltaColor}">${deltaArrow} ${svgEscape(deltaTxt)}</text>
 
-  <!-- ── Bottom legend ── -->
+  <!-- Bottom legend -->
   ${legend}
 </svg>`;
 }
@@ -510,32 +538,34 @@ async function postUpdate(client, guildId, exchangeData, latest, forced = false)
   if (row && message) {
     const filter = i => ['chart_usd', 'chart_eur', 'chart_gbp'].includes(i.customId);
     const collector = message.createMessageComponentCollector({ filter, time: 300000 });
+
     collector.on('collect', async i => {
       try {
         let currency = 'USD';
         if (i.customId === 'chart_eur') currency = 'EUR';
         if (i.customId === 'chart_gbp') currency = 'GBP';
 
-        // Acknowledge the button click immediately, then do the async work
+        // Acknowledge the click immediately so Discord doesn't show "interaction failed"
         await i.deferUpdate();
 
         const newChart = await chartAttachment(exchangeData, currency);
         const updatedEmbed = EmbedBuilder.from(embed)
           .setImage(`attachment://libya-exchange-chart-${currency}.png`);
 
-        // editReply after deferUpdate correctly handles new file attachments
-        await i.editReply({
+        // FIX 3: Edit the shared message directly rather than i.editReply()
+        // This ensures all users see the update, not just whoever clicked
+        await message.edit({
           embeds: [updatedEmbed],
           files: [newChart],
           components: [row],
-          attachments: [], // clear the previous chart attachment so the new one takes over
+          attachments: [], // clear the previous chart image so the new one takes over
         });
       } catch (err) {
         console.error('[Exchange] Button error:', err);
-        // Use followUp since we already called deferUpdate
-        await i.followUp({ content: 'Failed to update chart.', ephemeral: true });
+        await i.followUp({ content: 'Failed to update chart.', ephemeral: true }).catch(() => {});
       }
     });
+
     collector.on('end', () => message.edit({ components: [] }).catch(() => {}));
   }
   return true;
@@ -544,7 +574,7 @@ async function postUpdate(client, guildId, exchangeData, latest, forced = false)
 async function updateRates({ client, db, saveData, guildId, forcePost = false }) {
   const exchangeData = getExchangeData(db, guildId);
   exchangeData.lastCheckedAt = new Date().toISOString();
-  
+
   let latest;
   try {
     latest = await scrapeFacebookRates();
@@ -555,7 +585,7 @@ async function updateRates({ client, db, saveData, guildId, forcePost = false })
     }
     throw err;
   }
-  
+
   const key = rateKey(latest.rates);
   const changed = key !== exchangeData.lastPostedKey;
   exchangeData.lastRates = latest;
