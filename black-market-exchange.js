@@ -249,23 +249,41 @@ async function scrapeFacebookRates() {
         } catch {}
       }
 
-      // --- Fill email ---
+      // --- Fill email (bypass click with fill) ---
+      let emailFilled = false;
       const emailInput = page.locator('input[type="email"], input[name="email"], #email').first();
       await emailInput.waitFor({ timeout: 10000 });
-      await emailInput.click();
-      await page.waitForTimeout(300);
-      for (const char of process.env.FACEBOOK_EMAIL) {
-        await page.keyboard.type(char, { delay: 80 + Math.random() * 60 });
+      try {
+        // fill() automatically focuses and types the entire string at once
+        await emailInput.fill(process.env.FACEBOOK_EMAIL, { timeout: 5000 });
+        emailFilled = true;
+      } catch (fillErr) {
+        console.log('[Exchange] fill() failed, trying JavaScript fallback...');
+        await page.evaluate((email) => {
+          const input = document.querySelector('input[type="email"], input[name="email"], #email');
+          if (input) input.value = email;
+        }, process.env.FACEBOOK_EMAIL);
+        emailFilled = true;
       }
+      if (!emailFilled) throw new Error('Could not fill email field');
       await page.waitForTimeout(500 + Math.random() * 300);
 
       // --- Fill password ---
+      let passFilled = false;
       const passInput = page.locator('input[type="password"], input[name="pass"], #pass').first();
       await passInput.waitFor({ timeout: 5000 });
-      await passInput.click();
-      for (const char of process.env.FACEBOOK_PASSWORD) {
-        await page.keyboard.type(char, { delay: 80 + Math.random() * 60 });
+      try {
+        await passInput.fill(process.env.FACEBOOK_PASSWORD, { timeout: 5000 });
+        passFilled = true;
+      } catch (fillErr) {
+        console.log('[Exchange] fill() failed for password, using JavaScript fallback...');
+        await page.evaluate((pass) => {
+          const input = document.querySelector('input[type="password"], input[name="pass"], #pass');
+          if (input) input.value = pass;
+        }, process.env.FACEBOOK_PASSWORD);
+        passFilled = true;
       }
+      if (!passFilled) throw new Error('Could not fill password field');
       await page.waitForTimeout(500 + Math.random() * 300);
 
       // --- Submit ---
