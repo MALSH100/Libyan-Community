@@ -785,46 +785,58 @@ module.exports = function initBlackMarketExchange({ client, db, saveData }) {
       }
     }, 6000);
   });
-  client.on('interactionCreate', async interaction => {
-    if (!interaction.isChatInputCommand() || !interaction.guild) return;
-    const { commandName, guild } = interaction;
-    if (!commandName.startsWith('exchange-')) return;
-    const exchangeData = getExchangeData(db, guild.id);
-    try {
-      if (commandName === 'exchange-set-channel') {
-        if (!isAdmin(interaction)) return safeReply(interaction, { content: 'Only admins can set the exchange update channel.', flags: 64 });
-        const channel = interaction.options.getChannel('channel');
-        if (!channel || !channel.isTextBased()) return safeReply(interaction, { content: 'Please choose a text channel.', flags: 64 });
-        exchangeData.channelId = channel.id;
-        saveData(guild.id);
-        scheduleGuild(guild.id);
-        await safeReply(interaction, { content: `Exchange updates will post in ${channel} every hour. Scraping the latest rate now...`, flags: 64 });
-        await updateRates({ client, db, saveData, guildId: guild.id, forcePost: true });
+   client.on('interactionCreate', async interaction => {
+    // Handle button clicks first (global, no command needed)
+    if (interaction.isButton()) {
+      const customId = interaction.customId;
+      if (customId.startsWith('chart_usd_') || customId.startsWith('chart_eur_') || customId.startsWith('chart_gbp_')) {
+        await interaction.deferUpdate();
+
+        let currency = 'USD';
+        if (customId.startsWith('chart_eur_')) currency = 'EUR';
+        if (customId.startsWith('chart_gbp_')) currency = 'GBP';
+        const guildId = customId.split('_').pop();
+
+        const exchangeData = getExchangeData(db, guildId);
+        if (!exchangeData.history || exchangeData.history.length < 2) {
+          await interaction.followUp({ content: 'Not enough history to update chart.', ephemeral: true });
+          return;
+        }
+
+        const newChart = await chartAttachment(exchangeData, currency);
+        const message = interaction.message;
+        if (!message) {
+          await interaction.followUp({ content: 'Could not find original message.', ephemeral: true });
+          return;
+        }
+
+        const embed = message.embeds[0];
+        const updatedEmbed = EmbedBuilder.from(embed)
+          .setImage(`attachment://libya-exchange-chart-${currency}.png`);
+
+        await message.edit({
+          embeds: [updatedEmbed],
+          files: [newChart],
+          components: message.components,
+        });
         return;
       }
-      if (commandName === 'exchange-rate') {
-        const latest = exchangeData.lastRates;
-        if (!latest) return safeReply(interaction, { content: 'No exchange rate has been saved yet.', flags: 64 });
-        return safeReply(interaction, { embeds: [buildRateEmbed(exchangeData, latest, true)], flags: 64 });
-      }
-      if (commandName === 'exchange-refresh') {
-        if (!isAdmin(interaction)) return safeReply(interaction, { content: 'Only admins can refresh.', flags: 64 });
-        await interaction.deferReply({ flags: 64 });
-        const result = await updateRates({ client, db, saveData, guildId: guild.id, forcePost: true });
-        const postedText = result.posted ? 'Posted to configured channel.' : 'Saved, but no exchange channel is configured yet.';
-        return safeReply(interaction, { content: `Exchange rates refreshed. ${postedText}` });
-      }
-      if (commandName === 'exchange-debug') {
-        if (!isAdmin(interaction)) return safeReply(interaction, { content: 'Admin only.', flags: 64 });
-        const lastFew = exchangeData.history.slice(-5);
-        if (!lastFew.length) return safeReply(interaction, { content: 'No data yet.', flags: 64 });
-        let msg = '**Last 5 exchange rates (oldest → newest):**\n';
-        lastFew.forEach((entry, i) => {
-          const d = new Date(entry.scrapedAt);
-          msg += `\n${i+1}. ${d.toLocaleString()}: USD=${entry.rates.USD}, EUR=${entry.rates.EUR}, GBP=${entry.rates.GBP}`;
-        });
-        return safeReply(interaction, { content: msg, flags: 64 });
-      }
+    }
+
+    // Handle slash commands
+    if (!interaction.isChatInputCommand()) return;
+    if (!interaction.guild) return;
+    const { commandName, guild } = interaction;
+    if (!commandName.startsWith('exchange-')) return;
+
+    const exchangeData = getExchangeData(db, guild.id);
+    try {
+      // ... existing command handling (exchange-set-channel, exchange-rate, exchange-refresh, exchange-debug) ...
+    } catch (err) {
+      console.error(`Exchange command failed (${commandName}):`, err);
+      return safeReply(interaction, { content: `❌ Exchange error: ${err.message?.slice(0, 200)}`, flags: 64 });
+    }
+  });
     // Handle button clicks (global, no timeout)
     if (interaction.isButton()) {
       const customId = interaction.customId;
