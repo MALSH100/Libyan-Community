@@ -515,18 +515,25 @@ async function postUpdate(client, guildId, exchangeData, latest, forced = false)
         let currency = 'USD';
         if (i.customId === 'chart_eur') currency = 'EUR';
         if (i.customId === 'chart_gbp') currency = 'GBP';
+
+        // Acknowledge the button click immediately, then do the async work
+        await i.deferUpdate();
+
         const newChart = await chartAttachment(exchangeData, currency);
-        // Clone the original embed and update its image URL to match the new attachment
         const updatedEmbed = EmbedBuilder.from(embed)
           .setImage(`attachment://libya-exchange-chart-${currency}.png`);
-        await i.update({
+
+        // editReply after deferUpdate correctly handles new file attachments
+        await i.editReply({
           embeds: [updatedEmbed],
           files: [newChart],
           components: [row],
+          attachments: [], // clear the previous chart attachment so the new one takes over
         });
       } catch (err) {
         console.error('[Exchange] Button error:', err);
-        await i.reply({ content: 'Failed to update chart.', ephemeral: true });
+        // Use followUp since we already called deferUpdate
+        await i.followUp({ content: 'Failed to update chart.', ephemeral: true });
       }
     });
     collector.on('end', () => message.edit({ components: [] }).catch(() => {}));
