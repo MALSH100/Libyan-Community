@@ -296,7 +296,7 @@ async function scrapeFacebookRates() {
       }
 
       await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
-      await page.waitForTimeout(4000);
+           await page.waitForTimeout(8000);
 
       // --- Dismiss "Save login info?" ---
       const saveBtn = page.locator('button[value="1"], button[data-testid="save-login-button"]').first();
@@ -323,6 +323,7 @@ async function scrapeFacebookRates() {
     }
 
     // If we got redirected to the home feed, go back to the exchange page
+    // If we got redirected to the home feed, go back to the exchange page
     const afterLoginUrl = page.url();
     if (!afterLoginUrl.includes('100064752788893') && !afterLoginUrl.includes('Dollar-Euro-Pound')) {
       console.log('[Exchange] Redirected away from exchange page, navigating back...');
@@ -330,12 +331,36 @@ async function scrapeFacebookRates() {
       await page.waitForTimeout(6000);
     }
 
+    // --- NEW: Ensure we are on the exact exchange page (extra safety) ---
+    const currentPageUrl = page.url();
+    if (!currentPageUrl.includes('/p/Dollar-Euro-Pound-Libya-Black-Market-Exchange-Rate-100064752788893/')) {
+      console.log('[Exchange] Still not on exchange page, forcing navigation to:', SOURCE_URL);
+      await page.goto(SOURCE_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+      await page.waitForTimeout(5000);
+    }
+
     // Wait for real post content
     console.log('[Exchange] Waiting for post content...');
     try {
-      await page.waitForSelector('[role="article"], [role="main"] [data-ad-comet-preview], [role="main"]', { timeout: 30000 });
-    } catch {
-      console.log('[Exchange] Article selector timed out, but continuing...');
+      // Wait for the network to be idle (no active requests for 500ms)
+      await page.waitForLoadState('networkidle', { timeout: 30000 });
+      console.log('[Exchange] Network idle.');
+    } catch (err) {
+      console.log('[Exchange] Network idle timeout, continuing...');
+    }
+
+    // Wait for the body to have text, which indicates the page is loaded
+    console.log('[Exchange] Waiting for page content...');
+    await page.waitForFunction(() => document.body.innerText.length > 100, { timeout: 30000 });
+    console.log('[Exchange] Page content loaded.');
+
+    // Now, wait for a specific post element
+    try {
+      console.log('[Exchange] Waiting for post elements...');
+      await page.waitForSelector('[role="article"]', { timeout: 30000 });
+      console.log('[Exchange] Post element found.');
+    } catch (err) {
+      console.log('[Exchange] Post element not found, but continuing...');
     }
 
     // Scroll to load lazy content (safer JavaScript scrolling)
