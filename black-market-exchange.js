@@ -194,105 +194,50 @@ async function scrapeFacebookRates() {
 
     page = await context.newPage();
 
-    // Go to the exchange page
-    await page.goto(SOURCE_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
-    await page.waitForTimeout(6000);
+      // Go to the exchange page with a more robust wait
+    let retries = 2;
+    let loaded = false;
+    for (let attempt = 1; attempt <= retries; attempt++) {
+      console.log(`[Exchange] Loading page attempt ${attempt}...`);
+      await page.goto(SOURCE_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+      await page.waitForTimeout(5000);
+
+      const currentUrl = page.url();
+      const earlyText = await page.locator('body').innerText({ timeout: 10000 }).catch(() => '');
+      console.log('[Exchange] Initial URL:', currentUrl);
+      console.log('[Exchange] Initial body length:', earlyText.length);
+
+      // Check for challenge page (empty body or security text)
+      if (earlyText.length < 100 && (earlyText.includes('Checking your browser') || earlyText.includes('captcha') || earlyText.includes('security'))) {
+        console.log('[Exchange] Challenge page detected. Waiting 15 seconds before retry...');
+        await page.waitForTimeout(15000);
+        continue;
+      }
+
+      loaded = true;
+      break;
+    }
+    if (!loaded) throw new Error('Facebook is presenting a challenge (captcha/cloudflare). The bot cannot bypass it. Consider using a different source.');
 
     const currentUrl = page.url();
     const earlyText = await page.locator('body').innerText({ timeout: 10000 }).catch(() => '');
-    console.log('[Exchange] Initial URL:', currentUrl);
-    console.log('[Exchange] Initial body length:', earlyText.length);
+    console.log('[Exchange] Final URL after loading attempts:', currentUrl);
 
-     if (isLoginPage(currentUrl, earlyText)) {
+    if (isLoginPage(currentUrl, earlyText)) {
       console.log('[Exchange] Login wall detected. Logging in...');
 
-      // 1. More aggressive overlay dismissal – wait for any modal that might block
-      const overlaySelectors = [
-        '[data-testid="cookie-policy-manage-dialog-accept-button"]',
-        'button[title="Allow all cookies"]',
-        'div[aria-label="Allow all cookies"]',
-        '[data-cookiebanner="accept_button"]',
-        'button:has-text("Accept All")',
-        'button:has-text("Allow all")',
-        'button:has-text("Only allow essential cookies")',
-        'div[role="dialog"] button:has-text("Accept")',
-        'div[role="dialog"] button:has-text("Allow")',
-        'div[role="dialog"] button:has-text("OK")',
-      ];
-      for (const sel of overlaySelectors) {
-        try {
-          const btn = page.locator(sel).first();
-          if (await btn.isVisible({ timeout: 2000 })) {
-            await btn.click({ timeout: 5000 });
-            console.log('[Exchange] Dismissed overlay:', sel);
-            await page.waitForTimeout(1500);
-            break;
-          }
-        } catch { /* not present */ }
+      // ... (keep your existing login code exactly as you have it, but add a check after login for empty body)
+      // ... paste your login code here (the one that types email/password) ...
+
+      // After login, wait for navigation and then re-check for empty body
+      await page.waitForTimeout(5000);
+      const afterLoginText = await page.locator('body').innerText({ timeout: 15000 }).catch(() => '');
+      if (afterLoginText.length < 100 && (afterLoginText.includes('Checking your browser') || afterLoginText.includes('security'))) {
+        throw new Error('Login succeeded but Facebook returned a challenge page. Manual intervention required.');
       }
-
-      // 2. Wait a moment for any lingering overlay to disappear
-      await page.waitForTimeout(2000);
-
-      // 3. Try to click the email field – if blocked by overlay, use JavaScript click
-      const emailInput = page.locator('input[type="email"], input[name="email"], #email').first();
-      await emailInput.waitFor({ timeout: 10000 });
-
-      let clicked = false;
-      try {
-        await emailInput.click({ timeout: 5000 });
-        clicked = true;
-      } catch (clickErr) {
-        console.log('[Exchange] Normal click blocked, trying JavaScript click...');
-        await page.evaluate(() => {
-          const input = document.querySelector('input[type="email"], input[name="email"], #email');
-          if (input) input.click();
-        });
-        clicked = true;
-      }
-
-      if (!clicked) throw new Error('Could not focus email field');
-
-      await page.waitForTimeout(300);
-      for (const char of process.env.FACEBOOK_EMAIL) {
-        await page.keyboard.type(char, { delay: 80 + Math.random() * 60 });
-      }
-      // ... rest remains the same
-      await page.waitForTimeout(500 + Math.random() * 300);
-
-      // Tab to password and type it
-      await page.keyboard.press('Tab');
-      await page.waitForTimeout(300);
-      for (const char of process.env.FACEBOOK_PASSWORD) {
-        await page.keyboard.type(char, { delay: 80 + Math.random() * 60 });
-      }
-      await page.waitForTimeout(500 + Math.random() * 300);
-
-      // Submit
-      const loginBtn = page.locator('button[type="submit"], button[name="login"], #loginbutton').first();
-      const loginVisible = await loginBtn.isVisible({ timeout: 3000 }).catch(() => false);
-      if (loginVisible) {
-        await loginBtn.click({ force: true, timeout: 15000 });
-      } else {
-        await page.keyboard.press('Enter');
-      }
-
-      await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
-      await page.waitForTimeout(4000);
-
-      // Dismiss "Save login info?" if shown
-      const saveBtn = page.locator('button[value="1"], button[data-testid="save-login-button"]').first();
-      if (await saveBtn.isVisible({ timeout: 3000 }).catch(() => false)) {
-        await saveBtn.click({ force: true }).catch(() => {});
-        await page.waitForTimeout(2000);
-      }
-
-      // Save session for next time
-      await context.storageState({ path: COOKIE_PATH });
-      console.log('[Exchange] Login successful. Session saved.');
     }
 
-    // If we got redirected to the home feed after login, go back to the exchange page
+    // If we got redirected to the home feed, go back to the exchange page
     const afterLoginUrl = page.url();
     if (!afterLoginUrl.includes('100064752788893') && !afterLoginUrl.includes('Dollar-Euro-Pound')) {
       console.log('[Exchange] Redirected away from exchange page, navigating back...');
@@ -300,13 +245,12 @@ async function scrapeFacebookRates() {
       await page.waitForTimeout(6000);
     }
 
-    // Wait for real post content to appear in the DOM
+    // Wait for real post content
     console.log('[Exchange] Waiting for post content...');
     try {
-      await page.waitForSelector('[role="article"], [role="main"] [data-ad-comet-preview], [role="main"]', { timeout: 25000 });
+      await page.waitForSelector('[role="article"], [role="main"] [data-ad-comet-preview], [role="main"]', { timeout: 30000 });
     } catch {
-      console.log('[Exchange] Article selector timed out, continuing anyway...');
-      await page.waitForTimeout(8000);
+      console.log('[Exchange] Article selector timed out, but continuing...');
     }
 
     // Scroll to load lazy content
