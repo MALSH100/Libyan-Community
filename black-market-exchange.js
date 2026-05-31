@@ -338,10 +338,26 @@ async function scrapeFacebookRates() {
       console.log('[Exchange] Article selector timed out, but continuing...');
     }
 
-    // Scroll to load lazy content
-    for (let i = 0; i < 5; i++) {
-      await page.mouse.wheel(0, 800);
-      await page.waitForTimeout(1500);
+    // Scroll to load lazy content (safer JavaScript scrolling)
+    try {
+      await page.evaluate(async () => {
+        await new Promise((resolve) => {
+          let totalHeight = 0;
+          const distance = 400;
+          const interval = setInterval(() => {
+            const scrollHeight = document.body.scrollHeight;
+            window.scrollBy(0, distance);
+            totalHeight += distance;
+            if (totalHeight >= scrollHeight || totalHeight > 3000) {
+              clearInterval(interval);
+              resolve();
+            }
+          }, 200);
+        });
+      });
+      console.log('[Exchange] Scrolling completed');
+    } catch (scrollErr) {
+      console.log('[Exchange] Scrolling failed, but continuing:', scrollErr.message);
     }
     await page.waitForTimeout(3000);
 
