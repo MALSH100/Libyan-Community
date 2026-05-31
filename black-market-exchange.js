@@ -203,10 +203,10 @@ async function scrapeFacebookRates() {
     console.log('[Exchange] Initial URL:', currentUrl);
     console.log('[Exchange] Initial body length:', earlyText.length);
 
-    if (isLoginPage(currentUrl, earlyText)) {
+     if (isLoginPage(currentUrl, earlyText)) {
       console.log('[Exchange] Login wall detected. Logging in...');
 
-      // Dismiss cookie/consent overlays first
+      // 1. More aggressive overlay dismissal – wait for any modal that might block
       const overlaySelectors = [
         '[data-testid="cookie-policy-manage-dialog-accept-button"]',
         'button[title="Allow all cookies"]',
@@ -215,6 +215,9 @@ async function scrapeFacebookRates() {
         'button:has-text("Accept All")',
         'button:has-text("Allow all")',
         'button:has-text("Only allow essential cookies")',
+        'div[role="dialog"] button:has-text("Accept")',
+        'div[role="dialog"] button:has-text("Allow")',
+        'div[role="dialog"] button:has-text("OK")',
       ];
       for (const sel of overlaySelectors) {
         try {
@@ -228,14 +231,33 @@ async function scrapeFacebookRates() {
         } catch { /* not present */ }
       }
 
-      // Type email character by character to mimic human input
+      // 2. Wait a moment for any lingering overlay to disappear
+      await page.waitForTimeout(2000);
+
+      // 3. Try to click the email field – if blocked by overlay, use JavaScript click
       const emailInput = page.locator('input[type="email"], input[name="email"], #email').first();
       await emailInput.waitFor({ timeout: 10000 });
-      await emailInput.click();
+
+      let clicked = false;
+      try {
+        await emailInput.click({ timeout: 5000 });
+        clicked = true;
+      } catch (clickErr) {
+        console.log('[Exchange] Normal click blocked, trying JavaScript click...');
+        await page.evaluate(() => {
+          const input = document.querySelector('input[type="email"], input[name="email"], #email');
+          if (input) input.click();
+        });
+        clicked = true;
+      }
+
+      if (!clicked) throw new Error('Could not focus email field');
+
       await page.waitForTimeout(300);
       for (const char of process.env.FACEBOOK_EMAIL) {
         await page.keyboard.type(char, { delay: 80 + Math.random() * 60 });
       }
+      // ... rest remains the same
       await page.waitForTimeout(500 + Math.random() * 300);
 
       // Tab to password and type it
