@@ -777,7 +777,7 @@ module.exports = function initBlackMarketExchange({ client, db, saveData }) {
       }
     }, 6000);
   });
-  client.on('interactionCreate', async interaction => {
+    client.on('interactionCreate', async interaction => {
     // --- Global button handler (permanent buttons) ---
     if (interaction.isButton()) {
       const customId = interaction.customId;
@@ -809,7 +809,7 @@ module.exports = function initBlackMarketExchange({ client, db, saveData }) {
       }
     }
 
-    // --- Slash command handling (unchanged) ---
+    // --- Slash command handling ---
     if (!interaction.isChatInputCommand()) return;
     if (!interaction.guild) return;
     const { commandName, guild } = interaction;
@@ -817,22 +817,45 @@ module.exports = function initBlackMarketExchange({ client, db, saveData }) {
     const exchangeData = getExchangeData(db, guild.id);
     try {
       if (commandName === 'exchange-set-channel') {
-        // ... keep your existing code exactly as it is ...
+        if (!isAdmin(interaction)) return safeReply(interaction, { content: 'Only admins can set the exchange update channel.', flags: 64 });
+        const channel = interaction.options.getChannel('channel');
+        if (!channel || !channel.isTextBased()) return safeReply(interaction, { content: 'Please choose a text channel.', flags: 64 });
+        exchangeData.channelId = channel.id;
+        saveData(guild.id);
+        scheduleGuild(guild.id);
+        await safeReply(interaction, { content: `Exchange updates will post in ${channel} every hour. Scraping the latest rate now...`, flags: 64 });
+        await updateRates({ client, db, saveData, guildId: guild.id, forcePost: true });
+        return;
       }
       if (commandName === 'exchange-rate') {
-        // ... existing ...
+        const latest = exchangeData.lastRates;
+        if (!latest) return safeReply(interaction, { content: 'No exchange rate has been saved yet.', flags: 64 });
+        return safeReply(interaction, { embeds: [buildRateEmbed(exchangeData, latest, true)], flags: 64 });
       }
       if (commandName === 'exchange-refresh') {
-        // ... existing ...
+        if (!isAdmin(interaction)) return safeReply(interaction, { content: 'Only admins can refresh.', flags: 64 });
+        await interaction.deferReply({ flags: 64 });
+        const result = await updateRates({ client, db, saveData, guildId: guild.id, forcePost: true });
+        const postedText = result.posted ? 'Posted to configured channel.' : 'Saved, but no exchange channel is configured yet.';
+        return safeReply(interaction, { content: `Exchange rates refreshed. ${postedText}` });
       }
       if (commandName === 'exchange-debug') {
-        // ... existing ...
+        if (!isAdmin(interaction)) return safeReply(interaction, { content: 'Admin only.', flags: 64 });
+        const lastFew = exchangeData.history.slice(-5);
+        if (!lastFew.length) return safeReply(interaction, { content: 'No data yet.', flags: 64 });
+        let msg = '**Last 5 exchange rates (oldest → newest):**\n';
+        lastFew.forEach((entry, i) => {
+          const d = new Date(entry.scrapedAt);
+          msg += `\n${i+1}. ${d.toLocaleString()}: USD=${entry.rates.USD}, EUR=${entry.rates.EUR}, GBP=${entry.rates.GBP}`;
+        });
+        return safeReply(interaction, { content: msg, flags: 64 });
       }
     } catch (err) {
       console.error(`Exchange command failed (${commandName}):`, err);
       return safeReply(interaction, { content: `❌ Exchange error: ${err.message?.slice(0, 200)}`, flags: 64 });
     }
   });
+};
 
 module.exports.commands = exchangeCommands;
 module.exports.parseRatesFromText = parseRatesFromText;
