@@ -98,7 +98,7 @@ module.exports = function initTranslator(client, db, saveData) {
 
     // Step 3: Handle the /libyan-translation slash command
     client.on('interactionCreate', async (interaction) => {
-        if (!interaction.isCommand()) return;
+        if (!interaction.isChatInputCommand()) return;
         if (interaction.commandName !== 'libyan-translation') return;
         if (!interaction.guild) return;
 
