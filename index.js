@@ -589,6 +589,9 @@ client.once('clientReady', async () => {
 
   // Small delay for Railway network to stabilise
   setTimeout(() => registerCommands(), 2000);
+
+  // Start pokemon spawn timers now that db is fully loaded
+  startSpawnTimers();
 });
 
 // No need for guildCreate registration with global commands
@@ -1978,7 +1981,7 @@ process.on('SIGINT',  () => shutdown('SIGINT'));
 
 // ─── Pokemon System ───────────────────────────────────────────────────────────
 
-require('./pokemon')({ client, db, saveData, getGuildClans, getUserClan, awardLP });
+const { startSpawnTimers } = require('./pokemon')({ client, db, saveData, getGuildClans, getUserClan, awardLP });
 
 // ─── Ya Rayt System ───────────────────────────────────────────────────────────
 
