@@ -133,25 +133,149 @@ function parseRatesFromText(text) {
 }
 
 // ----------------------------------------------------------------------
-// FIX 1: Content-based login detection helper
+// Facebook login / checkpoint detection helpers
 // ----------------------------------------------------------------------
-function isLoginPage(url, bodyText) {
-  if (url.includes('login') || url.includes('checkpoint')) return true;
-  const t = bodyText.toLowerCase();
-  return (
-    t.includes('email address or phone number') ||
-    t.includes('forgotten password') ||
-    t.includes('log in to facebook') ||
-    t.includes('create new account') && t.includes('log in')
-  );
+class FacebookSessionInvalidError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'FacebookSessionInvalidError';
+    this.retryWithoutSession = true;
+  }
 }
 
-async function scrapeFacebookRates() {
-  // playwright-extra + stealth plugin defeats Facebook's headless browser detection.
+let chromiumExtraWithStealth = null;
+function getChromiumExtra() {
+  if (chromiumExtraWithStealth) return chromiumExtraWithStealth;
+
   // Install with: npm install playwright-extra puppeteer-extra-plugin-stealth
   const { chromium: chromiumExtra } = require('playwright-extra');
   const StealthPlugin = require('puppeteer-extra-plugin-stealth');
   chromiumExtra.use(StealthPlugin());
+  chromiumExtraWithStealth = chromiumExtra;
+  return chromiumExtraWithStealth;
+}
+
+function normaliseFacebookText(bodyText) {
+  return String(bodyText || '').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+function includesAny(value, fragments) {
+  return fragments.some(fragment => value.includes(fragment));
+}
+
+function isLoginPage(url = '', bodyText = '') {
+  const u = String(url || '').toLowerCase();
+  if (u.includes('/login') || u.includes('login.php') || u.includes('login/device-based')) return true;
+
+  const t = normaliseFacebookText(bodyText);
+  return (
+    includesAny(t, [
+      'email address or phone number',
+      'forgotten password',
+      'forgot password',
+      'log in to facebook',
+    ]) ||
+    (t.includes('create new account') && t.includes('log in'))
+  );
+}
+
+function classifyFacebookGate(url = '', bodyText = '') {
+  const u = String(url || '').toLowerCase();
+  const t = normaliseFacebookText(bodyText);
+
+  if (
+    u.includes('two_step_verification') ||
+    includesAny(t, [
+      'two-factor authentication',
+      'two factor authentication',
+      'two-step verification',
+      'two step verification',
+      'authentication code',
+      'code generator',
+      'login code',
+    ])
+  ) {
+    return {
+      type: '2fa',
+      message: 'Facebook is asking for a login verification code. Complete that prompt in a normal browser, then regenerate fb-session.json for the bot account.',
+    };
+  }
+
+  if (
+    u.includes('/checkpoint') ||
+    includesAny(t, [
+      'checkpoint',
+      'confirm your identity',
+      'help us confirm it is you',
+      "help us confirm it's you",
+      'security check',
+      'we noticed unusual activity',
+      'suspicious login attempt',
+      'review recent login',
+      'secure your account',
+      'temporarily blocked',
+      'captcha',
+      'prove you are not a robot',
+      "prove you're not a robot",
+      'checking your browser',
+    ])
+  ) {
+    return {
+      type: 'checkpoint',
+      message: 'Facebook returned a checkpoint/security challenge, not necessarily 2FA. Complete the checkpoint in a normal browser for the bot account, then let the bot create a fresh fb-session.json.',
+    };
+  }
+
+  return null;
+}
+
+function throwForFacebookGate(gate) {
+  if (!gate) return;
+  const error = new Error(gate.message);
+  error.facebookGate = gate.type;
+  throw error;
+}
+
+function moveBadFacebookSession(reason) {
+  if (!fs.existsSync(COOKIE_PATH)) return;
+
+  const backupPath = `${COOKIE_PATH}.bad-${Date.now()}`;
+  try {
+    fs.renameSync(COOKIE_PATH, backupPath);
+    console.warn(`[Exchange] Moved stale Facebook session to ${backupPath}: ${reason}`);
+  } catch (renameErr) {
+    console.warn('[Exchange] Could not move stale Facebook session, deleting it instead:', renameErr.message);
+    try {
+      fs.unlinkSync(COOKIE_PATH);
+    } catch (unlinkErr) {
+      console.warn('[Exchange] Could not delete stale Facebook session:', unlinkErr.message);
+    }
+  }
+}
+
+async function scrapeFacebookRates() {
+  const attempts = fs.existsSync(COOKIE_PATH) ? [true, false] : [false];
+  let lastError = null;
+
+  for (const useStoredSession of attempts) {
+    try {
+      return await scrapeFacebookRatesAttempt(useStoredSession);
+    } catch (error) {
+      lastError = error;
+      if (useStoredSession && error.retryWithoutSession) {
+        moveBadFacebookSession(error.message);
+        console.warn('[Exchange] Retrying Facebook scrape with a fresh login session...');
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  throw lastError;
+}
+
+async function scrapeFacebookRatesAttempt(useStoredSession) {
+  const chromiumExtra = getChromiumExtra();
 
   let browser, context, page;
   try {
@@ -168,7 +292,7 @@ async function scrapeFacebookRates() {
     });
 
     // Reuse saved session cookies if available to skip login
-    const storageState = fs.existsSync(COOKIE_PATH) ? COOKIE_PATH : undefined;
+    const storageState = useStoredSession && fs.existsSync(COOKIE_PATH) ? COOKIE_PATH : undefined;
     if (storageState) {
       console.log('[Exchange] Reusing saved Facebook session from', COOKIE_PATH);
     }
@@ -223,8 +347,23 @@ async function scrapeFacebookRates() {
     const earlyText = await page.locator('body').innerText({ timeout: 10000 }).catch(() => '');
     console.log('[Exchange] Final URL after loading attempts:', currentUrl);
 
+    let shouldSaveSession = false;
+    const initialGate = classifyFacebookGate(currentUrl, earlyText);
+    if (initialGate) {
+      if (storageState) {
+        throw new FacebookSessionInvalidError(`Saved Facebook session is no longer valid: ${initialGate.message}`);
+      }
+      throwForFacebookGate(initialGate);
+    }
+
     if (isLoginPage(currentUrl, earlyText)) {
       console.log('[Exchange] Login wall detected. Logging in...');
+
+      const facebookEmail = process.env.FACEBOOK_EMAIL;
+      const facebookPassword = process.env.FACEBOOK_PASSWORD;
+      if (!facebookEmail || !facebookPassword) {
+        throw new Error('Facebook login is required, but FACEBOOK_EMAIL and/or FACEBOOK_PASSWORD are not set.');
+      }
 
       // --- Dismiss cookie/consent overlays (only once) ---
       const overlayBtns = [
@@ -255,14 +394,14 @@ async function scrapeFacebookRates() {
       await emailInput.waitFor({ timeout: 10000 });
       try {
         // fill() automatically focuses and types the entire string at once
-        await emailInput.fill(process.env.FACEBOOK_EMAIL, { timeout: 5000 });
+        await emailInput.fill(facebookEmail, { timeout: 5000 });
         emailFilled = true;
       } catch (fillErr) {
         console.log('[Exchange] fill() failed, trying JavaScript fallback...');
         await page.evaluate((email) => {
           const input = document.querySelector('input[type="email"], input[name="email"], #email');
           if (input) input.value = email;
-        }, process.env.FACEBOOK_EMAIL);
+        }, facebookEmail);
         emailFilled = true;
       }
       if (!emailFilled) throw new Error('Could not fill email field');
@@ -273,14 +412,14 @@ async function scrapeFacebookRates() {
       const passInput = page.locator('input[type="password"], input[name="pass"], #pass').first();
       await passInput.waitFor({ timeout: 5000 });
       try {
-        await passInput.fill(process.env.FACEBOOK_PASSWORD, { timeout: 5000 });
+        await passInput.fill(facebookPassword, { timeout: 5000 });
         passFilled = true;
       } catch (fillErr) {
         console.log('[Exchange] fill() failed for password, using JavaScript fallback...');
         await page.evaluate((pass) => {
           const input = document.querySelector('input[type="password"], input[name="pass"], #pass');
           if (input) input.value = pass;
-        }, process.env.FACEBOOK_PASSWORD);
+        }, facebookPassword);
         passFilled = true;
       }
       if (!passFilled) throw new Error('Could not fill password field');
@@ -305,21 +444,23 @@ async function scrapeFacebookRates() {
         await page.waitForTimeout(2000);
       }
 
-      // --- Save session cookies ---
-      await context.storageState({ path: COOKIE_PATH });
-      console.log('[Exchange] Login successful. Session saved.');
-
-      // --- 2FA detection ---
+      // --- Check whether Facebook accepted the login or sent us to a challenge ---
       const afterLoginUrl = page.url();
-      if (afterLoginUrl.includes('two_step_verification') || afterLoginUrl.includes('checkpoint')) {
-        throw new Error('Two‑factor authentication (2FA) is enabled on this Facebook account. Please disable 2FA for the bot account.');
-      }
-
       // --- Re-check for empty body after login ---
       const afterLoginText = await page.locator('body').innerText({ timeout: 15000 }).catch(() => '');
+      const afterLoginGate = classifyFacebookGate(afterLoginUrl, afterLoginText);
+      throwForFacebookGate(afterLoginGate);
+
+      if (isLoginPage(afterLoginUrl, afterLoginText)) {
+        throw new Error('Facebook login did not complete - check FACEBOOK_EMAIL / FACEBOOK_PASSWORD env vars.');
+      }
+
       if (afterLoginText.length < 100 && (afterLoginText.includes('Checking your browser') || afterLoginText.includes('security'))) {
         throw new Error('Login succeeded but Facebook returned a challenge page. Manual intervention required.');
       }
+
+      shouldSaveSession = true;
+      console.log('[Exchange] Login completed. Session will be saved after the exchange page is verified.');
     }
 
     // If we got redirected to the home feed, go back to the exchange page
@@ -351,7 +492,19 @@ async function scrapeFacebookRates() {
 
     // Wait for the body to have text, which indicates the page is loaded
     console.log('[Exchange] Waiting for page content...');
-    await page.waitForFunction(() => document.body.innerText.length > 100, { timeout: 30000 });
+    try {
+      await page.waitForFunction(() => document.body.innerText.length > 100, { timeout: 30000 });
+    } catch (waitErr) {
+      const waitUrl = page.url();
+      const waitText = await page.locator('body').innerText({ timeout: 5000 }).catch(() => '');
+      const waitGate = classifyFacebookGate(waitUrl, waitText);
+
+      if (storageState && (waitGate || waitText.length < 100)) {
+        throw new FacebookSessionInvalidError('Saved Facebook session could not load the exchange page content.');
+      }
+      throwForFacebookGate(waitGate);
+      throw waitErr;
+    }
     console.log('[Exchange] Page content loaded.');
 
     // Now, wait for a specific post element
@@ -393,13 +546,30 @@ async function scrapeFacebookRates() {
     console.log('[Exchange] Final URL:', finalUrl);
     console.log('[Exchange] Body text length:', quickBodyText.length);
 
+    const finalGate = classifyFacebookGate(finalUrl, quickBodyText);
+    if (finalGate) {
+      if (storageState) {
+        throw new FacebookSessionInvalidError(`Saved Facebook session landed on a Facebook gate: ${finalGate.message}`);
+      }
+      throwForFacebookGate(finalGate);
+    }
+
     if (isLoginPage(finalUrl, quickBodyText)) {
+      if (storageState) {
+        throw new FacebookSessionInvalidError('Saved Facebook session expired and returned to the login page.');
+      }
       throw new Error('Still on login page after login attempt - check FACEBOOK_EMAIL / FACEBOOK_PASSWORD env vars.');
     }
     if (quickBodyText.length < 100) {
       const html = await page.content().catch(() => '');
       console.log('[Exchange] HTML (first 3000 chars):\n', html.slice(0, 3000));
       throw new Error(`Page body is empty (${quickBodyText.length} chars) - stealth may not be installed or Facebook is serving a challenge. HTML logged above.`);
+    }
+
+    if (shouldSaveSession) {
+      await context.storageState({ path: COOKIE_PATH });
+      shouldSaveSession = false;
+      console.log('[Exchange] Verified Facebook session saved.');
     }
 
     // --- Only read the LATEST post, and only if it was posted today ---
@@ -465,6 +635,7 @@ async function scrapeFacebookRates() {
       }
       throw new Error('Could not find USD/EUR/GBP rates in today\'s post.');
     }
+
     return { rates, scrapedAt: new Date().toISOString(), sourceUrl: SOURCE_URL, sample: postText.slice(0, 1200) };
   } catch (error) {
     console.error('[Exchange] Scrape failed:', error.message);
