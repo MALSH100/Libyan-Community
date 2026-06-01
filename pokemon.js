@@ -531,7 +531,7 @@ async function awardBattleXp(pokemon, won) {
 // SPAWN SYSTEM
 // ═══════════════════════════════════════════════════════════════════════════════
 
-function scheduleNextSpawn(channel, db, saveData, getGuildClans, getUserClan) {
+function scheduleNextSpawn(channel, db, saveData, getGuildClans, getUserClan, awardLP) {
   if (spawnTimers[channel.id]) clearTimeout(spawnTimers[channel.id]);
     spawnTimers[channel.id] = setTimeout(
     () => triggerSpawn(channel, db, saveData, getGuildClans, getUserClan, awardLP),
@@ -542,7 +542,7 @@ function scheduleNextSpawn(channel, db, saveData, getGuildClans, getUserClan) {
 async function triggerSpawn(channel, db, saveData, getGuildClans, getUserClan, awardLP) {
   // Don't spawn if one is already active here
   if (activeSpawns[channel.id]) {
-    scheduleNextSpawn(channel, db, saveData, getGuildClans, getUserClan);
+    scheduleNextSpawn(channel, db, saveData, getGuildClans, getUserClan, awardLP);
     return;
   }
 
@@ -550,7 +550,7 @@ async function triggerSpawn(channel, db, saveData, getGuildClans, getUserClan, a
     const pokeId    = Math.floor(Math.random() * MAX_POKEMON_ID) + 1;
     const apiData   = await fetchPokemon(pokeId);
     if (!apiData) {
-      scheduleNextSpawn(channel, db, saveData, getGuildClans, getUserClan);
+      scheduleNextSpawn(channel, db, saveData, getGuildClans, getUserClan, awardLP);
       return;
     }
 
@@ -650,7 +650,7 @@ async function triggerSpawn(channel, db, saveData, getGuildClans, getUserClan, a
           components: [disabledButtons()],
         });
       } catch {}
-      scheduleNextSpawn(channel, db, saveData, getGuildClans, getUserClan);
+      scheduleNextSpawn(channel, db, saveData, getGuildClans, getUserClan, awardLP);
     }, SPAWN_FLEE_MS);
 
     spawn.fleeTimer = fleeTimer;
@@ -668,7 +668,7 @@ async function triggerSpawn(channel, db, saveData, getGuildClans, getUserClan, a
 
   } catch (err) {
     console.error('Spawn error:', err);
-    scheduleNextSpawn(channel, db, saveData, getGuildClans, getUserClan);
+    scheduleNextSpawn(channel, db, saveData, getGuildClans, getUserClan, awardLP);
   }
 }
 
@@ -1133,7 +1133,7 @@ module.exports = function initPokemon({ client, db, saveData, getGuildClans, get
 
           if (channel) {
             console.log(`🌿 Scheduling spawns for #${channel.name}`);
-            scheduleNextSpawn(channel, db, saveData, getGuildClans, getUserClan);
+            scheduleNextSpawn(channel, db, saveData, getGuildClans, getUserClan, awardLP);
             scheduleNextDrop(channel);
           } else {
             console.warn(`⚠️ Could not find channel ${clan.channelId} — clearing stale channelId`);
@@ -1984,7 +1984,7 @@ module.exports = function initPokemon({ client, db, saveData, getGuildClans, get
         for (const [__k, clan] of Object.entries(gc)) { if (__k.startsWith("__")) continue;
           if (clan.channelId === channel.id) {
             console.log(`🌿 New clan channel detected — scheduling spawns for #${channel.name}`);
-            scheduleNextSpawn(channel, db, saveData, getGuildClans, getUserClan);
+            scheduleNextSpawn(channel, db, saveData, getGuildClans, getUserClan, awardLP);
             scheduleNextDrop(channel);
             break;
           }
