@@ -16,7 +16,7 @@ const {
 } = require('discord.js');
 
 const SOURCE_URL = 'https://www.facebook.com/p/Dollar-Euro-Pound-Libya-Black-Market-Exchange-Rate-100064752788893/';
-const SCRAPE_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
+const SCRAPE_INTERVAL_MS = 2 * 60 * 60 * 1000; // 2 hours
 const MAX_HISTORY = 120;
 const CHART_POINTS = 30;
 const CURRENCIES = ['USD', 'EUR', 'GBP'];
@@ -25,7 +25,7 @@ const COOKIE_PATH = path.resolve('./fb-session.json');
 const exchangeCommands = [
   new SlashCommandBuilder()
     .setName('exchange-set-channel')
-    .setDescription('Set the channel for hourly Libyan black market exchange updates')
+    .setDescription('Set the channel for every-2-hour Libyan black market exchange updates')
     .addChannelOption(o => o.setName('channel').setDescription('Channel to post exchange updates in').setRequired(true))
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
     .setDMPermission(false),
@@ -387,32 +387,85 @@ async function scrapeFacebookRates() {
     await page.waitForTimeout(3000);
 
     const finalUrl = page.url();
-    const text = await page.locator('body').innerText({ timeout: 15000 }).catch(() => '');
-    const html = await page.content().catch(() => '');
 
+    // Sanity-check: make sure we didn't end up back on the login page
+    const quickBodyText = await page.locator('body').innerText({ timeout: 10000 }).catch(() => '');
     console.log('[Exchange] Final URL:', finalUrl);
-    console.log('[Exchange] Body text length:', text.length);
-    console.log('[Exchange] Body text (first 2000 chars):\n', text.slice(0, 2000));
-    if (text.length < 200) {
-      console.log('[Exchange] HTML (first 3000 chars):\n', html.slice(0, 3000));
-    }
+    console.log('[Exchange] Body text length:', quickBodyText.length);
 
-    if (isLoginPage(finalUrl, text)) {
+    if (isLoginPage(finalUrl, quickBodyText)) {
       throw new Error('Still on login page after login attempt - check FACEBOOK_EMAIL / FACEBOOK_PASSWORD env vars.');
     }
-
-    if (text.length < 100) {
-      throw new Error(`Page body is empty (${text.length} chars) - stealth may not be installed or Facebook is serving a challenge. HTML logged above.`);
+    if (quickBodyText.length < 100) {
+      const html = await page.content().catch(() => '');
+      console.log('[Exchange] HTML (first 3000 chars):\n', html.slice(0, 3000));
+      throw new Error(`Page body is empty (${quickBodyText.length} chars) - stealth may not be installed or Facebook is serving a challenge. HTML logged above.`);
     }
 
-    const rates = parseRatesFromText(text);
+    // --- Only read the LATEST post, and only if it was posted today ---
+    const posts = await page.locator('[role="article"]').all();
+    console.log(`[Exchange] Found ${posts.length} post element(s)`);
+
+    const today = new Date();
+    const todayStr = today.toDateString(); // e.g. "Mon Jun 01 2026"
+    // Also build "June 1" style string for matching aria-label timestamps
+    const todayMonthDay = today.toLocaleDateString('en-US', { month: 'long', day: 'numeric' }); // e.g. "June 1"
+
+    let postText = null;
+
+    for (const post of posts) {
+      const text = await post.innerText({ timeout: 5000 }).catch(() => '');
+      if (!text || text.length < 30) continue;
+
+      // Try to find a timestamp within this post via data-utime (Unix seconds) or aria-label
+      let isToday = false;
+      try {
+        // data-utime is the most reliable — a Unix timestamp on the <abbr> Facebook wraps dates in
+        const utime = await post.locator('[data-utime]').first().getAttribute('data-utime', { timeout: 2000 }).catch(() => null);
+        if (utime) {
+          const postDate = new Date(parseInt(utime, 10) * 1000);
+          isToday = postDate.toDateString() === todayStr;
+          console.log(`[Exchange] Post data-utime: ${utime} → ${postDate.toDateString()} (today: ${todayStr}) → isToday: ${isToday}`);
+        } else {
+          // Fallback: aria-label on time-like anchors e.g. "June 1 at 10:30 AM"
+          const ariaLabel = await post.locator('a[aria-label], span[aria-label]').first().getAttribute('aria-label', { timeout: 2000 }).catch(() => null);
+          console.log(`[Exchange] Post aria-label: ${ariaLabel}`);
+          if (ariaLabel) {
+            isToday = ariaLabel.includes(todayMonthDay);
+          } else {
+            // Last resort: check if the post text itself contains today's date clues
+            // (unreliable — only used if no timestamp element exists at all)
+            console.log('[Exchange] No timestamp element found in post — cannot confirm post date, skipping post.');
+            isToday = false;
+          }
+        }
+      } catch (tsErr) {
+        console.log('[Exchange] Timestamp detection error:', tsErr.message);
+      }
+
+      if (!isToday) {
+        console.log('[Exchange] Latest post is not from today — no update to post. Skipping.');
+        throw new Error('No rates posted today (latest post is not from today). Skipping update.');
+      }
+
+      console.log('[Exchange] Latest post is from today. Extracting rates...');
+      console.log('[Exchange] Post text (first 500 chars):\n', text.slice(0, 500));
+      postText = text;
+      break; // Only ever use the first (latest) post
+    }
+
+    if (!postText) {
+      throw new Error('Could not find any post elements on the page.');
+    }
+
+    const rates = parseRatesFromText(postText);
     if (!rates) {
-      if (text.includes('no black market exchange rate updates') || text.includes('holiday')) {
+      if (postText.includes('no black market exchange rate updates') || postText.includes('holiday')) {
         throw new Error('No rates posted today (holiday or break). Skipping update.');
       }
-      throw new Error('Could not find USD/EUR/GBP rates.');
+      throw new Error('Could not find USD/EUR/GBP rates in today\'s post.');
     }
-    return { rates, scrapedAt: new Date().toISOString(), sourceUrl: SOURCE_URL, sample: text.slice(0, 1200) };
+    return { rates, scrapedAt: new Date().toISOString(), sourceUrl: SOURCE_URL, sample: postText.slice(0, 1200) };
   } catch (error) {
     console.error('[Exchange] Scrape failed:', error.message);
     throw error;
@@ -441,9 +494,11 @@ function buildRateEmbed(exchangeData, latest, forced = false) {
   const embed = new EmbedBuilder()
     .setColor(0x1B8F5A)
     .setTitle('Libyan Black Market Exchange Rate')
-    .setDescription(forced ? 'Manual refresh from the configured source.' : 'Latest hourly update from the configured source.')
+    .setDescription(forced
+      ? `Manual refresh — pulled on ${new Date(latest.scrapedAt || Date.now()).toLocaleString('en-GB', { dateStyle: 'full', timeStyle: 'short' })}`
+      : `Rates pulled on ${new Date(latest.scrapedAt || Date.now()).toLocaleString('en-GB', { dateStyle: 'full', timeStyle: 'short' })}`)
     .setTimestamp(new Date(latest.scrapedAt || Date.now()))
-    .setFooter({ text: 'Live Libyan black market rates • Updated hourly' });
+    .setFooter({ text: 'Live Libyan black market rates • Updated every 2 hours • Chart Designed by Captain' });
   for (const currency of CURRENCIES) {
     const value = latest.rates[currency];
     const t = trend(history.slice(0, -1), currency, value);
@@ -848,7 +903,7 @@ module.exports = function initBlackMarketExchange({ client, db, saveData }) {
         exchangeData.channelId = channel.id;
         saveData(guild.id);
         scheduleGuild(guild.id);
-        await safeReply(interaction, { content: `Exchange updates will post in ${channel} every hour. Scraping the latest rate now...`, flags: 64 });
+        await safeReply(interaction, { content: `Exchange updates will post in ${channel} every 2 hours. Scraping the latest rate now...`, flags: 64 });
         await updateRates({ client, db, saveData, guildId: guild.id, forcePost: true });
         return;
       }
