@@ -90,7 +90,7 @@ async function ensurePOTDRole(guild, potd, saveData) {
             reason:      'Post of the Day winner role',
         });
         potd.winnerRole = role.id;
-        saveData();
+        saveData(guild.id);
         console.log(`[POTD] Created role "${POTD_ROLE_NAME}" in ${guild.name}`);
         return role;
     } catch (err) {
@@ -380,20 +380,37 @@ async function runPOTD(client, db, saveData, awardLP, guildId, forced = false) {
 }
 
 // ─── Scheduler ────────────────────────────────────────────────────────────────
-// Fires every minute, triggers at ANNOUNCE_HOUR_UTC:ANNOUNCE_MINUTE UTC.
+// Schedules POTD to run at exactly ANNOUNCE_HOUR_UTC:ANNOUNCE_MINUTE UTC each day.
+// Uses setTimeout chained to the next target time instead of a fixed interval,
+// so it never drifts and can never miss the window due to boot-time misalignment.
 
 function startScheduler(client, db, saveData, awardLP) {
-    setInterval(async () => {
+    function getNextRunMs() {
         const now = new Date();
-        if (now.getUTCHours()   !== ANNOUNCE_HOUR_UTC) return;
-        if (now.getUTCMinutes() !== ANNOUNCE_MINUTE)    return;
+        const next = new Date(Date.UTC(
+            now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(),
+            ANNOUNCE_HOUR_UTC, ANNOUNCE_MINUTE, 0, 0
+        ));
+        // If today's time has already passed, aim for tomorrow
+        if (next <= now) next.setUTCDate(next.getUTCDate() + 1);
+        return next.getTime() - now.getTime();
+    }
 
-        for (const guild of client.guilds.cache.values()) {
-            runPOTD(client, db, saveData, awardLP, guild.id).catch(err => {
-                console.error(`[POTD] Error for guild ${guild.name}:`, err.message);
-            });
-        }
-    }, 60_000); // check every minute
+    function scheduleNext() {
+        const ms = getNextRunMs();
+        console.log(`[POTD] Next run scheduled in ${Math.round(ms / 60_000)} minutes`);
+        setTimeout(async () => {
+            for (const guild of client.guilds.cache.values()) {
+                runPOTD(client, db, saveData, awardLP, guild.id).catch(err => {
+                    console.error(`[POTD] Error for guild ${guild.name}:`, err.message);
+                });
+            }
+            // Schedule the next day's run immediately after firing
+            scheduleNext();
+        }, ms);
+    }
+
+    scheduleNext();
 }
 
 // ─── Slash commands ───────────────────────────────────────────────────────────
