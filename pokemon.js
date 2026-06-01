@@ -666,10 +666,6 @@ async function triggerSpawn(channel, db, saveData, getGuildClans, getUserClan, a
       await handleSpawnInteraction(i, spawn, channel, db, saveData, getGuildClans, getUserClan, collector, awardLP);
     });
 
-    collector.on('end', () => {
-      scheduleNextSpawn(channel, db, saveData, getGuildClans, getUserClan);
-    });
-
   } catch (err) {
     console.error('Spawn error:', err);
     scheduleNextSpawn(channel, db, saveData, getGuildClans, getUserClan);
@@ -1116,11 +1112,12 @@ module.exports = function initPokemon({ client, db, saveData, getGuildClans, get
   const activeDrops = {};   // { channelId: { itemId, messageId, expiresAt } }
   const dropTimers  = {};   // { channelId: timeoutId }
 
-  // ─── On ready: start spawn timers for all clan channels ────────────────────
+  // ─── startSpawnTimers: called by index.js after MongoDB data is loaded ────────
+  // This must NOT be called from clientReady inside pokemon.js because db will
+  // still be empty at that point — loadData() in index.js hasn't finished yet.
 
-  client.once('clientReady', async () => {
-    // index.js handles all command registration.
-    // We just need to start spawn timers for existing clan channels.
+  async function startSpawnTimers() {
+    // Short delay for the channel cache to settle after login
     setTimeout(async () => {
       for (const guild of client.guilds.cache.values()) {
         try { await guild.channels.fetch(); } catch {}
@@ -1145,8 +1142,8 @@ module.exports = function initPokemon({ client, db, saveData, getGuildClans, get
           }
         }
       }
-    }, 8000);
-  });
+    }, 3000);
+  }
 
   // ─── Interaction handler ────────────────────────────────────────────────────
 
@@ -1995,5 +1992,7 @@ module.exports = function initPokemon({ client, db, saveData, getGuildClans, get
       } catch {}
     }, 2000);
   });
+
+  return { startSpawnTimers };
 
 };
