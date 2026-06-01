@@ -630,55 +630,63 @@ async function scrapeFacebookRatesAttempt(authAttempt) {
       console.log('[Exchange] Verified Facebook session saved.');
     }
 
-// --- Grab the first visible post that contains exchange rate data ---
+// --- Grab the visible posts and find the one with the latest timestamp ---
 const posts = await page.locator('[role="article"]').all();
 console.log(`[Exchange] Found ${posts.length} post element(s)`);
 
-let postText = null;
+let candidates = [];
 
-for (const post of posts) {
+for (let idx = 0; idx < posts.length; idx++) {
+  const post = posts[idx];
   const text = await post.innerText({ timeout: 5000 }).catch(() => '');
   if (!text || text.length < 30) continue;
 
-  // Log timestamp info for diagnostics
-  try {
-    const utime = await post.locator('[data-utime]').first().getAttribute('data-utime', { timeout: 2000 }).catch(() => null);
-    if (utime) {
-      const postDate = new Date(parseInt(utime, 10) * 1000);
-      console.log(`[Exchange] Post data-utime: ${utime} → ${postDate.toDateString()}`);
-    } else {
-      const ariaLabel = await post.locator('a[aria-label], span[aria-label]').first().getAttribute('aria-label', { timeout: 2000 }).catch(() => null);
-      console.log(`[Exchange] Post aria-label: ${ariaLabel ?? '(none — timestamp not exposed by Facebook)'}`);
-    }
-  } catch (tsErr) {
-    console.log('[Exchange] Timestamp probe error (non-fatal):', tsErr.message);
-  }
+  // Preview for debugging
+  console.log(`[Exchange] Post ${idx} preview (first 200 chars):\n${text.slice(0, 200)}`);
 
-  // Preview first 300 chars for debugging
-  console.log(`[Exchange] Post text preview (first 300 chars):\n${text.slice(0, 300)}`);
-
-  // Quick pre-check: does this post look like it contains rate data?
+  // Quick check: does it look like a rate post?
   const tl = text.toLowerCase();
   const hasRateHints =
     tl.includes('dollar') || tl.includes('usd') || tl.includes('$') ||
     tl.includes('euro')   || tl.includes('eur') || tl.includes('€') ||
     tl.includes('pound')  || tl.includes('gbp') || tl.includes('£') ||
     /\b\d{1,2}[.,]\d{1,4}\b/.test(text);
+  if (!hasRateHints) continue;
 
-  if (!hasRateHints) {
-    console.log('[Exchange] Post does not appear to contain rate data, trying next...');
-    continue;
+  // Try to get a timestamp (epoch seconds) from data-utime
+  let timestamp = 0;
+  try {
+    const utimeAttr = await post.locator('[data-utime]').first().getAttribute('data-utime', { timeout: 1000 }).catch(() => null);
+    if (utimeAttr) timestamp = parseInt(utimeAttr, 10);
+  } catch (e) {}
+  if (timestamp === 0) {
+    // Fallback: try to parse relative time like "7h", "2d", "just now"
+    const timeMatch = text.match(/\b(\d+)\s*(h|hour|d|day|m|minute)s?\b/i);
+    if (timeMatch) {
+      const value = parseInt(timeMatch[1], 10);
+      const unit = timeMatch[2].toLowerCase();
+      const now = Math.floor(Date.now() / 1000);
+      if (unit === 'h' || unit === 'hour') timestamp = now - value * 3600;
+      else if (unit === 'd' || unit === 'day') timestamp = now - value * 86400;
+      else if (unit === 'm' || unit === 'minute') timestamp = now - value * 60;
+    }
   }
+  // If still zero, use current index as tie-breaker (later posts get higher index? Actually first is often newest, but not guaranteed)
+  if (timestamp === 0) timestamp = Date.now() - idx * 60000; // assume older posts have smaller index offset
 
-  console.log('[Exchange] Candidate post found. Extracting rates...');
-  console.log('[Exchange] Post text (first 500 chars):\n', text.slice(0, 500));
-  postText = text;
-  break;
+  candidates.push({ idx, text, timestamp });
 }
 
-// --- Fallback to full page body if no post worked ---
-if (!postText) {
-  console.log('[Exchange] No post with rate hints found. Falling back to full page body text.');
+// Sort candidates by timestamp descending (newest first)
+candidates.sort((a, b) => b.timestamp - a.timestamp);
+
+let postText = null;
+if (candidates.length > 0) {
+  const best = candidates[0];
+  console.log(`[Exchange] Selected post ${best.idx} with timestamp ${best.timestamp}`);
+  postText = best.text;
+} else {
+  console.log('[Exchange] No candidate post with rate hints found. Falling back to full page body.');
   postText = await page.locator('body').innerText({ timeout: 10000 }).catch(() => '');
   if (!postText || postText.length < 100) {
     throw new Error('Could not extract any text from page body.');
@@ -687,7 +695,7 @@ if (!postText) {
   console.log('[Exchange] Body text preview (first 500 chars):\n', postText.slice(0, 500));
 }
 
-// --- Parse rates from the extracted text ---
+// --- Parse rates ---
 const rates = parseRatesFromText(postText);
 if (!rates) {
   if (postText.includes('no black market exchange rate updates') || postText.includes('holiday')) {
