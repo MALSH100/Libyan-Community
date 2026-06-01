@@ -163,6 +163,26 @@ function includesAny(value, fragments) {
   return fragments.some(fragment => value.includes(fragment));
 }
 
+function loadFacebookStorageStateFromEnv() {
+  const encodedState = process.env.FACEBOOK_STORAGE_STATE_B64;
+  const rawState = process.env.FACEBOOK_STORAGE_STATE;
+  const sourceName = encodedState ? 'FACEBOOK_STORAGE_STATE_B64' : (rawState ? 'FACEBOOK_STORAGE_STATE' : null);
+  if (!sourceName) return null;
+
+  try {
+    const json = encodedState
+      ? Buffer.from(encodedState.trim(), 'base64').toString('utf8')
+      : rawState.trim();
+    const parsed = JSON.parse(json);
+    if (!parsed || !Array.isArray(parsed.cookies)) {
+      throw new Error('storage state must be a Playwright JSON object with a cookies array');
+    }
+    return { sourceName, storageState: parsed };
+  } catch (err) {
+    throw new Error(`${sourceName} is not a valid Playwright storage state: ${err.message}`);
+  }
+}
+
 function isLoginPage(url = '', bodyText = '') {
   const u = String(url || '').toLowerCase();
   if (u.includes('/login') || u.includes('login.php') || u.includes('login/device-based')) return true;
@@ -190,14 +210,27 @@ function classifyFacebookGate(url = '', bodyText = '') {
       'two factor authentication',
       'two-step verification',
       'two step verification',
-      'authentication code',
-      'code generator',
-      'login code',
     ])
   ) {
     return {
       type: '2fa',
-      message: 'Facebook is asking for a login verification code. Complete that prompt in a normal browser, then regenerate fb-session.json for the bot account.',
+      message: 'Facebook is asking for two-factor authentication. Complete the prompt in a normal browser, then refresh the Railway FACEBOOK_STORAGE_STATE_B64 value.',
+    };
+  }
+
+  if (
+    includesAny(t, [
+      'authentication code',
+      'code generator',
+      'login code',
+      'enter the code',
+      'confirm your login',
+      'approve this login',
+    ])
+  ) {
+    return {
+      type: 'login_approval',
+      message: 'Facebook is asking for a login approval code because Railway looks like a new device/location. Generate an authenticated session locally and set it in Railway as FACEBOOK_STORAGE_STATE_B64.',
     };
   }
 
@@ -222,7 +255,7 @@ function classifyFacebookGate(url = '', bodyText = '') {
   ) {
     return {
       type: 'checkpoint',
-      message: 'Facebook returned a checkpoint/security challenge, not necessarily 2FA. Complete the checkpoint in a normal browser for the bot account, then let the bot create a fresh fb-session.json.',
+      message: 'Facebook returned a checkpoint/security challenge, not necessarily 2FA. Complete the checkpoint in a normal browser for the bot account, then refresh the Railway FACEBOOK_STORAGE_STATE_B64 value.',
     };
   }
 
@@ -254,17 +287,42 @@ function moveBadFacebookSession(reason) {
 }
 
 async function scrapeFacebookRates() {
-  const attempts = fs.existsSync(COOKIE_PATH) ? [true, false] : [false];
+  const envSession = loadFacebookStorageStateFromEnv();
+  const attempts = [];
+  if (envSession) {
+    attempts.push({
+      source: 'env',
+      label: envSession.sourceName,
+      storageState: envSession.storageState,
+    });
+  }
+  if (fs.existsSync(COOKIE_PATH)) {
+    attempts.push({
+      source: 'file',
+      label: COOKIE_PATH,
+      storageState: COOKIE_PATH,
+    });
+  }
+  attempts.push({
+    source: 'login',
+    label: 'fresh username/password login',
+    storageState: undefined,
+  });
+
   let lastError = null;
 
-  for (const useStoredSession of attempts) {
+  for (const attempt of attempts) {
     try {
-      return await scrapeFacebookRatesAttempt(useStoredSession);
+      return await scrapeFacebookRatesAttempt(attempt);
     } catch (error) {
       lastError = error;
-      if (useStoredSession && error.retryWithoutSession) {
-        moveBadFacebookSession(error.message);
-        console.warn('[Exchange] Retrying Facebook scrape with a fresh login session...');
+      if (attempt.storageState && error.retryWithoutSession) {
+        if (attempt.source === 'file') {
+          moveBadFacebookSession(error.message);
+        } else {
+          console.warn(`[Exchange] Facebook session from ${attempt.label} is no longer valid: ${error.message}`);
+        }
+        console.warn('[Exchange] Retrying Facebook scrape with the next available auth method...');
         continue;
       }
       throw error;
@@ -274,7 +332,7 @@ async function scrapeFacebookRates() {
   throw lastError;
 }
 
-async function scrapeFacebookRatesAttempt(useStoredSession) {
+async function scrapeFacebookRatesAttempt(authAttempt) {
   const chromiumExtra = getChromiumExtra();
 
   let browser, context, page;
@@ -292,9 +350,9 @@ async function scrapeFacebookRatesAttempt(useStoredSession) {
     });
 
     // Reuse saved session cookies if available to skip login
-    const storageState = useStoredSession && fs.existsSync(COOKIE_PATH) ? COOKIE_PATH : undefined;
+    const storageState = authAttempt.storageState;
     if (storageState) {
-      console.log('[Exchange] Reusing saved Facebook session from', COOKIE_PATH);
+      console.log('[Exchange] Reusing Facebook session from', authAttempt.label);
     }
 
     context = await browser.newContext({
