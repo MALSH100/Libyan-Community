@@ -630,57 +630,7 @@ async function scrapeFacebookRatesAttempt(authAttempt) {
       console.log('[Exchange] Verified Facebook session saved.');
     }
 
-    // --- Grab the first visible post that contains exchange rate data ---
-    // The date gate has been removed: Facebook often omits timestamp elements for
-    // semi-authenticated sessions, causing every scrape to be thrown away even when
-    // fresh rates are present.  Duplicate-post prevention is handled by lastPostedKey.
-    const posts = await page.locator('[role="article"]').all();
-    console.log(`[Exchange] Found ${posts.length} post element(s)`);
-
-    let postText = null;
-
-    for (const post of posts) {
-      const text = await post.innerText({ timeout: 5000 }).catch(() => '');
-      if (!text || text.length < 30) continue;
-
-      // Log timestamp info for diagnostics — no longer used as a gate
-      try {
-        const utime = await post.locator('[data-utime]').first().getAttribute('data-utime', { timeout: 2000 }).catch(() => null);
-        if (utime) {
-          const postDate = new Date(parseInt(utime, 10) * 1000);
-          console.log(`[Exchange] Post data-utime: ${utime} → ${postDate.toDateString()}`);
-        } else {
-          const ariaLabel = await post.locator('a[aria-label], span[aria-label]').first().getAttribute('aria-label', { timeout: 2000 }).catch(() => null);
-          console.log(`[Exchange] Post aria-label: ${ariaLabel ?? '(none — timestamp not exposed by Facebook)'}`);
-        }
-      } catch (tsErr) {
-        console.log('[Exchange] Timestamp probe error (non-fatal):', tsErr.message);
-      }
-
-      // Quick pre-check: does this post look like it contains rate data?
-      const tl = text.toLowerCase();
-      const hasRateHints =
-        tl.includes('dollar') || tl.includes('usd') || tl.includes('$') ||
-        tl.includes('euro')   || tl.includes('eur') || tl.includes('€') ||
-        tl.includes('pound')  || tl.includes('gbp') || tl.includes('£') ||
-        /\b\d{1,2}[.,]\d{1,4}\b/.test(text);
-
-      if (!hasRateHints) {
-        console.log('[Exchange] Post does not appear to contain rate data, trying next...');
-        continue;
-      }
-
-      console.log('[Exchange] Candidate post found. Extracting rates...');
-      console.log('[Exchange] Post text (first 500 chars):\n', text.slice(0, 500));
-      postText = text;
-      break; // Use the topmost (latest) post that has rate hints
-    }
-
-    if (!postText) {
-      throw new Error('Could not find any post containing exchange rate data on the page.');
-    }
-
-    const rates = parseRatesFromText(postText);
+const posts = await page.locator('[role="article"]').all();
     if (!rates) {
       if (postText.includes('no black market exchange rate updates') || postText.includes('holiday')) {
         throw new Error('No exchange rates available (holiday or break announced in post). Skipping update.');
