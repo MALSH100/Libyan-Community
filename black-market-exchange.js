@@ -630,14 +630,12 @@ async function scrapeFacebookRatesAttempt(authAttempt) {
       console.log('[Exchange] Verified Facebook session saved.');
     }
 
-    // --- Only read the LATEST post, and only if it was posted today ---
+    // --- Grab the first visible post that contains exchange rate data ---
+    // The date gate has been removed: Facebook often omits timestamp elements for
+    // semi-authenticated sessions, causing every scrape to be thrown away even when
+    // fresh rates are present.  Duplicate-post prevention is handled by lastPostedKey.
     const posts = await page.locator('[role="article"]').all();
     console.log(`[Exchange] Found ${posts.length} post element(s)`);
-
-    const today = new Date();
-    const todayStr = today.toDateString(); // e.g. "Mon Jun 01 2026"
-    // Also build "June 1" style string for matching aria-label timestamps
-    const todayMonthDay = today.toLocaleDateString('en-US', { month: 'long', day: 'numeric' }); // e.g. "June 1"
 
     let postText = null;
 
@@ -645,53 +643,49 @@ async function scrapeFacebookRatesAttempt(authAttempt) {
       const text = await post.innerText({ timeout: 5000 }).catch(() => '');
       if (!text || text.length < 30) continue;
 
-      // Try to find a timestamp within this post via data-utime (Unix seconds) or aria-label
-      let isToday = false;
+      // Log timestamp info for diagnostics — no longer used as a gate
       try {
-        // data-utime is the most reliable — a Unix timestamp on the <abbr> Facebook wraps dates in
         const utime = await post.locator('[data-utime]').first().getAttribute('data-utime', { timeout: 2000 }).catch(() => null);
         if (utime) {
           const postDate = new Date(parseInt(utime, 10) * 1000);
-          isToday = postDate.toDateString() === todayStr;
-          console.log(`[Exchange] Post data-utime: ${utime} → ${postDate.toDateString()} (today: ${todayStr}) → isToday: ${isToday}`);
+          console.log(`[Exchange] Post data-utime: ${utime} → ${postDate.toDateString()}`);
         } else {
-          // Fallback: aria-label on time-like anchors e.g. "June 1 at 10:30 AM"
           const ariaLabel = await post.locator('a[aria-label], span[aria-label]').first().getAttribute('aria-label', { timeout: 2000 }).catch(() => null);
-          console.log(`[Exchange] Post aria-label: ${ariaLabel}`);
-          if (ariaLabel) {
-            isToday = ariaLabel.includes(todayMonthDay);
-          } else {
-            // Last resort: check if the post text itself contains today's date clues
-            // (unreliable — only used if no timestamp element exists at all)
-            console.log('[Exchange] No timestamp element found in post — cannot confirm post date, skipping post.');
-            isToday = false;
-          }
+          console.log(`[Exchange] Post aria-label: ${ariaLabel ?? '(none — timestamp not exposed by Facebook)'}`);
         }
       } catch (tsErr) {
-        console.log('[Exchange] Timestamp detection error:', tsErr.message);
+        console.log('[Exchange] Timestamp probe error (non-fatal):', tsErr.message);
       }
 
-      if (!isToday) {
-        console.log('[Exchange] Latest post is not from today — no update to post. Skipping.');
-        throw new Error('No rates posted today (latest post is not from today). Skipping update.');
+      // Quick pre-check: does this post look like it contains rate data?
+      const tl = text.toLowerCase();
+      const hasRateHints =
+        tl.includes('dollar') || tl.includes('usd') || tl.includes('$') ||
+        tl.includes('euro')   || tl.includes('eur') || tl.includes('€') ||
+        tl.includes('pound')  || tl.includes('gbp') || tl.includes('£') ||
+        /\b\d{1,2}[.,]\d{1,4}\b/.test(text);
+
+      if (!hasRateHints) {
+        console.log('[Exchange] Post does not appear to contain rate data, trying next...');
+        continue;
       }
 
-      console.log('[Exchange] Latest post is from today. Extracting rates...');
+      console.log('[Exchange] Candidate post found. Extracting rates...');
       console.log('[Exchange] Post text (first 500 chars):\n', text.slice(0, 500));
       postText = text;
-      break; // Only ever use the first (latest) post
+      break; // Use the topmost (latest) post that has rate hints
     }
 
     if (!postText) {
-      throw new Error('Could not find any post elements on the page.');
+      throw new Error('Could not find any post containing exchange rate data on the page.');
     }
 
     const rates = parseRatesFromText(postText);
     if (!rates) {
       if (postText.includes('no black market exchange rate updates') || postText.includes('holiday')) {
-        throw new Error('No rates posted today (holiday or break). Skipping update.');
+        throw new Error('No exchange rates available (holiday or break announced in post). Skipping update.');
       }
-      throw new Error('Could not find USD/EUR/GBP rates in today\'s post.');
+      throw new Error('Could not parse USD/EUR/GBP rates from the latest post.');
     }
 
     return { rates, scrapedAt: new Date().toISOString(), sourceUrl: SOURCE_URL, sample: postText.slice(0, 1200) };
@@ -1025,7 +1019,11 @@ async function updateRates({ client, db, saveData, guildId, forcePost = false })
   try {
     latest = await scrapeFacebookRates();
   } catch (err) {
-    if (err.message && err.message.includes('No rates posted today')) {
+    if (err.message && (
+      err.message.includes('No rates posted today') ||
+      err.message.includes('holiday or break') ||
+      err.message.includes('Could not find any post containing exchange rate data')
+    )) {
       console.log('[Exchange] Skipping update:', err.message);
       return { latest: null, posted: false, changed: false };
     }
@@ -1144,9 +1142,19 @@ module.exports = function initBlackMarketExchange({ client, db, saveData }) {
       if (commandName === 'exchange-refresh') {
         if (!isAdmin(interaction)) return safeReply(interaction, { content: 'Only admins can refresh.', flags: 64 });
         await interaction.deferReply({ flags: 64 });
-        const result = await updateRates({ client, db, saveData, guildId: guild.id, forcePost: true });
-        const postedText = result.posted ? 'Posted to configured channel.' : 'Saved, but no exchange channel is configured yet.';
-        return safeReply(interaction, { content: `Exchange rates refreshed. ${postedText}` });
+        // forcePost intentionally omitted: lastPostedKey deduplication prevents reposting identical rates.
+        const result = await updateRates({ client, db, saveData, guildId: guild.id });
+        let statusText;
+        if (result.latest === null) {
+          statusText = 'No exchange rates found in the latest Facebook post.';
+        } else if (result.posted) {
+          statusText = 'New rates detected and posted to the configured channel.';
+        } else if (!exchangeData.channelId) {
+          statusText = 'Rates saved, but no exchange channel is configured yet. Use `/exchange-set-channel` first.';
+        } else {
+          statusText = 'Rates are unchanged since last post — nothing new to send.';
+        }
+        return safeReply(interaction, { content: `Exchange rates refreshed. ${statusText}` });
       }
       if (commandName === 'exchange-debug') {
         if (!isAdmin(interaction)) return safeReply(interaction, { content: 'Admin only.', flags: 64 });
