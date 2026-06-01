@@ -630,21 +630,19 @@ async function scrapeFacebookRatesAttempt(authAttempt) {
       console.log('[Exchange] Verified Facebook session saved.');
     }
 
-// --- Grab the visible posts and find the one with the latest timestamp ---
+// --- Grab the most recent post by smallest "Xh" value ---
 const posts = await page.locator('[role="article"]').all();
 console.log(`[Exchange] Found ${posts.length} post element(s)`);
 
-let candidates = [];
+let bestPost = null;
+let bestHours = Infinity;
 
 for (let idx = 0; idx < posts.length; idx++) {
   const post = posts[idx];
   const text = await post.innerText({ timeout: 5000 }).catch(() => '');
   if (!text || text.length < 30) continue;
 
-  // Preview for debugging
-  console.log(`[Exchange] Post ${idx} preview (first 200 chars):\n${text.slice(0, 200)}`);
-
-  // Quick check: does it look like a rate post?
+  // Quick rate hint check
   const tl = text.toLowerCase();
   const hasRateHints =
     tl.includes('dollar') || tl.includes('usd') || tl.includes('$') ||
@@ -653,40 +651,43 @@ for (let idx = 0; idx < posts.length; idx++) {
     /\b\d{1,2}[.,]\d{1,4}\b/.test(text);
   if (!hasRateHints) continue;
 
-  // Try to get a timestamp (epoch seconds) from data-utime
-  let timestamp = 0;
-  try {
-    const utimeAttr = await post.locator('[data-utime]').first().getAttribute('data-utime', { timeout: 1000 }).catch(() => null);
-    if (utimeAttr) timestamp = parseInt(utimeAttr, 10);
-  } catch (e) {}
-  if (timestamp === 0) {
-    // Fallback: try to parse relative time like "7h", "2d", "just now"
-    const timeMatch = text.match(/\b(\d+)\s*(h|hour|d|day|m|minute)s?\b/i);
-    if (timeMatch) {
-      const value = parseInt(timeMatch[1], 10);
-      const unit = timeMatch[2].toLowerCase();
-      const now = Math.floor(Date.now() / 1000);
-      if (unit === 'h' || unit === 'hour') timestamp = now - value * 3600;
-      else if (unit === 'd' || unit === 'day') timestamp = now - value * 86400;
-      else if (unit === 'm' || unit === 'minute') timestamp = now - value * 60;
-    }
+  // Extract the smallest hour value (e.g., "7h" → 7, "just now" → 0)
+  let hours = null;
+  // Match "Xh" (case-insensitive)
+  const hourMatch = text.match(/\b(\d+)\s*h\b/i);
+  if (hourMatch) {
+    hours = parseInt(hourMatch[1], 10);
+  } else if (/\bjust now\b/i.test(text)) {
+    hours = 0;
+  } else {
+    // If no relative hour, try data-utime (epoch seconds)
+    try {
+      const utime = await post.locator('[data-utime]').first().getAttribute('data-utime', { timeout: 1000 }).catch(() => null);
+      if (utime) {
+        const postTime = parseInt(utime, 10) * 1000;
+        const now = Date.now();
+        hours = Math.floor((now - postTime) / (1000 * 3600));
+      }
+    } catch (e) {}
   }
-  // If still zero, use current index as tie-breaker (later posts get higher index? Actually first is often newest, but not guaranteed)
-  if (timestamp === 0) timestamp = Date.now() - idx * 60000; // assume older posts have smaller index offset
 
-  candidates.push({ idx, text, timestamp });
+  // If we still have no hour, skip this post (not recent enough)
+  if (hours === null) continue;
+
+  console.log(`[Exchange] Post ${idx} has rate hints and hour = ${hours}h`);
+
+  if (hours < bestHours) {
+    bestHours = hours;
+    bestPost = { idx, text };
+  }
 }
 
-// Sort candidates by timestamp descending (newest first)
-candidates.sort((a, b) => b.timestamp - a.timestamp);
-
 let postText = null;
-if (candidates.length > 0) {
-  const best = candidates[0];
-  console.log(`[Exchange] Selected post ${best.idx} with timestamp ${best.timestamp}`);
-  postText = best.text;
+if (bestPost) {
+  console.log(`[Exchange] Selected post ${bestPost.idx} with ${bestHours}h – using it.`);
+  postText = bestPost.text;
 } else {
-  console.log('[Exchange] No candidate post with rate hints found. Falling back to full page body.');
+  console.log('[Exchange] No recent post with hour value found. Falling back to full page body.');
   postText = await page.locator('body').innerText({ timeout: 10000 }).catch(() => '');
   if (!postText || postText.length < 100) {
     throw new Error('Could not extract any text from page body.');
@@ -695,7 +696,7 @@ if (candidates.length > 0) {
   console.log('[Exchange] Body text preview (first 500 chars):\n', postText.slice(0, 500));
 }
 
-// --- Parse rates ---
+// --- Parse rates from the extracted text ---
 const rates = parseRatesFromText(postText);
 if (!rates) {
   if (postText.includes('no black market exchange rate updates') || postText.includes('holiday')) {
