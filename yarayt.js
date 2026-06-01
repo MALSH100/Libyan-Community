@@ -2,7 +2,7 @@
 // YA RAYT SYSTEM
 // "Ya Rayt" (يا ريت) means "I wish" in Libyan Arabic
 //
-// - New round every 2 days at 6:00 PM Libya time (UTC+2)
+// - New round every Friday at 6:00 PM Libya time (UTC+2)
 // - Round closes at 8:00 PM Libya time — results posted, LP awarded
 // - Users submit /yarayt <wish> — one per round, locked in, no edits
 // - 4 reactions auto-added: 🇱🇾 Relatable | 😂 Funny | ❤️ Wholesome | 🔥 Bold
@@ -97,13 +97,20 @@ function libyaTime() {
   return new Date(Date.now() + 2 * 60 * 60 * 1000);
 }
 
-// Get next 6PM Libya time (UTC+2) from now — skips 2 days between rounds
+// Get next Friday 6PM Libya time (UTC+2) from now — weekly rounds
 function getNext6PM() {
   // 6PM Libya = 16:00 UTC (because Libya is UTC+2)
   const now = new Date();
   let target = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 16, 0, 0, 0));
+
+  // Advance to the next Friday (getUTCDay(): 0=Sun, 5=Fri)
+  const ROUND_DAY = 5; // Friday
+  const daysUntilFriday = (ROUND_DAY - target.getUTCDay() + 7) % 7;
+  target.setUTCDate(target.getUTCDate() + daysUntilFriday);
+
+  // If we landed on today's Friday but the 6PM slot has already passed, jump to next Friday
   if (target <= now) {
-    target.setUTCDate(target.getUTCDate() + 1);
+    target.setUTCDate(target.getUTCDate() + 7);
   }
   return target.getTime();
 }
@@ -268,7 +275,7 @@ async function startRound(guild, forced = false) {
         .setColor(0xFFD700)
         .setTitle('🇱🇾 Ya Rayt Round Results!')
         .setDescription(desc || 'No wishes were submitted this round.')
-        .setFooter({ text: 'LP has been awarded! Next round in 2 days.' });
+        .setFooter({ text: 'LP has been awarded! Next round next Friday.' });
 
       await channel.send({ embeds: [embed] }).catch(e => console.error('Could not send Ya Rayt results:', e.message));
     }
@@ -317,7 +324,7 @@ async function sendPreAnnouncement(guild, yrData, startTime) {
       `**Ends:** <t:${Math.floor(endDate.getTime() / 1000)}:F>\n\n` +
       `Get your wishes ready — use \`/yarayt\` once the round starts!`
     )
-    .setFooter({ text: 'Daily at 6PM Libya time' });
+    .setFooter({ text: 'Every Friday at 6PM Libya time' });
 
   await channel.send({ embeds: [embed] }).catch(e => console.error('Pre‑announcement failed:', e.message));
 
@@ -431,17 +438,22 @@ async function sendMidRoundReminder(guild, yrData) {
           const closeAt    = roundEndTime(yrData.currentRound.startedAt);
           const msUntilClose = closeAt - Date.now();
           if (msUntilClose <= 0) {
-            // Already past close time — close now
+            // Already past close time — close now, then schedule next
             await closeRound(guild, false);
+            scheduleNextRound(guild, yrData);
           } else {
             if (closeTimer) clearTimeout(closeTimer);
-            closeTimer = setTimeout(() => closeRound(guild, false), msUntilClose);
+            closeTimer = setTimeout(async () => {
+              await closeRound(guild, false);
+              scheduleNextRound(guild, yrData);
+            }, msUntilClose);
             console.log(`🇱🇾 Ya Rayt round resumed — closes in ${Math.round(msUntilClose / 1000 / 60)} minutes`);
+            // Do NOT schedule next round yet — wait until this round closes
           }
+        } else {
+          // No active round — schedule the next one normally
+          scheduleNextRound(guild, yrData);
         }
-
-        // Schedule next round
-        scheduleNextRound(guild, yrData);
       }
     }, 10000); // 10 second delay so MongoDB data is loaded first
   });
