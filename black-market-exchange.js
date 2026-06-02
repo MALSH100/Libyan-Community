@@ -377,7 +377,7 @@ async function scrapeFacebookRatesAttempt(authAttempt) {
 
     page = await context.newPage();
 
-      // Go to the exchange page with a more robust wait
+    // Go to the exchange page with a more robust wait
     let retries = 2;
     let loaded = false;
     for (let attempt = 1; attempt <= retries; attempt++) {
@@ -452,7 +452,6 @@ async function scrapeFacebookRatesAttempt(authAttempt) {
       const emailInput = page.locator('input[type="email"], input[name="email"], #email').first();
       await emailInput.waitFor({ timeout: 10000 });
       try {
-        // fill() automatically focuses and types the entire string at once
         await emailInput.fill(facebookEmail, { timeout: 5000 });
         emailFilled = true;
       } catch (fillErr) {
@@ -494,7 +493,7 @@ async function scrapeFacebookRatesAttempt(authAttempt) {
       }
 
       await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
-           await page.waitForTimeout(8000);
+      await page.waitForTimeout(8000);
 
       // --- Dismiss "Save login info?" ---
       const saveBtn = page.locator('button[value="1"], button[data-testid="save-login-button"]').first();
@@ -505,7 +504,6 @@ async function scrapeFacebookRatesAttempt(authAttempt) {
 
       // --- Check whether Facebook accepted the login or sent us to a challenge ---
       const afterLoginUrl = page.url();
-      // --- Re-check for empty body after login ---
       const afterLoginText = await page.locator('body').innerText({ timeout: 15000 }).catch(() => '');
       const afterLoginGate = classifyFacebookGate(afterLoginUrl, afterLoginText);
       throwForFacebookGate(afterLoginGate);
@@ -523,7 +521,6 @@ async function scrapeFacebookRatesAttempt(authAttempt) {
     }
 
     // If we got redirected to the home feed, go back to the exchange page
-    // If we got redirected to the home feed, go back to the exchange page
     const afterLoginUrl = page.url();
     if (!afterLoginUrl.includes('100064752788893') && !afterLoginUrl.includes('Dollar-Euro-Pound')) {
       console.log('[Exchange] Redirected away from exchange page, navigating back...');
@@ -531,7 +528,7 @@ async function scrapeFacebookRatesAttempt(authAttempt) {
       await page.waitForTimeout(6000);
     }
 
-    // --- NEW: Ensure we are on the exact exchange page (extra safety) ---
+    // Ensure we are on the exact exchange page (extra safety)
     const currentPageUrl = page.url();
     if (!currentPageUrl.includes('/p/Dollar-Euro-Pound-Libya-Black-Market-Exchange-Rate-100064752788893/')) {
       console.log('[Exchange] Still not on exchange page, forcing navigation to:', SOURCE_URL);
@@ -542,14 +539,12 @@ async function scrapeFacebookRatesAttempt(authAttempt) {
     // Wait for real post content
     console.log('[Exchange] Waiting for post content...');
     try {
-      // Wait for the network to be idle (no active requests for 500ms)
       await page.waitForLoadState('networkidle', { timeout: 30000 });
       console.log('[Exchange] Network idle.');
     } catch (err) {
       console.log('[Exchange] Network idle timeout, continuing...');
     }
 
-    // Wait for the body to have text, which indicates the page is loaded
     console.log('[Exchange] Waiting for page content...');
     try {
       await page.waitForFunction(() => document.body.innerText.length > 100, { timeout: 30000 });
@@ -566,7 +561,6 @@ async function scrapeFacebookRatesAttempt(authAttempt) {
     }
     console.log('[Exchange] Page content loaded.');
 
-    // Now, wait for a specific post element
     try {
       console.log('[Exchange] Waiting for post elements...');
       await page.waitForSelector('[role="article"]', { timeout: 30000 });
@@ -575,7 +569,7 @@ async function scrapeFacebookRatesAttempt(authAttempt) {
       console.log('[Exchange] Post element not found, but continuing...');
     }
 
-    // Scroll to load lazy content (safer JavaScript scrolling)
+    // Scroll to load lazy content
     try {
       await page.evaluate(async () => {
         await new Promise((resolve) => {
@@ -599,8 +593,6 @@ async function scrapeFacebookRatesAttempt(authAttempt) {
     await page.waitForTimeout(3000);
 
     const finalUrl = page.url();
-
-    // Sanity-check: make sure we didn't end up back on the login page
     const quickBodyText = await page.locator('body').innerText({ timeout: 10000 }).catch(() => '');
     console.log('[Exchange] Final URL:', finalUrl);
     console.log('[Exchange] Body text length:', quickBodyText.length);
@@ -631,153 +623,234 @@ async function scrapeFacebookRatesAttempt(authAttempt) {
       console.log('[Exchange] Verified Facebook session saved.');
     }
 
-// ---------------------------------------------------------------------------
-// Find the most recent exchange rate post
-// ---------------------------------------------------------------------------
-// We cannot rely on DOM order alone because Facebook Pages can render a pinned
-// post (or other featured content) before the chronological feed — meaning
-// idx=0 is NOT always the newest post.
-//
-// Signal priority (most reliable → least):
-//   1. Explicit calendar date in post body  e.g. "Monday 1st June 2026"
-//      Every exchange rate post contains one; pinned/older posts will have
-//      older dates and naturally lose the sort.
-//   2. Relative timestamp visible in innerText  ("16h", "2d", "Just now")
-//      Playwright's innerText strips CSS-hidden decoy <b> elements that
-//      Facebook injects to foil scrapers, so this is usually readable.
-//   3. DOM order  (Facebook renders newer posts before older ones within the
-//      same feed section, so lower idx wins all other ties.)
-//
-// We also collect story_fbid from the permalink anchor — used by updateRates
-// for deduplication so we never re-post the same Facebook post twice.
-// ---------------------------------------------------------------------------
+    // -------------------------------------------------------------------------
+    // Find the most recent exchange rate post
+    // -------------------------------------------------------------------------
+    // FIXED: every timestamp signal (relative "16h", explicit "2nd June 2026",
+    // numeric "02/06/2026", year-less "2nd June", "Today at 3:30 PM", etc.) is
+    // converted to a single millisecond value.  The sort compares those values
+    // directly — no category ever gets automatic priority over another.
+    //
+    // The old code had:
+    //   if (a.hasExplicitDate) return -1;   // ← always promoted dated posts
+    //   if (b.hasExplicitDate) return 1;
+    // …which meant a pinned post from months ago with a parseable date would
+    // permanently beat any fresh post whose timestamp only appeared as "16h".
+    //
+    // The old regex also only matched dates WITH a 4-digit year ("2nd June 2026")
+    // and missed year-less ("2nd June"), numeric ("02/06/2026"), and clock-based
+    // ("Today at 3:30 PM") formats that Facebook regularly uses for recent posts.
+    // -------------------------------------------------------------------------
 
-const parsePostDate = (text) => {
-  const MONTHS = ['january','february','march','april','may','june','july',
-                  'august','september','october','november','december'];
-  // "1st June 2026" / "2nd June 2026" / "1 June 2026"
-  const m1 = text.match(
-    /\b(\d{1,2})(?:st|nd|rd|th)?\s+(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{4})\b/i
-  );
-  if (m1) {
-    const month = MONTHS.indexOf(m1[2].toLowerCase());
-    if (month !== -1) return new Date(Date.UTC(parseInt(m1[3], 10), month, parseInt(m1[1], 10)));
-  }
-  // "June 1, 2026" / "June 1 2026"
-  const m2 = text.match(
-    /\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})\b/i
-  );
-  if (m2) {
-    const month = MONTHS.indexOf(m2[1].toLowerCase());
-    if (month !== -1) return new Date(Date.UTC(parseInt(m2[3], 10), month, parseInt(m2[2], 10)));
-  }
-  return null;
-};
+    const NOW_MS = Date.now();
+    const MONTH_NAMES = [
+      'january','february','march','april','may','june',
+      'july','august','september','october','november','december',
+    ];
 
-const posts = await page.locator('[role="article"]').all();
-console.log(`[Exchange] Found ${posts.length} post element(s)`);
+    /**
+     * parsePostTimestamp(text)
+     *
+     * Extracts the best available date/time signal from a Facebook post's
+     * innerText and returns { ms: number, src: string } or null.
+     *
+     * Patterns tried in order (most → least precise):
+     *   1. "Just now"
+     *   2. "Today at 3:30 PM" / "Today at 15:30"
+     *   3. "Yesterday at 3:30 PM"
+     *   4. Relative: "16 h" / "16h" / "2 d" / "2d"   (scanned in head only)
+     *   5. Explicit date WITH year: "2nd June 2026", "June 2, 2026"
+     *   6. Numeric date DD/MM/YYYY, DD-MM-YYYY, DD.MM.YYYY
+     *   7. Explicit date WITHOUT year: "2nd June", "June 2"  (assumes current year)
+     */
+    const parsePostTimestamp = (text) => {
+      const tl = text.toLowerCase();
+      // Facebook places the post timestamp in the first ~400 chars of innerText.
+      // We restrict relative-time searches to that region to avoid false matches
+      // against numbers embedded in the exchange-rate content itself.
+      const head = tl.slice(0, 400);
 
-const candidates = [];
-const now = Date.now();
+      // 1. "Just now"
+      if (/\bjust\s*now\b/.test(head)) {
+        return { ms: NOW_MS, src: 'just-now' };
+      }
 
-for (let idx = 0; idx < posts.length; idx++) {
-  const post = posts[idx];
-  const text = await post.innerText({ timeout: 5000 }).catch(() => '');
-  if (!text || text.length < 50) continue;
+      // 2. "Today at 3:30 PM" / "Today at 15:30"
+      const todayM = head.match(/\btoday\s+at\s+(\d{1,2}):(\d{2})\s*(am|pm)?\b/);
+      if (todayM) {
+        let h = +todayM[1];
+        const m = +todayM[2];
+        const ap = (todayM[3] || '').toLowerCase();
+        if (ap === 'pm' && h !== 12) h += 12;
+        if (ap === 'am' && h === 12) h = 0;
+        const d = new Date(NOW_MS);
+        d.setHours(h, m, 0, 0);
+        return { ms: d.getTime(), src: 'today-at' };
+      }
 
-  const tl = text.toLowerCase();
-  const hasRateHints =
-    tl.includes('dollar') || tl.includes('usd') || tl.includes('$') ||
-    tl.includes('euro')   || tl.includes('eur') || tl.includes('€') ||
-    tl.includes('pound')  || tl.includes('gbp') || tl.includes('£') ||
-    /\b\d{1,2}[.,]\d{1,4}\b/.test(text);
-  if (!hasRateHints) continue;
+      // 3. "Yesterday at 3:30 PM"
+      const yestM = head.match(/\byesterday\s+at\s+(\d{1,2}):(\d{2})\s*(am|pm)?\b/);
+      if (yestM) {
+        let h = +yestM[1];
+        const m = +yestM[2];
+        const ap = (yestM[3] || '').toLowerCase();
+        if (ap === 'pm' && h !== 12) h += 12;
+        if (ap === 'am' && h === 12) h = 0;
+        const d = new Date(NOW_MS - 86400000);
+        d.setHours(h, m, 0, 0);
+        return { ms: d.getTime(), src: 'yesterday-at' };
+      }
 
-  // Signal 1: explicit calendar date in post body
-  let dateMs = 0;
-  let hasExplicitDate = false;
-  const explicitDate = parsePostDate(text);
-  if (explicitDate) {
-    dateMs = explicitDate.getTime();
-    hasExplicitDate = true;
-    console.log(`[Exchange] Post ${idx} – explicit date: ${explicitDate.toISOString().slice(0, 10)}`);
-  }
+      // 4. Relative time: "16 h" / "16h" / "2 d" / "2d"
+      //    The word-boundary check (\b before the digit, \b after h/d) ensures
+      //    we don't match "d" in "dollar" or "h" in "hour" etc.
+      const relM = head.match(/\b(\d{1,3})\s*(h|d)\b/);
+      if (relM) {
+        const n = +relM[1];
+        const unit = relM[2];
+        return {
+          ms: NOW_MS - (unit === 'h' ? n * 3600000 : n * 86400000),
+          src: `rel-${n}${unit}`,
+        };
+      }
 
-  // Signal 2: relative time string ("16h", "2d", "Just now")
-  let relativeMs = 0;
-  if (!hasExplicitDate) {
-    if (/\bjust\s*now\b/i.test(text)) {
-      relativeMs = now;
+      // Search the full text for explicit dates (admins often put the date
+      // inside the post body, e.g. "Monday 2nd June 2026").
+
+      // 5a. "2nd June 2026" / "2 June 2026"
+      const mDMY = text.match(
+        /\b(\d{1,2})(?:st|nd|rd|th)?\s+(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{4})\b/i,
+      );
+      if (mDMY) {
+        const mo = MONTH_NAMES.indexOf(mDMY[2].toLowerCase());
+        if (mo !== -1) return { ms: Date.UTC(+mDMY[3], mo, +mDMY[1]), src: 'date-DMY' };
+      }
+
+      // 5b. "June 2, 2026" / "June 2 2026"
+      const mMDY = text.match(
+        /\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})\b/i,
+      );
+      if (mMDY) {
+        const mo = MONTH_NAMES.indexOf(mMDY[1].toLowerCase());
+        if (mo !== -1) return { ms: Date.UTC(+mMDY[3], mo, +mMDY[2]), src: 'date-MDY' };
+      }
+
+      // 6. Numeric: "02/06/2026", "02-06-2026", "02.06.2026"  (DD/MM/YYYY)
+      const mNum = text.match(/\b(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{4})\b/);
+      if (mNum) {
+        const dd = +mNum[1], mm = +mNum[2] - 1, yy = +mNum[3];
+        if (mm >= 0 && mm <= 11 && dd >= 1 && dd <= 31) {
+          return { ms: Date.UTC(yy, mm, dd), src: 'date-numeric' };
+        }
+      }
+
+      // 7. Year-less: "2nd June", "June 2"  — assume current year; if the result
+      //    would be more than a day in the future, step back one year.
+      const curYear = new Date(NOW_MS).getUTCFullYear();
+      const clamp = (ms) => (ms > NOW_MS + 86400000 ? ms - 365 * 86400000 : ms);
+
+      const mDM = text.match(
+        /\b(\d{1,2})(?:st|nd|rd|th)?\s+(january|february|march|april|may|june|july|august|september|october|november|december)\b/i,
+      );
+      if (mDM) {
+        const mo = MONTH_NAMES.indexOf(mDM[2].toLowerCase());
+        if (mo !== -1) return { ms: clamp(Date.UTC(curYear, mo, +mDM[1])), src: 'date-DM' };
+      }
+
+      const mMD = text.match(
+        /\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})(?:st|nd|rd|th)?\b/i,
+      );
+      if (mMD) {
+        const mo = MONTH_NAMES.indexOf(mMD[1].toLowerCase());
+        if (mo !== -1) return { ms: clamp(Date.UTC(curYear, mo, +mMD[2])), src: 'date-MD' };
+      }
+
+      return null; // no timestamp signal found in this post
+    };
+
+    const posts = await page.locator('[role="article"]').all();
+    console.log(`[Exchange] Found ${posts.length} post element(s)`);
+
+    const candidates = [];
+
+    for (let idx = 0; idx < posts.length; idx++) {
+      const post = posts[idx];
+      const text = await post.innerText({ timeout: 5000 }).catch(() => '');
+      if (!text || text.length < 50) continue;
+
+      const tl = text.toLowerCase();
+      const hasRateHints =
+        tl.includes('dollar') || tl.includes('usd') || tl.includes('$') ||
+        tl.includes('euro')   || tl.includes('eur') || tl.includes('€') ||
+        tl.includes('pound')  || tl.includes('gbp') || tl.includes('£') ||
+        /\b\d{1,2}[.,]\d{1,4}\b/.test(text);
+      if (!hasRateHints) continue;
+
+      const ts = parsePostTimestamp(text);
+      const timestampMs = ts ? ts.ms : 0;
+      console.log(
+        `[Exchange] Post ${idx} – ts=${ts ? new Date(ts.ms).toISOString().slice(0, 16) : 'none'} (${ts ? ts.src : 'no-signal'})`,
+      );
+
+      // Extract story_fbid for deduplication
+      let postId = null;
+      try {
+        const permalinkLinks = await post.locator('a[href*="story_fbid"], a[href*="permalink.php"]').all();
+        for (const link of permalinkLinks) {
+          const href = await link.getAttribute('href', { timeout: 2000 }).catch(() => null);
+          if (!href) continue;
+          const match = href.match(/story_fbid=([^&\s]+)/);
+          if (match) { postId = match[1]; break; }
+        }
+      } catch (e) {
+        console.log(`[Exchange] Could not extract story_fbid from post ${idx}:`, e.message);
+      }
+
+      candidates.push({ idx, text, postId, timestampMs, tsSource: ts ? ts.src : 'none' });
+    }
+
+    // FIXED: sort purely by timestamp ms (newest first).
+    // No category gets automatic priority — a relative "16h" and an explicit
+    // "2nd June 2026" are both just millisecond values and compete equally.
+    // DOM order (lower idx = newer in Facebook's timeline) is the tiebreaker
+    // only when two posts produce the same ms value (e.g. both have no signal).
+    candidates.sort((a, b) =>
+      a.timestampMs !== b.timestampMs
+        ? b.timestampMs - a.timestampMs   // newer first
+        : a.idx - b.idx,                  // lower DOM index = newer
+    );
+
+    let postText = null;
+    let postId = null;
+    if (candidates.length > 0) {
+      const best = candidates[0];
+      postId   = best.postId;
+      postText = best.text;
+      console.log(
+        `[Exchange] ✅ Chose post ${best.idx} ` +
+        `(ts=${new Date(best.timestampMs || 0).toISOString().slice(0, 16)}, src=${best.tsSource})` +
+        `${postId ? ` | postId=${postId}` : ''}`,
+      );
+      console.log(`[Exchange] Post preview (first 800 chars):\n${postText.slice(0, 800)}`);
     } else {
-      const rm = text.match(/\b(\d+)\s*(h|d)\b/i);
-      if (rm) {
-        const n = parseInt(rm[1], 10);
-        relativeMs = rm[2].toLowerCase() === 'h' ? now - n * 3600000 : now - n * 86400000;
-        console.log(`[Exchange] Post ${idx} – relative time: ${n}${rm[2]}`);
-      } else {
-        console.log(`[Exchange] Post ${idx} – no date/time found, will use DOM order`);
+      console.log('[Exchange] No article with rate hints found. Falling back to full page body.');
+      postText = await page.locator('body').innerText({ timeout: 10000 }).catch(() => '');
+      if (!postText || postText.length < 100) {
+        throw new Error('Could not extract any text from page body.');
       }
     }
-  }
 
-  // Signal 3: story_fbid for deduplication
-  let postId = null;
-  try {
-    const permalinkLinks = await post.locator('a[href*="story_fbid"], a[href*="permalink.php"]').all();
-    for (const link of permalinkLinks) {
-      const href = await link.getAttribute('href', { timeout: 2000 }).catch(() => null);
-      if (!href) continue;
-      const match = href.match(/story_fbid=([^&\s]+)/);
-      if (match) { postId = match[1]; break; }
+    // --- Parse rates ---
+    const rates = parseRatesFromText(postText);
+    if (!rates) {
+      if (postText.includes('no black market exchange rate updates') || postText.includes('holiday')) {
+        throw new Error('No exchange rates available (holiday or break announced in post). Skipping update.');
+      }
+      throw new Error('Could not parse USD/EUR/GBP rates from the latest post.');
     }
-  } catch (e) {
-    console.log(`[Exchange] Could not extract story_fbid from post ${idx}:`, e.message);
-  }
 
-  candidates.push({ idx, text, postId, dateMs, relativeMs, hasExplicitDate });
-}
-
-// Sort: explicit date (most recent) > relative time (most recent) > DOM order (lower idx)
-candidates.sort((a, b) => {
-  if (a.hasExplicitDate && b.hasExplicitDate) return b.dateMs - a.dateMs;
-  if (a.hasExplicitDate) return -1;   // a wins: has explicit date, b doesn't
-  if (b.hasExplicitDate) return 1;    // b wins
-  if (a.relativeMs !== b.relativeMs) return b.relativeMs - a.relativeMs;
-  return a.idx - b.idx;               // lower DOM index = newer
-});
-
-let postText = null;
-let postId = null;
-if (candidates.length > 0) {
-  const best = candidates[0];
-  postId  = best.postId;
-  postText = best.text;
-  const dateInfo = best.hasExplicitDate
-    ? `date=${new Date(best.dateMs).toISOString().slice(0, 10)}`
-    : best.relativeMs > 0
-      ? `relative≈${Math.round((now - best.relativeMs) / 3600000)}h ago`
-      : `DOM idx=${best.idx}`;
-  console.log(`[Exchange] ✅ Chose post ${best.idx} (${dateInfo})${postId ? ` | postId=${postId}` : ''}`);
-  console.log(`[Exchange] Post preview (first 800 chars):\n${postText.slice(0, 800)}`);
-} else {
-  console.log('[Exchange] No article with rate hints found. Falling back to full page body.');
-  postText = await page.locator('body').innerText({ timeout: 10000 }).catch(() => '');
-  if (!postText || postText.length < 100) {
-    throw new Error('Could not extract any text from page body.');
-  }
-}
-
-// --- Parse rates ---
-const rates = parseRatesFromText(postText);
-if (!rates) {
-  if (postText.includes('no black market exchange rate updates') || postText.includes('holiday')) {
-    throw new Error('No exchange rates available (holiday or break announced in post). Skipping update.');
-  }
-  throw new Error('Could not parse USD/EUR/GBP rates from the latest post.');
-}
-
-console.log(`[Exchange] Final parsed rates: USD=${rates.USD}, EUR=${rates.EUR}, GBP=${rates.GBP}`);
-return { rates, scrapedAt: new Date().toISOString(), sourceUrl: SOURCE_URL, sample: postText.slice(0, 1200), postId };
+    console.log(`[Exchange] Final parsed rates: USD=${rates.USD}, EUR=${rates.EUR}, GBP=${rates.GBP}`);
+    return { rates, scrapedAt: new Date().toISOString(), sourceUrl: SOURCE_URL, sample: postText.slice(0, 1200), postId };
   } catch (error) {
     console.error('[Exchange] Scrape failed:', error.message);
     throw error;
@@ -1183,7 +1256,7 @@ module.exports = function initBlackMarketExchange({ client, db, saveData }) {
       }
     }, 6000);
   });
-    client.on('interactionCreate', async interaction => {
+  client.on('interactionCreate', async interaction => {
     // --- Global button handler (permanent buttons) ---
     if (interaction.isButton()) {
       const customId = interaction.customId;
@@ -1241,7 +1314,6 @@ module.exports = function initBlackMarketExchange({ client, db, saveData }) {
       if (commandName === 'exchange-refresh') {
         if (!isAdmin(interaction)) return safeReply(interaction, { content: 'Only admins can refresh.', flags: 64 });
         await interaction.deferReply({ flags: 64 });
-        // forcePost intentionally omitted: lastPostedKey deduplication prevents reposting identical rates.
         const result = await updateRates({ client, db, saveData, guildId: guild.id });
         let statusText;
         if (result.latest === null) {
