@@ -179,7 +179,7 @@ function buildRateEmbed(exchangeData, latest, forced = false) {
   const pulledAt   = new Date(latest.scrapedAt || Date.now())
     .toLocaleString('en-GB', { dateStyle: 'full', timeStyle: 'short' });
   const siteNote   = latest.siteTimestamp
-    ? `\nSite last updated: ${latest.siteTimestamp}`
+    ? `\nLast updated: ${latest.siteTimestamp}`
     : '';
 
   const embed = new EmbedBuilder()
