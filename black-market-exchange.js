@@ -631,27 +631,60 @@ async function scrapeFacebookRatesAttempt(authAttempt) {
       console.log('[Exchange] Verified Facebook session saved.');
     }
 
-// --- Find the most recent post ---
-// Facebook renders posts in reverse-chronological order, so the first
-// [role="article"] element that contains exchange rate content IS the newest post.
-// We no longer rely on data-utime (removed by Facebook) or relative time strings
-// (obfuscated with split <b> elements + CSS tricks). DOM order is the ground truth.
+// ---------------------------------------------------------------------------
+// Find the most recent exchange rate post
+// ---------------------------------------------------------------------------
+// We cannot rely on DOM order alone because Facebook Pages can render a pinned
+// post (or other featured content) before the chronological feed — meaning
+// idx=0 is NOT always the newest post.
 //
-// We also extract the post's story_fbid permalink ID. This unique identifier lets
-// updateRates skip re-posting the same Facebook post even if rates are unchanged,
-// and correctly trigger when a genuinely new post appears.
+// Signal priority (most reliable → least):
+//   1. Explicit calendar date in post body  e.g. "Monday 1st June 2026"
+//      Every exchange rate post contains one; pinned/older posts will have
+//      older dates and naturally lose the sort.
+//   2. Relative timestamp visible in innerText  ("16h", "2d", "Just now")
+//      Playwright's innerText strips CSS-hidden decoy <b> elements that
+//      Facebook injects to foil scrapers, so this is usually readable.
+//   3. DOM order  (Facebook renders newer posts before older ones within the
+//      same feed section, so lower idx wins all other ties.)
+//
+// We also collect story_fbid from the permalink anchor — used by updateRates
+// for deduplication so we never re-post the same Facebook post twice.
+// ---------------------------------------------------------------------------
+
+const parsePostDate = (text) => {
+  const MONTHS = ['january','february','march','april','may','june','july',
+                  'august','september','october','november','december'];
+  // "1st June 2026" / "2nd June 2026" / "1 June 2026"
+  const m1 = text.match(
+    /\b(\d{1,2})(?:st|nd|rd|th)?\s+(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{4})\b/i
+  );
+  if (m1) {
+    const month = MONTHS.indexOf(m1[2].toLowerCase());
+    if (month !== -1) return new Date(Date.UTC(parseInt(m1[3], 10), month, parseInt(m1[1], 10)));
+  }
+  // "June 1, 2026" / "June 1 2026"
+  const m2 = text.match(
+    /\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})\b/i
+  );
+  if (m2) {
+    const month = MONTHS.indexOf(m2[1].toLowerCase());
+    if (month !== -1) return new Date(Date.UTC(parseInt(m2[3], 10), month, parseInt(m2[2], 10)));
+  }
+  return null;
+};
+
 const posts = await page.locator('[role="article"]').all();
 console.log(`[Exchange] Found ${posts.length} post element(s)`);
 
-let postText = null;
-let postId = null;
+const candidates = [];
+const now = Date.now();
 
 for (let idx = 0; idx < posts.length; idx++) {
   const post = posts[idx];
   const text = await post.innerText({ timeout: 5000 }).catch(() => '');
   if (!text || text.length < 50) continue;
 
-  // Check for exchange rate content
   const tl = text.toLowerCase();
   const hasRateHints =
     tl.includes('dollar') || tl.includes('usd') || tl.includes('$') ||
@@ -660,8 +693,35 @@ for (let idx = 0; idx < posts.length; idx++) {
     /\b\d{1,2}[.,]\d{1,4}\b/.test(text);
   if (!hasRateHints) continue;
 
-  // Extract story_fbid from the post's timestamp/permalink anchor.
-  // This acts as a unique post ID for reliable deduplication downstream.
+  // Signal 1: explicit calendar date in post body
+  let dateMs = 0;
+  let hasExplicitDate = false;
+  const explicitDate = parsePostDate(text);
+  if (explicitDate) {
+    dateMs = explicitDate.getTime();
+    hasExplicitDate = true;
+    console.log(`[Exchange] Post ${idx} – explicit date: ${explicitDate.toISOString().slice(0, 10)}`);
+  }
+
+  // Signal 2: relative time string ("16h", "2d", "Just now")
+  let relativeMs = 0;
+  if (!hasExplicitDate) {
+    if (/\bjust\s*now\b/i.test(text)) {
+      relativeMs = now;
+    } else {
+      const rm = text.match(/\b(\d+)\s*(h|d)\b/i);
+      if (rm) {
+        const n = parseInt(rm[1], 10);
+        relativeMs = rm[2].toLowerCase() === 'h' ? now - n * 3600000 : now - n * 86400000;
+        console.log(`[Exchange] Post ${idx} – relative time: ${n}${rm[2]}`);
+      } else {
+        console.log(`[Exchange] Post ${idx} – no date/time found, will use DOM order`);
+      }
+    }
+  }
+
+  // Signal 3: story_fbid for deduplication
+  let postId = null;
   try {
     const permalinkLinks = await post.locator('a[href*="story_fbid"], a[href*="permalink.php"]').all();
     for (const link of permalinkLinks) {
@@ -674,13 +734,32 @@ for (let idx = 0; idx < posts.length; idx++) {
     console.log(`[Exchange] Could not extract story_fbid from post ${idx}:`, e.message);
   }
 
-  console.log(`[Exchange] ✅ Using post ${idx} (first in DOM = newest)${postId ? ` | postId=${postId}` : ' | no postId found'}`);
-  console.log(`[Exchange] Post preview (first 800 chars):\n${text.slice(0, 800)}`);
-  postText = text;
-  break; // Stop at first match — DOM order guarantees this is the newest post
+  candidates.push({ idx, text, postId, dateMs, relativeMs, hasExplicitDate });
 }
 
-if (!postText) {
+// Sort: explicit date (most recent) > relative time (most recent) > DOM order (lower idx)
+candidates.sort((a, b) => {
+  if (a.hasExplicitDate && b.hasExplicitDate) return b.dateMs - a.dateMs;
+  if (a.hasExplicitDate) return -1;   // a wins: has explicit date, b doesn't
+  if (b.hasExplicitDate) return 1;    // b wins
+  if (a.relativeMs !== b.relativeMs) return b.relativeMs - a.relativeMs;
+  return a.idx - b.idx;               // lower DOM index = newer
+});
+
+let postText = null;
+let postId = null;
+if (candidates.length > 0) {
+  const best = candidates[0];
+  postId  = best.postId;
+  postText = best.text;
+  const dateInfo = best.hasExplicitDate
+    ? `date=${new Date(best.dateMs).toISOString().slice(0, 10)}`
+    : best.relativeMs > 0
+      ? `relative≈${Math.round((now - best.relativeMs) / 3600000)}h ago`
+      : `DOM idx=${best.idx}`;
+  console.log(`[Exchange] ✅ Chose post ${best.idx} (${dateInfo})${postId ? ` | postId=${postId}` : ''}`);
+  console.log(`[Exchange] Post preview (first 800 chars):\n${postText.slice(0, 800)}`);
+} else {
   console.log('[Exchange] No article with rate hints found. Falling back to full page body.');
   postText = await page.locator('body').innerText({ timeout: 10000 }).catch(() => '');
   if (!postText || postText.length < 100) {
