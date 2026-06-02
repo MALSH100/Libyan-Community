@@ -106,7 +106,9 @@ async function stripPOTDRole(guild, potd) {
     // Remove from every member who currently has it
     for (const [, member] of guild.members.cache) {
         if (member.roles.cache.has(role.id)) {
-            await member.roles.remove(role).catch(() => {});
+            await member.roles.remove(role).catch(err =>
+                console.error(`[POTD] Failed to remove role from ${member.user.username}:`, err.message)
+            );
         }
     }
 }
@@ -135,9 +137,16 @@ async function runPOTD(client, db, saveData, awardLP, guildId, forced = false) {
         return;
     }
 
-    const announceChannel = await client.channels.fetch(potd.announceChannelId).catch(() => null);
+    const announceChannel = await client.channels.fetch(potd.announceChannelId).catch(err => {
+        console.error('[POTD] Failed to fetch announce channel:', err.message);
+        return null;
+    });
     if (!announceChannel) {
-        console.warn('[POTD] Announce channel not found');
+        console.warn('[POTD] Announce channel not found (ID:', potd.announceChannelId, ')');
+        return;
+    }
+    if (!announceChannel.isTextBased()) {
+        console.warn('[POTD] Announce channel is not a text-based channel');
         return;
     }
 
@@ -208,7 +217,7 @@ async function runPOTD(client, db, saveData, awardLP, guildId, forced = false) {
                     )
                     .setTimestamp(),
             ],
-        }).catch(() => {});
+        }).catch(err => console.error('[POTD] Failed to send no-winner message:', err.message));
 
         potd.lastRunDate = todayStr;
         saveData(guildId);
@@ -245,14 +254,18 @@ async function runPOTD(client, db, saveData, awardLP, guildId, forced = false) {
     awardLP(guildId, winnerId, lpAwarded, 'potd');
 
     // ── Give role, strip from previous holder ─────────────────────────────────
-    await guild.members.fetch().catch(() => {}); // populate cache
+    await guild.members.fetch().catch(err =>
+        console.warn('[POTD] guild.members.fetch() failed (GuildMembers intent may be missing):', err.message)
+    ); // populate cache
     await stripPOTDRole(guild, potd);
 
     const winnerRole = await ensurePOTDRole(guild, potd, saveData);
     if (winnerRole) {
         const winnerMember = await guild.members.fetch(winnerId).catch(() => null);
         if (winnerMember) {
-            await winnerMember.roles.add(winnerRole).catch(() => {});
+            await winnerMember.roles.add(winnerRole).catch(err =>
+                console.error('[POTD] Failed to assign winner role:', err.message)
+            );
         }
     }
 
@@ -361,7 +374,7 @@ async function runPOTD(client, db, saveData, awardLP, guildId, forced = false) {
             { name: '🪙 LP Awarded',      value: `+${lpAwarded} LP`,         inline: true },
             { name: '🏅 Total POTD Wins', value: `${hof.wins}`,              inline: true },
         )
-        .setThumbnail(winner.author.displayAvatarURL({ dynamic: true }))
+        .setThumbnail(winner.author.displayAvatarURL())
         .setFooter({ text: `Post of the Day • Minimum ${MIN_REACTIONS} reactions required` })
         .setTimestamp();
 
@@ -370,13 +383,15 @@ async function runPOTD(client, db, saveData, awardLP, guildId, forced = false) {
     // Apply the detected image to the embed
     if (embedImage) embed.setImage(embedImage);
 
-    await announceChannel.send({ content: `<@${winnerId}>`, embeds: [embed] }).catch(() => {});
+    await announceChannel.send({ content: `<@${winnerId}>`, embeds: [embed] }).catch(err =>
+        console.error('[POTD] Failed to send winner announcement:', err.message)
+    );
 
     // ── Persist ───────────────────────────────────────────────────────────────
     potd.lastRunDate = todayStr;
     saveData(guildId);
 
-    console.log(`[POTD] Winner for ${guild.name}: ${winner.author.tag} with ${best.count} reactions (+${lpAwarded} LP, streak: ${hof.streak})`);
+    console.log(`[POTD] Winner for ${guild.name}: ${winner.author.username} with ${best.count} reactions (+${lpAwarded} LP, streak: ${hof.streak})`);
 }
 
 // ─── Scheduler ────────────────────────────────────────────────────────────────
@@ -602,7 +617,7 @@ function initPOTD({ client, db, saveData, awardLP }) {
             // ── /potd-run ─────────────────────────────────────────────────────
             if (commandName === 'potd-run') {
                 if (!isAdmin(interaction)) return safeReply(interaction, { content: '❌ Admin only.', flags: 64 });
-                await safeDefer(interaction, { flags: 64 });
+                await safeDefer(interaction, { ephemeral: true });
                 await runPOTD(client, db, saveData, awardLP, guild.id, true); // forced = true bypasses date guard
                 return safeReply(interaction, { content: '⭐ Post of the Day has been run manually.' });
             }
