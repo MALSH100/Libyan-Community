@@ -569,28 +569,10 @@ async function scrapeFacebookRatesAttempt(authAttempt) {
       console.log('[Exchange] Post element not found, but continuing...');
     }
 
-    // Scroll to load lazy content
-    try {
-      await page.evaluate(async () => {
-        await new Promise((resolve) => {
-          let totalHeight = 0;
-          const distance = 400;
-          const interval = setInterval(() => {
-            const scrollHeight = document.body.scrollHeight;
-            window.scrollBy(0, distance);
-            totalHeight += distance;
-            if (totalHeight >= scrollHeight || totalHeight > 3000) {
-              clearInterval(interval);
-              resolve();
-            }
-          }, 200);
-        });
-      });
-      console.log('[Exchange] Scrolling completed');
-    } catch (scrollErr) {
-      console.log('[Exchange] Scrolling failed, but continuing:', scrollErr.message);
-    }
-    await page.waitForTimeout(3000);
+    // Newest Facebook posts are already present.
+    // Excessive scrolling can cause Facebook virtualisation
+    // to remove the newest article from the DOM.
+    await page.waitForTimeout(1500);
 
     const finalUrl = page.url();
     const quickBodyText = await page.locator('body').innerText({ timeout: 10000 }).catch(() => '');
@@ -704,12 +686,24 @@ async function scrapeFacebookRatesAttempt(authAttempt) {
       // 4. Relative time: "16 h" / "16h" / "2 d" / "2d"
       //    The word-boundary check (\b before the digit, \b after h/d) ensures
       //    we don't match "d" in "dollar" or "h" in "hour" etc.
-      const relM = head.match(/\b(\d{1,3})\s*(h|d)\b/);
+      const relM = head.match(/\b(\d{1,3})\s*(m|h|d)\b/);
       if (relM) {
         const n = +relM[1];
         const unit = relM[2];
         return {
-          ms: NOW_MS - (unit === 'h' ? n * 3600000 : n * 86400000),
+          ms:
+            unit === 'm'
+              ? NOW_MS - n * 60000
+              : unit === 'h'
+              ? n * 3600000
+              : n * 86400000,
+          ms: NOW_MS - (
+            unit === 'm'
+              ? n * 60000
+              : unit === 'h'
+              ? n * 3600000
+              : n * 86400000
+          ),
           src: `rel-${n}${unit}`,
         };
       }
@@ -786,7 +780,23 @@ async function scrapeFacebookRatesAttempt(authAttempt) {
         /\b\d{1,2}[.,]\d{1,4}\b/.test(text);
       if (!hasRateHints) continue;
 
-      const ts = parsePostTimestamp(text);
+      let ts = null;
+
+      try {
+        const timeEl = post.locator('time').first();
+        const datetime = await timeEl.getAttribute('datetime').catch(() => null);
+
+        if (datetime) {
+          ts = {
+            ms: new Date(datetime).getTime(),
+            src: 'time-datetime',
+          };
+        }
+      } catch {}
+
+      if (!ts) {
+        ts = parsePostTimestamp(text);
+      }
       const timestampMs = ts ? ts.ms : 0;
       console.log(
         `[Exchange] Post ${idx} – ts=${ts ? new Date(ts.ms).toISOString().slice(0, 16) : 'none'} (${ts ? ts.src : 'no-signal'})`,
@@ -795,12 +805,15 @@ async function scrapeFacebookRatesAttempt(authAttempt) {
       // Extract story_fbid for deduplication
       let postId = null;
       try {
-        const permalinkLinks = await post.locator('a[href*="story_fbid"], a[href*="permalink.php"]').all();
+        const permalinkLinks = await post.locator('a[href*="story_fbid"], a[href*="permalink.php"], a[href*="/posts/pfbid"]').all();
         for (const link of permalinkLinks) {
           const href = await link.getAttribute('href', { timeout: 2000 }).catch(() => null);
           if (!href) continue;
           const match = href.match(/story_fbid=([^&\s]+)/);
           if (match) { postId = match[1]; break; }
+
+          const pfbidMatch = href.match(/\/posts\/(pfbid[^/?]+)/);
+          if (pfbidMatch) { postId = pfbidMatch[1]; break; }
         }
       } catch (e) {
         console.log(`[Exchange] Could not extract story_fbid from post ${idx}:`, e.message);
