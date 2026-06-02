@@ -53,22 +53,34 @@ function getHOFEntry(potd, userId) {
 }
 
 // ─── Reaction counting ────────────────────────────────────────────────────────
-// Sums ALL reactions across ALL emoji on a message.
-// We fetch each reaction's full user list to get an accurate count
-// (the .count on cached reactions can be stale).
+// Counts the number of UNIQUE non-bot users who reacted to a message,
+// regardless of how many different emoji they used. One person adding
+// 10 different emoji still only contributes 1 to the score.
+// Paginates reaction.users.fetch() in batches of 100 to handle busy posts.
 
 async function getTotalReactions(message) {
-    let total = 0;
+    const uniqueUsers = new Set();
+
     for (const reaction of message.reactions.cache.values()) {
         try {
-            // Fetch to ensure count is accurate
-            const fetched = await reaction.fetch();
-            total += fetched.count;
-        } catch {
-            total += reaction.count; // fallback to cached count
+            let lastId = undefined;
+            while (true) {
+                const options = { limit: 100 };
+                if (lastId) options.after = lastId;
+                const users = await reaction.users.fetch(options);
+                if (!users.size) break;
+                for (const [userId, user] of users) {
+                    if (!user.bot) uniqueUsers.add(userId);
+                }
+                if (users.size < 100) break;  // no more pages
+                lastId = users.last().id;
+            }
+        } catch (err) {
+            console.error('[POTD] Failed to fetch reaction users:', err.message);
         }
     }
-    return total;
+
+    return uniqueUsers.size;
 }
 
 // ─── Role management ─────────────────────────────────────────────────────────
