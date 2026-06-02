@@ -58,6 +58,7 @@ function getExchangeData(db, guildId) {
       channelId: null,
       lastRates: null,
       lastPostedKey: null,
+      lastPostedPostId: null,   // story_fbid of the last Facebook post we announced
       lastCheckedAt: null,
       history: [],
     };
@@ -630,20 +631,27 @@ async function scrapeFacebookRatesAttempt(authAttempt) {
       console.log('[Exchange] Verified Facebook session saved.');
     }
 
-// --- Find the most recent post using data-utime or relative time ---
+// --- Find the most recent post ---
+// Facebook renders posts in reverse-chronological order, so the first
+// [role="article"] element that contains exchange rate content IS the newest post.
+// We no longer rely on data-utime (removed by Facebook) or relative time strings
+// (obfuscated with split <b> elements + CSS tricks). DOM order is the ground truth.
+//
+// We also extract the post's story_fbid permalink ID. This unique identifier lets
+// updateRates skip re-posting the same Facebook post even if rates are unchanged,
+// and correctly trigger when a genuinely new post appears.
 const posts = await page.locator('[role="article"]').all();
 console.log(`[Exchange] Found ${posts.length} post element(s)`);
 
-let bestPost = null;
-let bestTimestamp = 0;
-const now = Date.now();
+let postText = null;
+let postId = null;
 
 for (let idx = 0; idx < posts.length; idx++) {
   const post = posts[idx];
   const text = await post.innerText({ timeout: 5000 }).catch(() => '');
   if (!text || text.length < 50) continue;
 
-  // Check for rate hints
+  // Check for exchange rate content
   const tl = text.toLowerCase();
   const hasRateHints =
     tl.includes('dollar') || tl.includes('usd') || tl.includes('$') ||
@@ -652,52 +660,28 @@ for (let idx = 0; idx < posts.length; idx++) {
     /\b\d{1,2}[.,]\d{1,4}\b/.test(text);
   if (!hasRateHints) continue;
 
-  // Try to get data-utime (epoch seconds) – this is the gold standard
-  let postTimestamp = 0;
+  // Extract story_fbid from the post's timestamp/permalink anchor.
+  // This acts as a unique post ID for reliable deduplication downstream.
   try {
-    const utimeElement = await post.locator('[data-utime]').first();
-    const utimeValue = await utimeElement.getAttribute('data-utime', { timeout: 2000 }).catch(() => null);
-    if (utimeValue) {
-      postTimestamp = parseInt(utimeValue, 10) * 1000; // convert to ms
-      console.log(`[Exchange] Post ${idx} – data-utime = ${postTimestamp} (${new Date(postTimestamp).toISOString()})`);
+    const permalinkLinks = await post.locator('a[href*="story_fbid"], a[href*="permalink.php"]').all();
+    for (const link of permalinkLinks) {
+      const href = await link.getAttribute('href', { timeout: 2000 }).catch(() => null);
+      if (!href) continue;
+      const match = href.match(/story_fbid=([^&\s]+)/);
+      if (match) { postId = match[1]; break; }
     }
-  } catch (e) {}
-
-  // Fallback: parse relative time like "7h", "2d", "just now"
-  if (postTimestamp === 0) {
-    let hours = null;
-    const hourMatch = text.match(/\b(\d+)\s*h\b/i);
-    if (hourMatch) hours = parseInt(hourMatch[1], 10);
-    else if (/\bjust now\b/i.test(text)) hours = 0;
-    else if (/\b(\d+)\s*d\b/i.test(text)) {
-      const days = parseInt(RegExp.$1, 10);
-      hours = days * 24;
-    }
-    if (hours !== null) {
-      postTimestamp = now - (hours * 3600 * 1000);
-      console.log(`[Exchange] Post ${idx} – relative time: ${hours}h → approx ${new Date(postTimestamp).toISOString()}`);
-    }
+  } catch (e) {
+    console.log(`[Exchange] Could not extract story_fbid from post ${idx}:`, e.message);
   }
 
-  if (postTimestamp === 0) {
-    console.log(`[Exchange] Post ${idx} – no timestamp found, skipping.`);
-    continue;
-  }
-
-  if (postTimestamp > bestTimestamp) {
-    bestTimestamp = postTimestamp;
-    bestPost = { idx, text };
-    console.log(`[Exchange] ✅ Post ${idx} is now the most recent (timestamp ${postTimestamp})`);
-  }
+  console.log(`[Exchange] ✅ Using post ${idx} (first in DOM = newest)${postId ? ` | postId=${postId}` : ' | no postId found'}`);
+  console.log(`[Exchange] Post preview (first 800 chars):\n${text.slice(0, 800)}`);
+  postText = text;
+  break; // Stop at first match — DOM order guarantees this is the newest post
 }
 
-let postText = null;
-if (bestPost) {
-  console.log(`\n[Exchange] 🎯 Using post ${bestPost.idx} with timestamp ${bestTimestamp} (${new Date(bestTimestamp).toISOString()})`);
-  console.log(`[Exchange] Post preview (first 800 chars):\n${bestPost.text.slice(0, 800)}`);
-  postText = bestPost.text;
-} else {
-  console.log('[Exchange] No post with timestamp and rate hints. Falling back to full page body.');
+if (!postText) {
+  console.log('[Exchange] No article with rate hints found. Falling back to full page body.');
   postText = await page.locator('body').innerText({ timeout: 10000 }).catch(() => '');
   if (!postText || postText.length < 100) {
     throw new Error('Could not extract any text from page body.');
@@ -714,7 +698,7 @@ if (!rates) {
 }
 
 console.log(`[Exchange] Final parsed rates: USD=${rates.USD}, EUR=${rates.EUR}, GBP=${rates.GBP}`);
-return { rates, scrapedAt: new Date().toISOString(), sourceUrl: SOURCE_URL, sample: postText.slice(0, 1200) };
+return { rates, scrapedAt: new Date().toISOString(), sourceUrl: SOURCE_URL, sample: postText.slice(0, 1200), postId };
   } catch (error) {
     console.error('[Exchange] Scrape failed:', error.message);
     throw error;
@@ -1057,7 +1041,14 @@ async function updateRates({ client, db, saveData, guildId, forcePost = false })
   }
 
   const key = rateKey(latest.rates);
-  const changed = key !== exchangeData.lastPostedKey;
+  // Use story_fbid (postId) as the primary deduplication signal when available.
+  // This fires on a new Facebook post even if the rates happen to be identical to
+  // the previous day, and suppresses re-posts of the same Facebook post even when
+  // we scrape multiple times before the next post appears.
+  // Fall back to rate-key comparison only if story_fbid extraction failed.
+  const changed = latest.postId
+    ? latest.postId !== exchangeData.lastPostedPostId
+    : key !== exchangeData.lastPostedKey;
   exchangeData.lastRates = latest;
   exchangeData.history = exchangeData.history || [];
   if (forcePost || changed) {
@@ -1070,7 +1061,10 @@ async function updateRates({ client, db, saveData, guildId, forcePost = false })
   let posted = false;
   if (forcePost || changed) {
     posted = await postUpdate(client, guildId, exchangeData, latest, forcePost);
-    if (posted) exchangeData.lastPostedKey = key;
+    if (posted) {
+      exchangeData.lastPostedKey = key;
+      if (latest.postId) exchangeData.lastPostedPostId = latest.postId;
+    }
   }
   saveData(guildId);
   return { latest, posted, changed };
