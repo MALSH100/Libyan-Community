@@ -191,7 +191,7 @@ function buildRateEmbed(exchangeData, latest, forced = false) {
     )
     .setTimestamp(new Date(latest.scrapedAt || Date.now()))
     .setFooter({
-      text: 'Live Libyan black market rates • Updated every hour • Source: blackmarketlive.org',
+      text: 'Live Libyan Black Market Rates • Updated every hour • Created & Designed by Captain',
     });
 
   for (const currency of CURRENCIES) {
