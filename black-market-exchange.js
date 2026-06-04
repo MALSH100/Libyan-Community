@@ -552,15 +552,22 @@ module.exports = function initBlackMarketExchange({ client, db, saveData }) {
   }
 
   client.once('clientReady', async () => {
-    setTimeout(() => {
-      for (const guild of client.guilds.cache.values()) {
-        const exchangeData = getExchangeData(db, guild.id);
-        if (exchangeData.channelId) {
-          console.log(`[Exchange] Updates enabled for guild ${guild.id}, channel ${exchangeData.channelId}`);
-          scheduleGuild(guild.id);
+    // MongoDB may not have loaded into db by the time clientReady fires.
+    // Retry at 6s, 15s, and 30s — whichever attempt first finds the channelId
+    // wins; the !timers.has() guard prevents double-scheduling on later retries.
+    [6_000, 15_000, 30_000].forEach(delay => {
+      setTimeout(() => {
+        for (const guild of client.guilds.cache.values()) {
+          const exchangeData = getExchangeData(db, guild.id);
+          if (exchangeData.channelId && !timers.has(guild.id)) {
+            console.log(`[Exchange] Updates enabled for guild ${guild.id}, channel ${exchangeData.channelId} (loaded after ${delay / 1000}s)`);
+            scheduleGuild(guild.id);
+            updateRates({ client, db, saveData, guildId: guild.id })
+              .catch(err => console.error(`[Exchange] Startup check failed for guild ${guild.id}: ${err.message}`));
+          }
         }
-      }
-    }, 6000);
+      }, delay);
+    });
   });
 
   client.on('interactionCreate', async interaction => {
