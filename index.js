@@ -429,6 +429,11 @@ const client = new Client({
 // ─── Command Definitions ──────────────────────────────────────────────────────
 
 const commands = [
+  // Add to your commands array (near the other admin commands)
+new SlashCommandBuilder()
+  .setName('mem')
+  .setDescription('Show bot memory usage (admin only)')
+  .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
   new SlashCommandBuilder().setName('libyan-commands').setDescription('View all bot commands').setDMPermission(false),
   new SlashCommandBuilder().setName('clan-commands').setDescription('View all bot commands (alias for /libyan-commands)').setDMPermission(false),
   new SlashCommandBuilder().setName('libyan-stats').setDescription('View Libyan Points (LP) stats')
@@ -1303,6 +1308,37 @@ client.on('interactionCreate', async interaction => {
     console.error(`❌ Unhandled error in ${commandName}:`, err);
     await safeReply(interaction, { content: '❌ Something went wrong. Please try again.', flags: 64 });
   }
+if (commandName === 'mem') {
+  const mem   = process.memoryUsage();
+  const toMB  = b => (b / 1024 / 1024).toFixed(1) + ' MB';
+
+  // Count live in-memory structures
+  const guildCount   = Object.keys(db).length;
+  const totalMembers = Object.values(db).reduce((n, g) => {
+    return n + Object.keys(g.__pokemon || {}).length;
+  }, 0);
+
+  const embed = new EmbedBuilder()
+    .setTitle('🧠 Memory Usage')
+    .setColor(0x5865F2)
+    .addFields(
+      { name: 'RSS (total process)',    value: toMB(mem.rss),          inline: true },
+      { name: 'Heap Used',              value: toMB(mem.heapUsed),     inline: true },
+      { name: 'Heap Total',             value: toMB(mem.heapTotal),    inline: true },
+      { name: 'External (native/C++)',  value: toMB(mem.external),     inline: true },
+      { name: 'Array Buffers',          value: toMB(mem.arrayBuffers), inline: true },
+      { name: '­',                      value: '­',                    inline: true },
+      { name: 'Guilds in db',           value: String(guildCount),     inline: true },
+      { name: 'Pokemon users tracked',  value: String(totalMembers),   inline: true },
+    )
+    .setFooter({ text: `Uptime: ${Math.floor(process.uptime() / 60)}m` });
+
+  return interaction.reply({ embeds: [embed], flags: 64 });
+}
+
+
+
+
 });
 
 async function handleCommand(interaction, commandName, user, guild) {
