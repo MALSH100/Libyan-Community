@@ -458,19 +458,33 @@ async function fetchReliefWebJobs() {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Combine all sources → return the single most recent job across all of them.
-// Each source runs in parallel; failures are isolated.
+//
+// The two Playwright scrapers (OpenSooq, HiringCafe) run SEQUENTIALLY to avoid
+// exhausting Railway's OS thread limit.  Each Chromium instance needs ~50-80
+// threads; launching both simultaneously causes pthread_create EAGAIN (11) and
+// a SIGTRAP crash.  ReliefWeb is plain HTTP so it runs concurrently with the
+// sequential Playwright chain.
 // ─────────────────────────────────────────────────────────────────────────────
 async function getLatestJob() {
-    const results = await Promise.allSettled([
-        fetchOpenSooqJobs(),
-        fetchHiringCafeJobs(),
-        fetchReliefWebJobs(),
-    ]);
+    // Fire ReliefWeb immediately — it's pure HTTP, no thread cost.
+    const reliefWebPromise = fetchReliefWebJobs().catch(err => {
+        console.error('[Jobs] ReliefWeb error (isolated):', err.message);
+        return [];
+    });
 
-    const allJobs = [];
-    for (const res of results) {
-        if (res.status === 'fulfilled') allJobs.push(...res.value);
-    }
+    // Run Playwright scrapers one at a time to stay within Railway's thread limit.
+    const opensooqJobs = await fetchOpenSooqJobs().catch(err => {
+        console.error('[Jobs] OpenSooq error (isolated):', err.message);
+        return [];
+    });
+    const hiringCafeJobs = await fetchHiringCafeJobs().catch(err => {
+        console.error('[Jobs] HiringCafe error (isolated):', err.message);
+        return [];
+    });
+
+    const reliefWebJobs = await reliefWebPromise;
+
+    const allJobs = [...opensooqJobs, ...hiringCafeJobs, ...reliefWebJobs];
 
     if (!allJobs.length) return null;
     allJobs.sort((a, b) => b.postedAt - a.postedAt);
