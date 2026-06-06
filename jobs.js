@@ -3,7 +3,7 @@ const { SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits } = require('disc
 
 // === CONFIGURATION ===
 const CHECK_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
-const MAX_HISTORY = 50;
+const MAX_HISTORY = 25;
 
 // Colour per source for embed visuals
 const SOURCE_COLORS = {

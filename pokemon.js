@@ -116,8 +116,22 @@ const TYPE_EMOJI = {
 
 // ─── In-memory state ──────────────────────────────────────────────────────────
 
-const pokeCache        = {};  // { pokemonId: apiData }
-const typeCache        = {};  // { typeName: typeData }
+// Size-capped Maps — oldest entry is evicted when the cap is reached.
+// A full PokéAPI response is 150–300 KB of JSON, so without a cap the cache
+// grows without bound as new Pokémon spawn.
+const MAX_POKE_CACHE   = 40;
+const MAX_TYPE_CACHE   = 20; // only 18 types in Gen 1–8
+const MAX_MOVE_CACHE   = 60;
+
+const pokeCache        = new Map(); // pokemonId/name → apiData
+const typeCache        = new Map(); // typeName      → typeData
+const moveCache        = new Map(); // moveName      → moveData
+
+function setCapped(map, key, value, max) {
+  if (map.size >= max) map.delete(map.keys().next().value); // evict oldest
+  map.set(key, value);
+}
+
 const activeSpawns     = {};  // { channelId: spawnState }
 const activeBattles    = {};  // { `${guildId}_${userId}`: battleState }
 const pendingChallenges= {};  // { targetUserId: { challengerUserId, guildId, expiresAt } }
@@ -127,14 +141,14 @@ const spawnTimers      = {};  // { channelId: timeoutId }
 
 async function fetchPokemon(idOrName) {
   const key = String(idOrName).toLowerCase();
-  if (pokeCache[key]) return pokeCache[key];
+  if (pokeCache.has(key)) return pokeCache.get(key);
   try {
     const res  = await fetch(`https://pokeapi.co/api/v2/pokemon/${key}`, { signal: AbortSignal.timeout(8000) });
     if (!res.ok) return null;
     const data = await res.json();
-    pokeCache[key] = data;
-    // Also cache by id
-    pokeCache[String(data.id)] = data;
+    setCapped(pokeCache, key, data, MAX_POKE_CACHE);
+    // Also cache by numeric id so lookups by number hit the cache too
+    setCapped(pokeCache, String(data.id), data, MAX_POKE_CACHE);
     return data;
   } catch (e) {
     console.error('PokéAPI fetch failed:', e.message);
@@ -144,12 +158,12 @@ async function fetchPokemon(idOrName) {
 
 async function fetchMoveData(moveName) {
   const key = moveName.toLowerCase();
-  if (pokeCache[`move_${key}`]) return pokeCache[`move_${key}`];
+  if (moveCache.has(key)) return moveCache.get(key);
   try {
     const res  = await fetch(`https://pokeapi.co/api/v2/move/${key}`, { signal: AbortSignal.timeout(8000) });
     if (!res.ok) return null;
     const data = await res.json();
-    pokeCache[`move_${key}`] = data;
+    setCapped(moveCache, key, data, MAX_MOVE_CACHE);
     return data;
   } catch (e) {
     return null;
@@ -157,12 +171,12 @@ async function fetchMoveData(moveName) {
 }
 
 async function fetchTypeData(typeName) {
-  if (typeCache[typeName]) return typeCache[typeName];
+  if (typeCache.has(typeName)) return typeCache.get(typeName);
   try {
     const res  = await fetch(`https://pokeapi.co/api/v2/type/${typeName}`, { signal: AbortSignal.timeout(8000) });
     if (!res.ok) return null;
     const data = await res.json();
-    typeCache[typeName] = data;
+    setCapped(typeCache, typeName, data, MAX_TYPE_CACHE);
     return data;
   } catch (e) {
     return null;

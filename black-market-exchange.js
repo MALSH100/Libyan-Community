@@ -15,7 +15,7 @@ const {
 
 const SOURCE_URL        = 'https://en.blackmarketlive.org/lyd/';
 const SCRAPE_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
-const MAX_HISTORY        = 168;             // ~7 days of hourly snapshots
+const MAX_HISTORY        = 72;              // ~3 days of hourly snapshots (chart uses last 30)
 const CURRENCIES         = ['USD', 'EUR', 'GBP'];
 
 // ---------------------------------------------------------------------------

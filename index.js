@@ -12,6 +12,7 @@
 const {
   Client,
   GatewayIntentBits,
+  Options,
   SlashCommandBuilder,
   REST,
   Routes,
@@ -115,12 +116,23 @@ async function _persistGuild(guildId) {
   }
 }
 
-// ─── Periodic full save safety net ───────────────────────────────────────────
+// Periodic full save safety net — every 30 min is plenty since every real
+// mutation already does an immediate debounced write via saveData(guildId).
 setInterval(() => {
   for (const guildId of Object.keys(db)) {
     _persistGuild(guildId);
   }
-}, 5 * 60 * 1000);
+}, 30 * 60 * 1000);
+
+// Clean up expired XP cooldown entries every 10 minutes to prevent the map
+// from growing forever (entries are written on every qualifying message but
+// are never deleted anywhere else in the code).
+setInterval(() => {
+  const now = Date.now();
+  for (const key of Object.keys(xpCooldowns)) {
+    if (now - xpCooldowns[key] >= XP_COOLDOWN) delete xpCooldowns[key];
+  }
+}, 10 * 60 * 1000);
 
 
 function getGuildClans(guildId) {
@@ -400,11 +412,18 @@ const GAME_MENU = [
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMembers,
+    // GuildMembers removed — passively caches every member object into RAM.
+    // All member fetches already use guild.members.fetch(userId) which works
+    // without this intent and hits the API on-demand instead.
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildMessageReactions,
   ],
+  makeCache: Options.cacheWithLimits({
+    ...Options.DefaultMakeCacheSettings,
+    MessageManager:    50,   // down from default 200 per channel
+    GuildMemberManager: 50,  // cap cached member objects per guild
+  }),
 });
 
 // ─── Command Definitions ──────────────────────────────────────────────────────
