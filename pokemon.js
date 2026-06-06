@@ -863,6 +863,7 @@ async function handleSpawnInteraction(i, spawn, channel, db, saveData, getGuildC
         clearTimeout(spawn.fleeTimer);
         delete activeSpawns[channel.id];
         collector.stop();
+        scheduleNextSpawn(channel, db, saveData, getGuildClans, getUserClan, awardLP);
 
         const caughtPoke = await buildCaughtPokemon(spawn.apiData, spawn.level, spawn.isShiny, userId);
         memberData.pokemon.push(caughtPoke);
