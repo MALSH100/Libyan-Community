@@ -137,6 +137,52 @@ const activeBattles    = {};  // { `${guildId}_${userId}`: battleState }
 const pendingChallenges= {};  // { targetUserId: { challengerUserId, guildId, expiresAt } }
 const spawnTimers      = {};  // { channelId: timeoutId }
 
+// ─── Response slimmers ────────────────────────────────────────────────────────
+// PokéAPI responses are huge: a type response embeds the full list of every
+// Pokémon and every move of that type; a Pokémon response carries a bulky
+// version_group_details block on every move; both carry dozens of sprite
+// variants. We only ever read a handful of fields, so we strip each response
+// down to just those before caching or storing it. This shrinks every cache
+// entry AND every live spawn object by roughly an order of magnitude, with no
+// change in behaviour (all the field paths the rest of the code reads are kept).
+
+function slimPokemon(data) {
+  if (!data) return null;
+  return {
+    id:    data.id,
+    name:  data.name,
+    stats: data.stats,   // [{ stat:{name}, base_stat }] — already tiny, keep as-is
+    types: data.types,   // [{ type:{name} }]            — already tiny, keep as-is
+    // Drop version_group_details (the bulk of a Pokémon response) — keep names only
+    moves: (data.moves || []).map(m => ({ move: { name: m.move.name } })),
+    // Keep only the two sprites actually rendered, drop the ~20 other variants
+    sprites: {
+      front_default: data.sprites?.front_default || null,
+      front_shiny:   data.sprites?.front_shiny   || null,
+    },
+    species: { url: data.species?.url || null },
+  };
+}
+
+function slimMove(data) {
+  if (!data) return null;
+  return {
+    name:         data.name,
+    power:        data.power,
+    accuracy:     data.accuracy,
+    pp:           data.pp,
+    type:         { name: data.type?.name },
+    damage_class: { name: data.damage_class?.name },
+  };
+}
+
+function slimType(data) {
+  if (!data) return null;
+  // The only field read is damage_relations — drop the embedded pokemon[]/moves[]
+  // lists, which are what make a raw type response 50–100 KB each.
+  return { damage_relations: data.damage_relations };
+}
+
 // ─── PokéAPI helpers ──────────────────────────────────────────────────────────
 
 async function fetchPokemon(idOrName) {
@@ -145,11 +191,12 @@ async function fetchPokemon(idOrName) {
   try {
     const res  = await fetch(`https://pokeapi.co/api/v2/pokemon/${key}`, { signal: AbortSignal.timeout(8000) });
     if (!res.ok) return null;
-    const data = await res.json();
-    setCapped(pokeCache, key, data, MAX_POKE_CACHE);
+    const slim = slimPokemon(await res.json());
+    if (!slim) return null;
+    setCapped(pokeCache, key, slim, MAX_POKE_CACHE);
     // Also cache by numeric id so lookups by number hit the cache too
-    setCapped(pokeCache, String(data.id), data, MAX_POKE_CACHE);
-    return data;
+    setCapped(pokeCache, String(slim.id), slim, MAX_POKE_CACHE);
+    return slim;
   } catch (e) {
     console.error('PokéAPI fetch failed:', e.message);
     return null;
@@ -162,9 +209,9 @@ async function fetchMoveData(moveName) {
   try {
     const res  = await fetch(`https://pokeapi.co/api/v2/move/${key}`, { signal: AbortSignal.timeout(8000) });
     if (!res.ok) return null;
-    const data = await res.json();
-    setCapped(moveCache, key, data, MAX_MOVE_CACHE);
-    return data;
+    const slim = slimMove(await res.json());
+    setCapped(moveCache, key, slim, MAX_MOVE_CACHE);
+    return slim;
   } catch (e) {
     return null;
   }
@@ -175,9 +222,9 @@ async function fetchTypeData(typeName) {
   try {
     const res  = await fetch(`https://pokeapi.co/api/v2/type/${typeName}`, { signal: AbortSignal.timeout(8000) });
     if (!res.ok) return null;
-    const data = await res.json();
-    setCapped(typeCache, typeName, data, MAX_TYPE_CACHE);
-    return data;
+    const slim = slimType(await res.json());
+    setCapped(typeCache, typeName, slim, MAX_TYPE_CACHE);
+    return slim;
   } catch (e) {
     return null;
   }
@@ -206,7 +253,9 @@ async function getTypeEffectiveness(attackType, defenderTypes) {
 // Pick up to 4 moves from a Pokemon's learnset that have power > 0
 async function selectMoves(pokemonData) {
   const learnset = pokemonData.moves || [];
-  const shuffled = learnset.sort(() => Math.random() - 0.5).slice(0, 20);
+  // Copy before sort — sort() mutates in place, and learnset now belongs to the
+  // shared cached Pokémon object, so sorting it directly would scramble the cache.
+  const shuffled = [...learnset].sort(() => Math.random() - 0.5).slice(0, 20);
   const selected = [];
 
   for (const entry of shuffled) {

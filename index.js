@@ -421,9 +421,20 @@ const client = new Client({
   ],
   makeCache: Options.cacheWithLimits({
     ...Options.DefaultMakeCacheSettings,
-    MessageManager:    50,   // down from default 200 per channel
+    MessageManager:    25,   // down from default 200 per channel
     GuildMemberManager: 50,  // cap cached member objects per guild
   }),
+  // makeCache caps how many objects are held; sweepers clear out objects that
+  // are under the cap but stale. By default discord.js never sweeps messages,
+  // so they accumulate until the cap — this is the main cause of RAM drifting
+  // up over hours of uptime. Sweep them on a timer to keep idle RAM flat.
+  sweepers: {
+    ...Options.DefaultSweeperSettings,
+    messages: {
+      interval: 600,   // run every 10 minutes
+      lifetime: 900,   // evict messages cached longer than 15 minutes
+    },
+  },
 });
 
 // ─── Command Definitions ──────────────────────────────────────────────────────
