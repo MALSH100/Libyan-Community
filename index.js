@@ -460,6 +460,11 @@ new SlashCommandBuilder()
     .setName('db-prune')
     .setDescription('Remove leftover data from removed features (admin only)')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+  new SlashCommandBuilder()
+    .setName('db-forget')
+    .setDescription('Permanently delete one guild record from RAM and Mongo (admin only)')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addStringOption(o => o.setName('guildid').setDescription('The guild ID to permanently remove').setRequired(true)),
   new SlashCommandBuilder().setName('libyan-commands').setDescription('View all bot commands').setDMPermission(false),
   new SlashCommandBuilder().setName('clan-commands').setDescription('View all bot commands (alias for /libyan-commands)').setDMPermission(false),
   new SlashCommandBuilder().setName('libyan-stats').setDescription('View Libyan Points (LP) stats')
@@ -1437,6 +1442,54 @@ if (commandName === 'db-prune') {
     ? `🧹 Pruned ${removed.length} leftover key(s), freed **${fmt(freed)}** from RAM and Mongo:\n` + removed.map(r => `• ${r}`).join('\n')
     : '✅ Nothing to prune — no leftover feature data found.';
   return interaction.reply({ content: msg, flags: 64 });
+}
+
+if (commandName === 'db-forget') {
+  const targetId = interaction.options.getString('guildid', true).trim();
+
+  // Safety: never forget the server you're currently running in. This also
+  // catches the worst fat-finger — if you accidentally type your main server's
+  // ID while running the command there, it equals interaction.guildId and stops.
+  if (targetId === interaction.guildId) {
+    return interaction.reply({
+      content: '❌ Refusing to forget the server you are running this in. `/db-forget` is only for *other* guilds (e.g. a deleted test server).',
+      flags: 64,
+    });
+  }
+
+  const fmt  = n => n >= 1048576 ? (n / 1048576).toFixed(2) + ' MB' : n >= 1024 ? (n / 1024).toFixed(1) + ' KB' : n + ' B';
+  const size = v => { try { return Buffer.byteLength(JSON.stringify(v) || ''); } catch { return 0; } };
+
+  const inMemory = Object.prototype.hasOwnProperty.call(db, targetId);
+  const freed    = inMemory ? size(db[targetId]) : 0;
+
+  // Cancel any pending debounced save for this guild FIRST — otherwise it would
+  // fire after we delete and re-upsert the document. This is exactly what was
+  // recreating the document every time you deleted it in the Mongo UI.
+  if (_saveTimers[targetId]) { clearTimeout(_saveTimers[targetId]); delete _saveTimers[targetId]; }
+
+  // Remove from RAM (so the periodic 30-min save won't write it back either)
+  if (inMemory) delete db[targetId];
+
+  // Remove from Mongo
+  let mongoDeleted = 0;
+  if (mongoCollection) {
+    try {
+      const res = await mongoCollection.deleteOne({ _id: targetId });
+      mongoDeleted = res.deletedCount || 0;
+    } catch (e) {
+      return interaction.reply({ content: `⚠️ Removed from memory, but the MongoDB delete failed: ${e.message}`, flags: 64 });
+    }
+  }
+
+  return interaction.reply({
+    content:
+      `🗑️ Forgot guild \`${targetId}\`.\n` +
+      `• In-memory: ${inMemory ? `removed (${fmt(freed)})` : 'was not loaded'}\n` +
+      `• MongoDB: ${mongoDeleted ? 'document deleted' : 'no document found'}\n` +
+      `• Pending save cleared, so it won't come back.`,
+    flags: 64,
+  });
 }
 
 
