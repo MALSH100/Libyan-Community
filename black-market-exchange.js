@@ -429,19 +429,19 @@ function buildChartSvg(history, mainCurrency = 'USD') {
 }
 
 async function svgToPngBuffer(svgString) {
-  const { chromium } = require('playwright');
-  const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
-  try {
-    const page = await browser.newPage();
-    await page.setContent(
-      `<html><body style="margin:0;display:flex;justify-content:center;align-items:center;background:#1a1c22;">${svgString}</body></html>`
-    );
-    await page.waitForSelector('svg');
-    const element = await page.$('svg');
-    return await element.screenshot({ type: 'png' });
-  } finally {
-    await browser.close();
-  }
+  // Lightweight SVG → PNG rasterizer. This replaces the previous approach of
+  // launching a full headless Chromium just to screenshot an SVG — which cost
+  // 150–300 MB per render, every hour and on every chart-button tap. resvg is
+  // a small native renderer (~4 MB on disk) that does the same job at ~60 MB
+  // peak RSS and a few ms per render once fonts are loaded.
+  const { Resvg } = require('@resvg/resvg-js');
+  const resvg = new Resvg(svgString, {
+    background: '#1a1c22',
+    // The SVG asks for 'Segoe UI'/Arial, which don't exist on a slim Linux
+    // image, so resvg falls back to DejaVu Sans (installed via the Dockerfile).
+    font: { loadSystemFonts: true, defaultFontFamily: 'DejaVu Sans' },
+  });
+  return resvg.render().asPng();
 }
 
 async function chartAttachment(exchangeData, currency = 'USD') {
