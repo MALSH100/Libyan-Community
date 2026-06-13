@@ -1340,6 +1340,45 @@ if (commandName === 'mem') {
     return n + Object.keys(g.__pokemon || {}).length;
   }, 0);
 
+  // ── Per-feature breakdown of the in-memory db ────────────────────────────
+  // Measures the serialized byte size of each feature's data across all guilds,
+  // i.e. "which feature owns how much RAM". This only covers what the bot
+  // deliberately stores in `db` — it will NOT add up to RSS, because RSS also
+  // includes the Node runtime, the discord.js client + its caches, and native
+  // buffers, none of which live in `db`.
+  const FEATURE_LABELS = {
+    __pokemon:  'Pokémon',
+    __exchange: 'Exchange',
+    __yarayt:   'Ya Rayt',
+    __potd:     'Post of the Day',
+    __lp:       'Levels / LP',
+  };
+  const byteSize = v => { try { return Buffer.byteLength(JSON.stringify(v) || ''); } catch { return 0; } };
+  const fmtSize  = n => n >= 1048576 ? (n / 1048576).toFixed(2) + ' MB'
+                      : n >= 1024    ? (n / 1024).toFixed(1) + ' KB'
+                      :                 n + ' B';
+
+  const buckets = {};               // label -> bytes
+  let dbTotal = 0;
+  for (const gId of Object.keys(db)) {
+    const guild = db[gId];
+    if (!guild || typeof guild !== 'object') continue;
+    for (const key of Object.keys(guild)) {
+      const bytes = byteSize(guild[key]);
+      dbTotal += bytes;
+      // __-prefixed keys are feature namespaces; everything else is a clan
+      const label = key.startsWith('__') ? (FEATURE_LABELS[key] || key) : 'Clans';
+      buckets[label] = (buckets[label] || 0) + bytes;
+    }
+  }
+  const breakdown = Object.entries(buckets)
+    .sort((a, b) => b[1] - a[1])
+    .map(([label, bytes]) => {
+      const pct = dbTotal ? Math.round((bytes / dbTotal) * 100) : 0;
+      return `**${label}** — ${fmtSize(bytes)} (${pct}%)`;
+    })
+    .join('\n') || '_no stored data yet_';
+
   const embed = new EmbedBuilder()
     .setTitle('🧠 Memory Usage')
     .setColor(0x5865F2)
@@ -1353,7 +1392,13 @@ if (commandName === 'mem') {
       { name: 'Guilds in db',           value: String(guildCount),     inline: true },
       { name: 'Pokemon users tracked',  value: String(totalMembers),   inline: true },
     )
-    .setFooter({ text: `Uptime: ${Math.floor(process.uptime() / 60)}m` });
+    .setFooter({ text: `Uptime: ${Math.floor(process.uptime() / 60)}m · db data is a subset of RSS (rest = Node + discord.js + caches)` });
+
+  embed.addFields({
+    name: `📦 In-memory db by feature (total ${fmtSize(dbTotal)})`,
+    value: breakdown,
+    inline: false,
+  });
 
   return interaction.reply({ embeds: [embed], flags: 64 });
 }
