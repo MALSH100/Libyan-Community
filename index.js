@@ -456,6 +456,10 @@ new SlashCommandBuilder()
   .setName('mem')
   .setDescription('Show bot memory usage (admin only)')
   .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+  new SlashCommandBuilder()
+    .setName('db-prune')
+    .setDescription('Remove leftover data from removed features (admin only)')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
   new SlashCommandBuilder().setName('libyan-commands').setDescription('View all bot commands').setDMPermission(false),
   new SlashCommandBuilder().setName('clan-commands').setDescription('View all bot commands (alias for /libyan-commands)').setDMPermission(false),
   new SlashCommandBuilder().setName('libyan-stats').setDescription('View Libyan Points (LP) stats')
@@ -1401,6 +1405,38 @@ if (commandName === 'mem') {
   });
 
   return interaction.reply({ embeds: [embed], flags: 64 });
+}
+
+if (commandName === 'db-prune') {
+  // Keys that belong to features removed from the bot. Their data still sits in
+  // the db — loaded into RAM on boot and re-serialized to Mongo on every save —
+  // but no live code reads or writes it, so it's safe to delete. Add a key here
+  // if you ever retire another feature.
+  const ORPHAN_KEYS = ['__news', '__jobs', '__translator'];
+  const fmt  = n => n >= 1048576 ? (n / 1048576).toFixed(2) + ' MB' : n >= 1024 ? (n / 1024).toFixed(1) + ' KB' : n + ' B';
+  const size = v => { try { return Buffer.byteLength(JSON.stringify(v) || ''); } catch { return 0; } };
+
+  let freed = 0;
+  const removed = [];
+  for (const gId of Object.keys(db)) {
+    const g = db[gId];
+    if (!g || typeof g !== 'object') continue;
+    let touched = false;
+    for (const k of ORPHAN_KEYS) {
+      if (k in g) {
+        freed += size(g[k]);
+        delete g[k];
+        touched = true;
+        removed.push(`${k} (guild ${gId})`);
+      }
+    }
+    if (touched) _persistGuild(gId);   // write the slimmed document back to Mongo so it won't reload
+  }
+
+  const msg = removed.length
+    ? `🧹 Pruned ${removed.length} leftover key(s), freed **${fmt(freed)}** from RAM and Mongo:\n` + removed.map(r => `• ${r}`).join('\n')
+    : '✅ Nothing to prune — no leftover feature data found.';
+  return interaction.reply({ content: msg, flags: 64 });
 }
 
 
