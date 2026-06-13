@@ -4,7 +4,7 @@
   "description": "A Discord bot for creating and managing clans/guilds",
   "main": "index.js",
   "scripts": {
-    "start": "node --max-old-space-size=256 index.js"
+    "start": "node --max-old-space-size=256 --max-semi-space-size=2 --optimize-for-size --expose-gc index.js"
   },
   "dependencies": {
     "@resvg/resvg-js": "^2.6.2",
