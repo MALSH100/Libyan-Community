@@ -14,8 +14,8 @@ const {
 } = require('discord.js');
 
 const SOURCE_URL        = 'https://en.blackmarketlive.org/lyd/';
-const SCRAPE_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
-const MAX_HISTORY        = 72;              // ~3 days of hourly snapshots (chart uses last 30)
+const SCRAPE_INTERVAL_MS = 5 * 60 * 60 * 1000; // 5 hours — source updates only ~1-2x/week, so hourly was wasteful
+const MAX_HISTORY        = 72;              // up to 72 stored rate CHANGES (history only grows when the rate moves)
 const CURRENCIES         = ['USD', 'EUR', 'GBP'];
 
 // ---------------------------------------------------------------------------
@@ -24,7 +24,7 @@ const CURRENCIES         = ['USD', 'EUR', 'GBP'];
 const exchangeCommands = [
   new SlashCommandBuilder()
     .setName('exchange-set-channel')
-    .setDescription('Set the channel for hourly Libyan black market exchange updates')
+    .setDescription('Set the channel for Libyan black market exchange updates')
     .addChannelOption(o =>
       o.setName('channel')
         .setDescription('Channel to post exchange updates in')
@@ -191,7 +191,7 @@ function buildRateEmbed(exchangeData, latest, forced = false) {
     )
     .setTimestamp(new Date(latest.scrapedAt || Date.now()))
     .setFooter({
-      text: 'Live Libyan Black Market Rates • Updated every hour • Created & Designed by Captain',
+      text: 'Live Libyan Black Market Rates • Checked every 5h, posts on change • Created & Designed by Captain',
     });
 
   for (const currency of CURRENCIES) {
@@ -296,13 +296,27 @@ function buildChartSvg(history, mainCurrency = 'USD') {
   const plotH = H - pad.top  - pad.bottom;
 
   const yFor = v => pad.top + (1 - (v - minVal) / (maxVal - minVal)) * plotH;
-  const xFor = i => candles.length === 1
+  // Time-based x-axis: each candle is positioned by its ACTUAL date across the
+  // span from the oldest shown change up to now. The source now updates only
+  // once or twice a week, so plotting by real time makes the gaps honest instead
+  // of squashing irregular changes into evenly-spaced candles. The empty space
+  // between the last candle and the right edge shows how long the current rate
+  // has held without changing.
+  const xMinTs = candles[0].ts.getTime();
+  const xMaxTs = Date.now();
+  const tsSpan = Math.max(1, xMaxTs - xMinTs);
+  const xFor   = ts => candles.length === 1
     ? pad.left + plotW / 2
-    : pad.left + (i / (candles.length - 1)) * plotW;
+    : pad.left + ((ts - xMinTs) / tsSpan) * plotW;
 
-  const spacing = candles.length > 1 ? plotW / (candles.length - 1) : plotW;
-  const bodyW   = Math.max(3, Math.min(14, spacing * 0.5));
-  const halfW   = bodyW / 2;
+  // Candle width from the tightest gap between consecutive candles, so two
+  // changes close together in time don't overlap; clamped to a sensible range.
+  let minGap = plotW;
+  for (let i = 1; i < candles.length; i++) {
+    minGap = Math.min(minGap, xFor(candles[i].ts.getTime()) - xFor(candles[i - 1].ts.getTime()));
+  }
+  const bodyW = Math.max(3, Math.min(14, (candles.length > 1 ? minGap : plotW) * 0.6));
+  const halfW = bodyW / 2;
 
   // Grid lines
   const gridLines = [];
@@ -326,7 +340,7 @@ function buildChartSvg(history, mainCurrency = 'USD') {
   const MONTHS      = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
   let   lastLabelX  = -999;
   for (const { i, ts } of dayBoundaries) {
-    const x = xFor(i);
+    const x = xFor(ts.getTime());
     if (x - lastLabelX < 60 && lastLabelX !== -999) continue;
     const label = `${ts.getUTCDate()} ${MONTHS[ts.getUTCMonth()]}`;
     xLabels.push(
@@ -341,7 +355,7 @@ function buildChartSvg(history, mainCurrency = 'USD') {
   const candleElems = [];
   for (let i = 0; i < candles.length; i++) {
     const c          = candles[i];
-    const x          = xFor(i);
+    const x          = xFor(c.ts.getTime());
     const openY      = yFor(c.open);
     const closeY     = yFor(c.close);
     const highY      = yFor(c.high);
@@ -388,9 +402,12 @@ function buildChartSvg(history, mainCurrency = 'USD') {
   const deltaArrow  = periodDelta < 0 ? '▼' : (periodDelta > 0 ? '▲' : '');
 
   const first     = candles[0].ts;
-  const dateRange = candles.length > 1
+  const daysSince = Math.floor((Date.now() - last.ts.getTime()) / 86400000);
+  const staleTxt  = daysSince <= 0 ? 'today' : (daysSince === 1 ? '1 day ago' : `${daysSince} days ago`);
+  const dateRange = (candles.length > 1
     ? `${first.getUTCDate()} ${MONTHS[first.getUTCMonth()]} – ${last.ts.getUTCDate()} ${MONTHS[last.ts.getUTCMonth()]} ${last.ts.getUTCFullYear()}`
-    : `${last.ts.getUTCDate()} ${MONTHS[last.ts.getUTCMonth()]} ${last.ts.getUTCFullYear()}`;
+    : `${last.ts.getUTCDate()} ${MONTHS[last.ts.getUTCMonth()]} ${last.ts.getUTCFullYear()}`)
+    + `  ·  last change ${staleTxt}`;
 
   // Legend
   const legY  = H - 14;
@@ -625,7 +642,7 @@ module.exports = function initBlackMarketExchange({ client, db, saveData }) {
         saveData(guild.id);
         scheduleGuild(guild.id);
         await safeReply(interaction, {
-          content: `Exchange updates will post in ${channel} every hour. Fetching the latest rate now...`,
+          content: `Exchange updates will post in ${channel} whenever the rate changes (checked every 5h). Fetching the latest rate now...`,
           flags: 64,
         });
         await updateRates({ client, db, saveData, guildId: guild.id, forcePost: true });
