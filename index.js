@@ -134,6 +134,17 @@ setInterval(() => {
   }
 }, 10 * 60 * 1000);
 
+// Trade spare CPU for lower RAM. The bot sits near 0% CPU, so we can afford to
+// run a full garbage collection every few minutes. This actively reclaims and
+// returns freed memory to the OS, flattening the slow RSS climb between natural
+// GCs. Only runs if started with --expose-gc (see the "start" script); .unref()
+// keeps this timer from holding the process open on its own.
+if (typeof global.gc === 'function') {
+  setInterval(() => {
+    try { global.gc(); } catch (_) { /* ignore */ }
+  }, 3 * 60 * 1000).unref();
+}
+
 
 function getGuildClans(guildId) {
   if (!db[guildId]) {
