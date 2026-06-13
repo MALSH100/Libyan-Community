@@ -495,7 +495,7 @@ const getPokemonCommands = require('./pokemon-commands');
 const initYarayt = require('./yarayt');
 const initBlackMarketExchange = require('./black-market-exchange');
 //const initLibyaNews = require('./libya-news');
-const initJobs = require('./jobs');
+//const initJobs = require('./jobs');
 const { initPOTD } = require('./potd');
 //const initTranslator = require('./translator');
 
@@ -2049,7 +2049,7 @@ initBlackMarketExchange({ client, db, saveData });
 //initLibyaNews({ client, db, saveData });
 
 //Job System
-initJobs({ client, db, saveData });
+//initJobs({ client, db, saveData });
 
 // Post of the Day
 initPOTD({ client, db, saveData, awardLP });
