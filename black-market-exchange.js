@@ -445,18 +445,22 @@ function buildChartSvg(history, mainCurrency = 'USD') {
 </svg>`;
 }
 
+const FONT_PATH = require('path').join(__dirname, 'fonts', 'DejaVuSans.ttf');
+
 async function svgToPngBuffer(svgString) {
-  // Lightweight SVG → PNG rasterizer. This replaces the previous approach of
-  // launching a full headless Chromium just to screenshot an SVG — which cost
-  // 150–300 MB per render, every hour and on every chart-button tap. resvg is
-  // a small native renderer (~4 MB on disk) that does the same job at ~60 MB
-  // peak RSS and a few ms per render once fonts are loaded.
+  // Lightweight SVG → PNG rasterizer (replaces the old headless-Chromium one,
+  // which cost 150–300 MB per render). resvg needs a real font file to draw
+  // text — and the runtime has no system fonts, so we ship one in the repo
+  // (./fonts/DejaVuSans.ttf) and point resvg straight at it. This is why text
+  // works regardless of whether the host installed any fonts.
   const { Resvg } = require('@resvg/resvg-js');
   const resvg = new Resvg(svgString, {
     background: '#1a1c22',
-    // The SVG asks for 'Segoe UI'/Arial, which don't exist on a slim Linux
-    // image, so resvg falls back to DejaVu Sans (installed via the Dockerfile).
-    font: { loadSystemFonts: true, defaultFontFamily: 'DejaVu Sans' },
+    font: {
+      loadSystemFonts: false,           // don't depend on the OS having fonts
+      fontFiles: [FONT_PATH],           // the bundled font travels with the code
+      defaultFontFamily: 'DejaVu Sans', // the SVG asks for Segoe UI/Arial; map to this
+    },
   });
   return resvg.render().asPng();
 }

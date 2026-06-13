@@ -1,15 +1,14 @@
-# Slim Node base (~150 MB) instead of the Playwright image (~2 GB with 3 browsers).
-# Nothing in the bot launches a browser anymore — chart PNGs are rendered by
-# @resvg/resvg-js, a small native library, so the browser image is dead weight.
+# Slim Node base (~150 MB) instead of the old Playwright image (~2 GB with 3
+# browsers). Nothing launches a browser anymore — chart PNGs are rendered by
+# @resvg/resvg-js, a small native library.
 FROM node:20-slim
 
 WORKDIR /app
 
-# resvg draws the chart's text labels; install one small font so they aren't
-# blank. fonts-dejavu-core is ~1 MB and is the renderer's configured fallback.
-RUN apt-get update \
- && apt-get install -y --no-install-recommends fonts-dejavu-core \
- && rm -rf /var/lib/apt/lists/*
+# No font package needed: the chart font ships in the repo at ./fonts and resvg
+# loads it directly, so text renders even if the host has no system fonts. (This
+# also means it works the same whether Railway builds from this Dockerfile or
+# from Nixpacks.)
 
 COPY package*.json ./
 # --omit=dev skips devDependencies but keeps optionalDependencies, which is how
