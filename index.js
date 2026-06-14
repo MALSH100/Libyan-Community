@@ -1104,8 +1104,10 @@ async function gameHiddenBomb(channel, challengerName, defenderName, gc) {
   await channel.send({
     embeds: [new EmbedBuilder().setColor(0xFF4500).setTitle('💣 Hidden Bomb!')
       .setDescription(
-        `Each round, the **first member of each clan** to pick a number **1–10** locks it in for their clan.\n` +
+        `Each round, the **first member of each clan** to pick a number locks it in for their clan.\n` +
         `One number is secretly the **💣 BOMB** — pick it and lose the round!\n\n` +
+        `⚠️ **The range shrinks every round**, so the bomb gets harder to dodge:\n` +
+        `Round 1 → **1–10** · Round 2 → **1–8** · Round 3 → **1–6** · Round 4 → **1–4** · Round 5 → **1–2**\n\n` +
         `**First to win 3 rounds wins the war!** Starting in 5 seconds...`
       )]
   }).catch(() => {});
@@ -1114,13 +1116,15 @@ async function gameHiddenBomb(channel, challengerName, defenderName, gc) {
   const wins = { [challengerName]: 0, [defenderName]: 0 };
 
   for (let round = 1; round <= 5; round++) {
-    const bomb = Math.floor(Math.random() * 10) + 1;
+    const maxPick = 12 - round * 2;                     // 10, 8, 6, 4, 2 — shrinks each round
+    const bomb    = Math.floor(Math.random() * maxPick) + 1;
 
     await channel.send({
       embeds: [new EmbedBuilder().setColor(0xFF4500)
-        .setTitle(`💣 Round ${round} / 5`)
+        .setTitle(`💣 Round ${round} / 5 — Numbers 1–${maxPick}`)
         .setDescription(
-          `**${challengerName}** and **${defenderName}** — anyone in your clan, pick a number **1–10**!\n` +
+          `## 🎯 Pick a number from 1 to ${maxPick}\n` +
+          `**${challengerName}** and **${defenderName}** — anyone in your clan can pick!\n` +
           `Your clan's **first valid pick is locked in** 🔒. **20 seconds.**`
         )]
     }).catch(() => {});
@@ -1128,14 +1132,14 @@ async function gameHiddenBomb(channel, challengerName, defenderName, gc) {
     const locked = await lockInClanAnswers(
       channel,
       { [challengerName]: cRoster, [defenderName]: dRoster },
-      val => { const n = parseInt(val, 10); return !isNaN(n) && n >= 1 && n <= 10; },
+      val => { const n = parseInt(val, 10); return !isNaN(n) && n >= 1 && n <= maxPick; },
       20_000
     );
 
     const cEntry = locked[challengerName];
     const dEntry = locked[defenderName];
-    const cPick  = cEntry ? parseInt(cEntry.value, 10) : Math.floor(Math.random() * 10) + 1;
-    const dPick  = dEntry ? parseInt(dEntry.value, 10) : Math.floor(Math.random() * 10) + 1;
+    const cPick  = cEntry ? parseInt(cEntry.value, 10) : Math.floor(Math.random() * maxPick) + 1;
+    const dPick  = dEntry ? parseInt(dEntry.value, 10) : Math.floor(Math.random() * maxPick) + 1;
 
     const cBombed = cPick === bomb;
     const dBombed = dPick === bomb;
