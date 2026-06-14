@@ -711,7 +711,34 @@ async function lockInAnswers(channel, playerIds, validator, timeMs) {
   });
 }
 
-// ── GAME 1: Trivia ───────────────────────────────────────────────────────────
+// Per-CLAN version of lockInAnswers: the FIRST valid answer from ANYONE in a
+// clan locks that clan's answer (so any member can play for the clan, not just
+// the leader). clanRosters: { [clanName]: [userId, ...] }.
+// Returns: { [clanName]: { value, userId } } for clans that answered in time.
+async function lockInClanAnswers(channel, clanRosters, validator, timeMs) {
+  const locked   = {};   // { clanName: { value, userId } }
+  const userClan = {};   // userId -> clanName (first clan a user appears in wins)
+  for (const [clanName, ids] of Object.entries(clanRosters)) {
+    for (const id of ids) if (id && !(id in userClan)) userClan[id] = clanName;
+  }
+  const clanCount = Object.keys(clanRosters).length;
+  return new Promise(resolve => {
+    const col = channel.createMessageCollector({
+      filter: m => !m.author.bot && userClan[m.author.id] !== undefined,
+      time: timeMs,
+    });
+    col.on('collect', m => {
+      const clanName = userClan[m.author.id];
+      if (locked[clanName] !== undefined) return;        // this clan already locked in
+      const val = m.content.trim().toLowerCase();
+      if (!validator(val)) return;
+      locked[clanName] = { value: val, userId: m.author.id };
+      m.react('🔒').catch(() => {});
+      if (Object.keys(locked).length === clanCount) col.stop('done');
+    });
+    col.on('end', () => resolve(locked));
+  });
+}
 async function gameTrivia(channel, challengerName, defenderName, allMembers) {
   await channel.send({
     embeds: [new EmbedBuilder().setColor(0x5865F2).setTitle('🧠 Trivia Challenge!')
@@ -1070,13 +1097,14 @@ async function gameMissingLetters(channel, challengerName, defenderName, allMemb
 
 // ── GAME 7: Hidden Bomb ──────────────────────────────────────────────────────
 async function gameHiddenBomb(channel, challengerName, defenderName, gc) {
-  const cLeader = gc[challengerName].leader;
-  const dLeader = gc[defenderName].leader;
+  // Any member of a clan can pick — the first valid pick locks the clan's number.
+  const cRoster = [gc[challengerName].leader, ...(gc[challengerName].officers || []), ...(gc[challengerName].members || [])].filter(Boolean);
+  const dRoster = [gc[defenderName].leader,   ...(gc[defenderName].officers   || []), ...(gc[defenderName].members   || [])].filter(Boolean);
 
   await channel.send({
     embeds: [new EmbedBuilder().setColor(0xFF4500).setTitle('💣 Hidden Bomb!')
       .setDescription(
-        `Each round, **clan leaders** pick a number **1–10**.\n` +
+        `Each round, the **first member of each clan** to pick a number **1–10** locks it in for their clan.\n` +
         `One number is secretly the **💣 BOMB** — pick it and lose the round!\n\n` +
         `**First to win 3 rounds wins the war!** Starting in 5 seconds...`
       )]
@@ -1092,21 +1120,22 @@ async function gameHiddenBomb(channel, challengerName, defenderName, gc) {
       embeds: [new EmbedBuilder().setColor(0xFF4500)
         .setTitle(`💣 Round ${round} / 5`)
         .setDescription(
-          `<@${cLeader}> — pick for **${challengerName}**\n` +
-          `<@${dLeader}> — pick for **${defenderName}**\n\n` +
-          `Pick a number **1–10**. First pick per leader is locked in 🔒. **20 seconds.**`
+          `**${challengerName}** and **${defenderName}** — anyone in your clan, pick a number **1–10**!\n` +
+          `Your clan's **first valid pick is locked in** 🔒. **20 seconds.**`
         )]
     }).catch(() => {});
 
-    const locked = await lockInAnswers(
+    const locked = await lockInClanAnswers(
       channel,
-      [cLeader, dLeader],
+      { [challengerName]: cRoster, [defenderName]: dRoster },
       val => { const n = parseInt(val, 10); return !isNaN(n) && n >= 1 && n <= 10; },
       20_000
     );
 
-    const cPick = locked[cLeader] !== undefined ? parseInt(locked[cLeader], 10) : Math.floor(Math.random() * 10) + 1;
-    const dPick = locked[dLeader] !== undefined ? parseInt(locked[dLeader], 10) : Math.floor(Math.random() * 10) + 1;
+    const cEntry = locked[challengerName];
+    const dEntry = locked[defenderName];
+    const cPick  = cEntry ? parseInt(cEntry.value, 10) : Math.floor(Math.random() * 10) + 1;
+    const dPick  = dEntry ? parseInt(dEntry.value, 10) : Math.floor(Math.random() * 10) + 1;
 
     const cBombed = cPick === bomb;
     const dBombed = dPick === bomb;
@@ -1121,8 +1150,8 @@ async function gameHiddenBomb(channel, challengerName, defenderName, gc) {
       embeds: [new EmbedBuilder().setColor(cBombed || dBombed ? 0xFF0000 : 0x57F287)
         .setTitle(`💣 Round ${round} Result`)
         .setDescription(
-          `**${challengerName}** picked: **${cPick}** ${cBombed ? '💥' : '✅'}\n` +
-          `**${defenderName}** picked: **${dPick}** ${dBombed ? '💥' : '✅'}\n` +
+          `**${challengerName}** picked: **${cPick}** ${cBombed ? '💥' : '✅'} ${cEntry ? `(by <@${cEntry.userId}>)` : '(auto — nobody picked)'}\n` +
+          `**${defenderName}** picked: **${dPick}** ${dBombed ? '💥' : '✅'} ${dEntry ? `(by <@${dEntry.userId}>)` : '(auto — nobody picked)'}\n` +
           `The bomb was: **${bomb}** 💣\n\n${result}\n\n` +
           `Score — **${challengerName}: ${wins[challengerName]}** | **${defenderName}: ${wins[defenderName]}**`
         )]
