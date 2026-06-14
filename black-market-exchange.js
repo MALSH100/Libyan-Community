@@ -479,22 +479,12 @@ async function postUpdate(client, guildId, exchangeData, latest, forced = false)
   const channel = await client.channels.fetch(exchangeData.channelId).catch(() => null);
   if (!channel || !channel.isTextBased()) return false;
 
+  // Chart and buttons removed for a clean usage test — post only the text rate
+  // embed (USD / EUR / GBP). Because chartAttachment() is no longer called, the
+  // SVG renderer (@resvg/resvg-js) never loads at runtime. To bring the chart
+  // back, restore the chartAttachment / setImage / button-row block here.
   const embed = buildRateEmbed(exchangeData, latest, forced);
-  const files = [];
-  let row     = null;
-
-  if ((exchangeData.history || []).length >= 2) {
-    const chartFile = await chartAttachment(exchangeData, 'USD');
-    files.push(chartFile);
-    embed.setImage('attachment://libya-exchange-chart-USD.png');
-    row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId(`chart_usd_${guildId}`).setLabel('$ USD').setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId(`chart_eur_${guildId}`).setLabel('€ EUR').setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId(`chart_gbp_${guildId}`).setLabel('£ GBP').setStyle(ButtonStyle.Primary),
-    );
-  }
-
-  await channel.send({ embeds: [embed], files, components: row ? [row] : [] });
+  await channel.send({ embeds: [embed] });
   return true;
 }
 
@@ -600,28 +590,14 @@ module.exports = function initBlackMarketExchange({ client, db, saveData }) {
         customId.startsWith('chart_eur_') ||
         customId.startsWith('chart_gbp_')
       ) {
-        await interaction.deferUpdate();
-        let currency = 'USD';
-        if (customId.startsWith('chart_eur_')) currency = 'EUR';
-        if (customId.startsWith('chart_gbp_')) currency = 'GBP';
-
-        const guildId    = customId.split('_').pop();
-        const exchangeData = getExchangeData(db, guildId);
-
-        if (!exchangeData.history || exchangeData.history.length < 2) {
-          await interaction.followUp({ content: 'Not enough history to update chart.', ephemeral: true });
-          return;
-        }
-
-        const newChart     = await chartAttachment(exchangeData, currency);
-        const message      = interaction.message;
-        if (!message) {
-          await interaction.followUp({ content: 'Could not find original message.', ephemeral: true });
-          return;
-        }
-        const updatedEmbed = EmbedBuilder.from(message.embeds[0])
-          .setImage(`attachment://libya-exchange-chart-${currency}.png`);
-        await message.edit({ embeds: [updatedEmbed], files: [newChart], components: message.components });
+        // Charts are disabled. These buttons only exist on messages posted
+        // before the chart was removed. Acknowledge them without rendering, so
+        // the SVG renderer never loads. (Delete this block once no old chart
+        // messages remain in the channel.)
+        await interaction.reply({
+          content: 'Charts are currently disabled — only the live rates are posted.',
+          ephemeral: true,
+        }).catch(() => {});
         return;
       }
     }
