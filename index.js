@@ -784,7 +784,7 @@ async function gameTrivia(channel, challengerName, defenderName, allMembers) {
     await new Promise(r => setTimeout(r, 2500));
   }
 
-  return scores[challengerName] >= scores[defenderName] ? challengerName : defenderName;
+  return scores[challengerName] === scores[defenderName] ? null : (scores[challengerName] > scores[defenderName] ? challengerName : defenderName);
 }
 
 // ── GAME 2: Anagrams ─────────────────────────────────────────────────────────
@@ -817,7 +817,7 @@ async function gameAnagrams(channel, challengerName, defenderName, allMembers) {
     await new Promise(r => setTimeout(r, 2500));
   }
 
-  return scores[challengerName] >= scores[defenderName] ? challengerName : defenderName;
+  return scores[challengerName] === scores[defenderName] ? null : (scores[challengerName] > scores[defenderName] ? challengerName : defenderName);
 }
 
 // ── GAME 3: Dice Battle ──────────────────────────────────────────────────────
@@ -940,7 +940,7 @@ async function gameDiceBattle(channel, challengerName, defenderName, gc, guild) 
     await new Promise(r => setTimeout(r, 4000));
   }
 
-  return roundWins[challengerName] >= roundWins[defenderName] ? challengerName : defenderName;
+  return roundWins[challengerName] === roundWins[defenderName] ? null : (roundWins[challengerName] > roundWins[defenderName] ? challengerName : defenderName);
 }
 
 // ── GAME 4: Type the Word ────────────────────────────────────────────────────
@@ -972,7 +972,7 @@ async function gameTypeTheWord(channel, challengerName, defenderName, allMembers
     await new Promise(r => setTimeout(r, 2000));
   }
 
-  return scores[challengerName] >= scores[defenderName] ? challengerName : defenderName;
+  return scores[challengerName] === scores[defenderName] ? null : (scores[challengerName] > scores[defenderName] ? challengerName : defenderName);
 }
 
 // ── GAME 5: Guess the Number ─────────────────────────────────────────────────
@@ -1011,7 +1011,8 @@ async function gameGuessTheNumber(channel, challengerName, defenderName, allMemb
 
   const cDist = calcAvgDist(cMembers);
   const dDist = calcAvgDist(dMembers);
-  const winner = cDist <= dDist ? challengerName : defenderName;
+  // Equal average distance = draw (null); otherwise the closer clan wins
+  const winner = cDist === dDist ? null : (cDist < dDist ? challengerName : defenderName);
 
   const display = members => members.map(id =>
     guesses[id] !== undefined
@@ -1025,7 +1026,8 @@ async function gameGuessTheNumber(channel, challengerName, defenderName, allMemb
       .addFields(
         { name: `${challengerName}`, value: display(cMembers) || 'No guesses', inline: true },
         { name: `${defenderName}`,   value: display(dMembers) || 'No guesses', inline: true },
-        { name: '🏆 Winner', value: `**${winner}** had the closest average guess!` },
+        { name: winner ? '🏆 Winner' : '🤝 Draw',
+          value: winner ? `**${winner}** had the closest average guess!` : `Both clans tied on average distance — it's a draw!` },
       )]
   }).catch(() => {});
 
@@ -1063,7 +1065,7 @@ async function gameMissingLetters(channel, challengerName, defenderName, allMemb
     await new Promise(r => setTimeout(r, 2500));
   }
 
-  return scores[challengerName] >= scores[defenderName] ? challengerName : defenderName;
+  return scores[challengerName] === scores[defenderName] ? null : (scores[challengerName] > scores[defenderName] ? challengerName : defenderName);
 }
 
 // ── GAME 7: Hidden Bomb ──────────────────────────────────────────────────────
@@ -1130,7 +1132,7 @@ async function gameHiddenBomb(channel, challengerName, defenderName, gc) {
     await new Promise(r => setTimeout(r, 3000));
   }
 
-  return wins[challengerName] >= wins[defenderName] ? challengerName : defenderName;
+  return wins[challengerName] === wins[defenderName] ? null : (wins[challengerName] > wins[defenderName] ? challengerName : defenderName);
 }
 
 // ── GAME 8: Maths Quiz ───────────────────────────────────────────────────────
@@ -1200,7 +1202,7 @@ async function gameMathsQuiz(channel, challengerName, defenderName, allMembers) 
     await new Promise(r => setTimeout(r, 2500));
   }
 
-  return scores[challengerName] >= scores[defenderName] ? challengerName : defenderName;
+  return scores[challengerName] === scores[defenderName] ? null : (scores[challengerName] > scores[defenderName] ? challengerName : defenderName);
 }
 
 // ─── Main War Runner ──────────────────────────────────────────────────────────
@@ -1250,6 +1252,34 @@ async function runWar(guild, channel, challengerName, defenderName, gameChoice) 
     else if (gameChoice === 8) winnerId = await gameMathsQuiz(channel, challengerName, defenderName, allMembers);
     else winnerId = challengerName;
 
+    // ─── DRAW ─── games now return null when the clans tie. No clan takes a
+    // point (no win or loss is recorded); instead both clans earn participation
+    // XP and both rosters earn LP, and the result is announced as a draw.
+    if (winnerId == null) {
+      const DRAW_XP = 50;   // clan XP each on a draw  (win = 100, loss = 20)
+      const DRAW_LP = 25;   // member LP each on a draw (win = 50,  loss = 10)
+      for (const name of [challengerName, defenderName]) {
+        const c = gc[name];
+        if (!c) continue;
+        c.xp = (c.xp || 0) + DRAW_XP;
+        const roster = [c.leader, ...(c.officers || []), ...(c.members || [])];
+        for (const uid of roster) awardLP(guild.id, uid, DRAW_LP, 'war_draw');
+      }
+      delete activeWars[guild.id];
+      saveData();
+
+      const cR = guild.roles.cache.get(challenger.memberRoleId || challenger.roleId);
+      const dR = guild.roles.cache.get(defender.memberRoleId   || defender.roleId);
+      await channel.send({
+        embeds: [new EmbedBuilder().setColor(0xFFD700).setTitle('🤝 WAR DRAWN!')
+          .setDescription(
+            `${cR ?? `**${challengerName}**`} vs ${dR ?? `**${defenderName}**`}\n\n` +
+            `It's a **draw** — neither clan takes the win. Both clans earn **+${DRAW_XP} XP** for the battle. GG! 🤝`
+          )]
+      }).catch(() => {});
+      return;
+    }
+
     const loserId    = winnerId === challengerName ? defenderName : challengerName;
     const winnerClan = gc[winnerId];
     const loserClan  = gc[loserId];
@@ -1297,14 +1327,16 @@ async function promptGameSelection(guild, channel, challengerClanName) {
   await channel.send({
     embeds: [new EmbedBuilder().setColor(0x5865F2).setTitle('🎮 Choose Your War Game!')
       .setDescription(
-        `<@${clan.leader}> — you challenged this war, so you pick the game!\n\n${menuText}\n\n` +
-        `**Type a number (1–8). You have 30 seconds.**`
+        `<@${clan.leader}> and your officers — your clan challenged this war, so a leader or officer picks the game!\n\n${menuText}\n\n` +
+        `**A leader or officer: type a number (1–8). You have 30 seconds.**`
       )]
   }).catch(() => {});
 
+  // Whoever can start a war (leader OR officers) can also pick the game.
+  const pickers = new Set([clan.leader, ...(clan.officers || [])].filter(Boolean));
   return new Promise(resolve => {
     const col = channel.createMessageCollector({
-      filter: m => m.author.id === clan.leader && !m.author.bot,
+      filter: m => pickers.has(m.author.id) && !m.author.bot,
       time: 30_000,
     });
     col.on('collect', m => {
