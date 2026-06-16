@@ -1649,12 +1649,14 @@ async function handleCommand(interaction, commandName, user, guild) {
     );
 
     let page = 0;
-    await safeReply(interaction, { embeds: [pages[0]], components: [buildRow(0)], flags: 64 });
+    await safeReply(interaction, { embeds: [pages[0]], components: [buildRow(0)] });
     const msg = await interaction.fetchReply().catch(() => null);
     if (!msg) return;
 
     const col = msg.createMessageComponentCollector({
-      filter: i => i.user.id === user.id && ['cmd_prev','cmd_next'].includes(i.customId),
+      // Public menu — let anyone browse the pages (otherwise other viewers who
+      // click get an "interaction failed" error).
+      filter: i => ['cmd_prev','cmd_next'].includes(i.customId),
       time: 120_000,
     });
     col.on('collect', async i => {
