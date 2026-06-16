@@ -510,6 +510,13 @@ new SlashCommandBuilder()
     .addUserOption(o => o.setName('user').setDescription('Member to transfer to').setRequired(true)),
   new SlashCommandBuilder().setName('clan-channel-create').setDescription('Create a private clan channel (Leader only)'),
   new SlashCommandBuilder().setName('clan-channel-delete').setDescription('Delete the private clan channel (Leader only)'),
+  new SlashCommandBuilder().setName('clan-pokemon').setDescription('Turn Pokémon spawns & item drops on/off in your clan channel (Leader/Officer)')
+    .setDMPermission(false)
+    .addStringOption(o => o.setName('state').setDescription('Turn spawns & item drops on or off').setRequired(true)
+      .addChoices(
+        { name: 'off — disable spawns & item drops', value: 'off' },
+        { name: 'on — enable spawns & item drops',  value: 'on'  },
+      )),
   new SlashCommandBuilder().setName('clan-war').setDescription('Challenge another clan to a war (Leader only)')
     .addStringOption(o => o.setName('clan').setDescription('Name of the clan to challenge').setRequired(true)),
   new SlashCommandBuilder().setName('clan-war-accept').setDescription('Accept a pending clan war challenge (Leader only)'),
@@ -1569,6 +1576,29 @@ async function handleCommand(interaction, commandName, user, guild) {
   }
   const gc = getGuildClans(guild.id);
 
+  // ── /clan-pokemon — Leader/Officer toggle for spawns & item drops ───────────
+  if (commandName === 'clan-pokemon') {
+    const result = getUserClan(guild.id, user.id);
+    if (!result) {
+      return safeReply(interaction, { content: '❌ You are not in a clan.', flags: 64 });
+    }
+    const rank = getUserRank(result.clan, user.id);
+    if (rank !== 'Leader' && rank !== 'Officer') {
+      return safeReply(interaction, { content: '❌ Only your clan **Leader** or an **Officer** can change this setting.', flags: 64 });
+    }
+    if (!result.clan.channelId) {
+      return safeReply(interaction, { content: 'ℹ️ Your clan has no clan channel yet, so nothing spawns to toggle. A Leader can create one with `/clan-channel-create`.', flags: 64 });
+    }
+    const turnOff = interaction.options.getString('state') === 'off';
+    result.clan.pokemonDisabled = turnOff;
+    saveData();
+    return safeReply(interaction, {
+      content: turnOff
+        ? `🚫 Pokémon spawns and item drops are now **disabled** in **${result.name}**'s clan channel. Re-enable anytime with \`/clan-pokemon on\`.`
+        : `✅ Pokémon spawns and item drops are now **enabled** in **${result.name}**'s clan channel.`,
+    });
+  }
+
   // ── /libyan-commands and /clan-commands (alias) ─────────────────────────────
   if (commandName === 'clan-commands' || commandName === 'libyan-commands') {
     const pages = [
@@ -1586,6 +1616,7 @@ async function handleCommand(interaction, commandName, user, guild) {
           { name: '🌿 Catching', value: ['`/pokemon-team` — Your Pokémon', '`/pokemon-stats <slot>` — Detailed stats + XP bar', '`/pokemon-view @user` — View someone\'s Pokémon', '`/pokemon-release <slot>` — Release a Pokémon', '`/pokemon-nickname <slot> <name>` — Nickname', '`/pokemon-info <name>` — Look up any Pokémon'].join('\n') },
           { name: '⚔️ Battles', value: ['`/pokemon-challenge @user <slot>` — Challenge to 1v1', '`/pokemon-accept <slot>` — Accept challenge', '`/pokemon-decline` — Decline challenge'].join('\n') },
           { name: '🎒 Items', value: ['`/pokemon-bag` — Your item bag', '`/pokemon-claim` — Claim item drop in clan channel'].join('\n') },
+          { name: '⚙️ Clan Channel', value: '`/clan-pokemon <on/off>` — Turn spawns & item drops on or off in your clan channel *(Leader/Officer)*' },
           { name: '📊 Stats', value: ['`/pokemon-leaderboard` — Clan Pokémon rankings', '`/pokemon-server` — Server top Pokémon by wins', '`/pokedex` — Clan Pokédex completion'].join('\n') },
           { name: '⏱️ Timings', value: 'Wild Pokémon spawn every **5 hours**, flee after **3 hours**\nItem drops every **7 hours**, expire after **5 hours**\nShiny chance: 1 in 50 🌟' },
         ).setFooter({ text: 'Page 2 of 4 — use buttons to navigate' }),
@@ -1598,12 +1629,14 @@ async function handleCommand(interaction, commandName, user, guild) {
           { name: '🏛️ Libyan Points (LP)', value: ['War win: **+50 LP** per member', 'War loss: **+10 LP** per member', 'Catch Pokémon: **+1 LP**', 'Win Pokémon battle: **+15 LP**', 'Lose Pokémon battle: **+3 LP**', 'Ya Rayt reaction received: **+1 LP** each', 'Ya Rayt round winner: **+10 LP** bonus'].join('\n') },
         ).setFooter({ text: 'Page 3 of 4 — use buttons to navigate' }),
 
-      new EmbedBuilder().setColor(0x00AA44).setTitle('🇱🇾 Libyan Community Bot — Page 4/4: Ya Rayt')
+      new EmbedBuilder().setColor(0x00AA44).setTitle('🇱🇾 Libyan Community Bot — Page 4/4: Ya Rayt & Post of the Day')
         .addFields(
           { name: '📖 What is Ya Rayt?', value: '"Ya Rayt" (يا ريت) means **"I wish"** in Libyan Arabic.\nEvery 2 days at **6PM Libya time**, a new round opens.\nAt **8PM Libya time**, the round closes and results are posted.' },
           { name: '🎮 Commands', value: ['`/yarayt <wish>` — Submit your wish for the round (1 per round)', '`/top-yarayt` — Top 10 users by total reactions', '`/top-relatable-yarayt` — Top 10 🇱🇾 Relatable', '`/top-funny-yarayt` — Top 10 😂 Funny', '`/top-wholesome-yarayt` — Top 10 ❤️ Wholesome', '`/top-bold-yarayt` — Top 10 🔥 Bold'].join('\n') },
           { name: '⭐ Reactions', value: ['🇱🇾 — Relatable', '😂 — Funny', '❤️ — Wholesome', '🔥 — Bold'].join('\n') },
           { name: '🏛️ LP Rewards', value: 'Each reaction received = **+1 LP**\nMost reactions in round = **+10 LP** bonus' },
+          { name: '🏆 Post of the Day', value: 'Every day at **9PM Libya time**, the bot crowns the author of the most-reacted message (min **3 reactions**) from the last 24h and gives them a hoisted **Poster of the Day** role for 24h.' },
+          { name: '🎮 POTD Command & Rewards', value: '`/potd-hall-of-fame` — View the all-time Post of the Day winners\nWinner: **+50 LP** · streak bonus (day 2+): **+25 LP/day**' },
         ).setFooter({ text: 'Page 4 of 4 — use buttons to navigate' }),
     ];
 
