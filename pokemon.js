@@ -594,6 +594,19 @@ async function awardBattleXp(pokemon, won) {
 // SPAWN SYSTEM
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// Find the clan that owns a given channel (used to honour a clan's opt-out of
+// Pokémon/item spawns). Returns the clan object, or null.
+function clanForChannel(getGuildClans, channel) {
+  try {
+    const gc = getGuildClans(channel.guild.id);
+    for (const [name, clan] of Object.entries(gc)) {
+      if (name.startsWith('__')) continue;
+      if (clan.channelId === channel.id) return clan;
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
 function scheduleNextSpawn(channel, db, saveData, getGuildClans, getUserClan, awardLP) {
   if (spawnTimers[channel.id]) clearTimeout(spawnTimers[channel.id]);
     spawnTimers[channel.id] = setTimeout(
@@ -603,6 +616,13 @@ function scheduleNextSpawn(channel, db, saveData, getGuildClans, getUserClan, aw
 }
 
 async function triggerSpawn(channel, db, saveData, getGuildClans, getUserClan, awardLP) {
+  // Respect a clan's opt-out: if this channel's clan disabled Pokémon, skip the
+  // spawn but keep the timer ticking so it resumes if they re-enable.
+  const ownerClan = clanForChannel(getGuildClans, channel);
+  if (ownerClan && ownerClan.pokemonDisabled) {
+    scheduleNextSpawn(channel, db, saveData, getGuildClans, getUserClan, awardLP);
+    return;
+  }
   // Don't spawn if one is already active here
   if (activeSpawns[channel.id]) {
     scheduleNextSpawn(channel, db, saveData, getGuildClans, getUserClan, awardLP);
@@ -672,7 +692,7 @@ async function triggerSpawn(channel, db, saveData, getGuildClans, getUserClan, a
     let msg;
     try {
       msg = await channel.send({
-        content: `🌿 **A wild Pokémon has appeared!** ${isShiny ? '✨ It\'s shiny!' : ''}`,
+        content: `🌿 **A wild Pokémon has appeared!** ${isShiny ? '✨ It\'s shiny!' : ''}\n-# Not into Pokémon? A clan Leader or Officer can turn spawns & item drops off here with \`/clan-pokemon off\``,
         embeds: [embed],
         components: initialRows,
       });
@@ -1979,6 +1999,13 @@ module.exports = function initPokemon({ client, db, saveData, getGuildClans, get
   }
 
   async function triggerDrop(channel) {
+    // Respect a clan's opt-out: skip item drops if this channel's clan disabled
+    // Pokémon, but keep the timer ticking so it resumes if they re-enable.
+    const ownerClan = clanForChannel(getGuildClans, channel);
+    if (ownerClan && ownerClan.pokemonDisabled) {
+      scheduleNextDrop(channel);
+      return;
+    }
     if (activeDrops[channel.id]) {
       scheduleNextDrop(channel);
       return;
@@ -1995,7 +2022,8 @@ module.exports = function initPokemon({ client, db, saveData, getGuildClans, get
           `**${item.emoji} ${item.name}** has appeared in the channel!\n\n` +
           `*${item.description}*\n\n` +
           `Use \`/pokemon-claim\` to claim it! First come, first served.\n` +
-          `⏰ Expires in **30 minutes**.`
+          `⏰ Expires in **30 minutes**.\n\n` +
+          `-# Not into Pokémon? A clan Leader or Officer can turn spawns & item drops off here with \`/clan-pokemon off\``
         )
         .setFooter({ text: 'Only one player can claim this!' });
 
