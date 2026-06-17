@@ -2,28 +2,28 @@
 // A Mudae-inspired collection game, customised for the Libyan server.
 //
 //  • Members OPT IN to become claimable cards (their Discord name + avatar).
-//  • /roll drops a random opted-in member as a card after a 5-second warning.
-//    Anyone can Claim it (free-snipe) within 60 seconds — race to click.
-//  • If the rolled member is ALREADY owned, a 💵 Dinar Drop button appears
+//  • /gacha-roll drops a random opted-in member as a card after a 5-second
+//    warning. Anyone can Claim it (free-snipe) within 60 seconds — race to click.
+//  • If the rolled member is ALREADY owned, a 💵 Claim Dinar button appears
 //    instead — first to click pockets some Dinar.
-//  • /wish pings a member that someone wants them (and nudges them to opt in).
-//    When a wishlisted member is rolled, their wishers get pinged.
+//  • /gacha-wish pings a member that someone wants them (and nudges them to opt
+//    in). When a wishlisted member is rolled, their wishers get pinged.
 //  • Rarity (Common→Mythic) is LIVE — ranked from each member's activity score
 //    (LP, Pokémon, Ya Rayt, POTD) against the rest of the pool, so it shifts as
-//    the server grows more active. Rarer cards are worth more Dinar and appear
-//    less often.
-//  • Earn Dinar: /daily, releasing members, Dinar drops, and (via awardDinar)
-//    clan wars, Ya Rayt, POTD, and Pokémon. Spend it on rerolls and more.
+//    the server grows. Rarer cards are worth more Dinar and appear less often.
+//  • Earn Dinar: /gacha-daily, releasing members, Dinar drops, and (via the
+//    exported awardDinar) clan wars, Ya Rayt, POTD, and Pokémon.
 //
-// COOLDOWNS: roll is GLOBAL once per hour (anti-spam); claim is once per day
-// per person; a dropped card expires after 60 seconds.
+// COOLDOWNS: roll is PER-USER, once every 2 hours; claim is once per day per
+// person; a dropped card expires after 60 seconds.
+//
+// Every command is prefixed `gacha-` so typing "gacha" in Discord lists them all.
 //
 // Wiring in index.js:
 //   1. const { getGachaCommands, initGacha, awardDinar } = require('./gacha');
 //   2. add ...getGachaCommands() to the command-registration array
 //   3. call initGacha({ client, db, saveData }); near your other init functions
-//   4. award Dinar from other systems with:
-//        awardDinar(db, guildId, userId, amount, saveData)
+//   4. award Dinar from other systems: awardDinar(db, guildId, userId, amount, saveData)
 
 const {
   SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits,
@@ -37,30 +37,28 @@ const TIER_VALUE  = { Common: 100, Rare: 500, Epic: 1500, Legendary: 5000, Mythi
 const TIER_WEIGHT = { Common: 100, Rare: 40, Epic: 15, Legendary: 5, Mythic: 1 };   // roll odds
 const TIER_COLOR  = { Common: 0x95A5A6, Rare: 0x3498DB, Epic: 0x9B59B6, Legendary: 0xF1C40F, Mythic: 0xE74C3C };
 
-const ROLL_COOLDOWN_MS  = 60 * 60 * 1000;   // GLOBAL: one roll per hour for the whole server
-const CLAIM_COOLDOWN_MS = 24 * 60 * 60 * 1000; // per-user: one claim per day
-const ROLL_DROP_DELAY_MS = 5 * 1000;        // warning before the card reveals
-const ROLL_EXPIRY_MS     = 60 * 1000;       // claim window
+const ROLL_COOLDOWN_MS   = 2 * 60 * 60 * 1000;   // PER-USER: one roll every 2 hours
+const CLAIM_COOLDOWN_MS  = 24 * 60 * 60 * 1000;  // per-user: one claim per day
+const ROLL_DROP_DELAY_MS = 5 * 1000;             // warning before the card reveals
+const ROLL_EXPIRY_MS     = 60 * 1000;            // claim window
 const RARITY_RECALC_MS   = 6 * 60 * 60 * 1000;
 const TRADE_TTL_MS       = 5 * 60 * 1000;
-const DAILY_BASE         = 500;             // base /daily Dinar
+const DAILY_BASE         = 500;
 const DINAR_DROP_MIN     = 50;
 const DINAR_DROP_MAX     = 250;
-const RELEASE_REFUND     = 0.5;             // fraction of value returned on release
+const RELEASE_REFUND     = 0.5;
 
 function defaults() {
   return {
     enabled:        true,
     channels:       [],     // allowed channel IDs; [] = anywhere
     tradingEnabled: true,
-    lastRollTs:     0,       // GLOBAL roll cooldown timestamp
     lastRarityCalc: 0,
-    activeRoll:     null,    // { memberId, type, claimed, dinarClaimed, expiresAt }
     pool:        {},   // userId -> { rarity, score, value, rarityOverride, valueOverride }
     owners:      {},   // claimedUserId -> ownerId
     wishlists:   {},   // userId -> [wishedUserId, ...]
     dinar:       {},   // userId -> balance
-    cooldowns:   {},   // userId -> { claim, daily }
+    cooldowns:   {},   // userId -> { roll, claim, daily }
     stats:       {},   // userId -> { rolls, claims }
     trades:      {},   // tradeId -> { from, to, give, receive, ts }
   };
@@ -146,14 +144,12 @@ function dissolveMember(s, uid) {
   delete s.pool[uid];
   for (const cid of Object.keys(s.owners)) if (cid === uid) delete s.owners[cid];
   for (const wid of Object.keys(s.wishlists)) s.wishlists[wid] = (s.wishlists[wid] || []).filter(x => x !== uid);
-  if (s.activeRoll && s.activeRoll.memberId === uid) s.activeRoll = null;
 }
 
 const channelAllowed = (s, channelId) => !s.channels.length || s.channels.includes(channelId);
 
-// Build the card embed for a rolled member
 function cardEmbed(member, entry, ownerId) {
-  const name = member?.displayName || `User`;
+  const name = member?.displayName || 'User';
   const roles = member?.roles?.cache
     ? [...member.roles.cache.values()].filter(r => r.name !== '@everyone').sort((a, b) => b.position - a.position).slice(0, 4).map(r => r.name)
     : [];
@@ -167,24 +163,25 @@ function cardEmbed(member, entry, ownerId) {
   return embed;
 }
 
-// ─── Command definitions ─────────────────────────────────────────────────────
+// ─── Command definitions (all prefixed gacha-) ───────────────────────────────
 function getGachaCommands() {
   return [
-    new SlashCommandBuilder().setName('roll').setDescription('Roll a random opted-in member as a card').setDMPermission(false),
+    new SlashCommandBuilder().setName('gacha-roll').setDescription('Roll a random opted-in member as a card').setDMPermission(false),
     new SlashCommandBuilder().setName('gacha-optin').setDescription('Become a claimable card in the collection game').setDMPermission(false),
     new SlashCommandBuilder().setName('gacha-optout').setDescription('Leave the game — removes you and dissolves all claims/wishlists of you').setDMPermission(false),
-    new SlashCommandBuilder().setName('wish').setDescription('Add a member to your wishlist (pings them)').setDMPermission(false)
+    new SlashCommandBuilder().setName('gacha-wish').setDescription('Add a member to your wishlist (pings them)').setDMPermission(false)
       .addUserOption(o => o.setName('user').setDescription('The member you want').setRequired(true)),
-    new SlashCommandBuilder().setName('wishlist').setDescription('View or clear your wishlist').setDMPermission(false)
+    new SlashCommandBuilder().setName('gacha-wishlist').setDescription('View or clear your wishlist').setDMPermission(false)
       .addStringOption(o => o.setName('action').setDescription('view or remove').setRequired(false)
         .addChoices({ name: 'view', value: 'view' }, { name: 'remove', value: 'remove' }))
       .addUserOption(o => o.setName('user').setDescription('Member to remove').setRequired(false)),
-    new SlashCommandBuilder().setName('daily').setDescription('Claim your daily Dinar').setDMPermission(false),
-    new SlashCommandBuilder().setName('dinar').setDescription('Check a Dinar balance').setDMPermission(false)
+    new SlashCommandBuilder().setName('gacha-daily').setDescription('Claim your daily Dinar').setDMPermission(false),
+    new SlashCommandBuilder().setName('gacha-dinar').setDescription('Check a Dinar balance').setDMPermission(false)
       .addUserOption(o => o.setName('user').setDescription('Whose balance (default: you)').setRequired(false)),
-    new SlashCommandBuilder().setName('collection').setDescription('View a collection').setDMPermission(false)
+    new SlashCommandBuilder().setName('gacha-collection').setDescription('View a collection').setDMPermission(false)
       .addUserOption(o => o.setName('user').setDescription('Whose collection (default: you)').setRequired(false)),
-    new SlashCommandBuilder().setName('release').setDescription('Release a member you own for Dinar').setDMPermission(false)
+    new SlashCommandBuilder().setName('gacha-rarest').setDescription('Show the top 15 rarest cards in the server').setDMPermission(false),
+    new SlashCommandBuilder().setName('gacha-release').setDescription('Release a member you own for Dinar').setDMPermission(false)
       .addUserOption(o => o.setName('user').setDescription('The member to release').setRequired(true)),
     new SlashCommandBuilder().setName('gacha-trade').setDescription('Propose a trade with another collector').setDMPermission(false)
       .addUserOption(o => o.setName('with').setDescription('The collector to trade with').setRequired(true))
@@ -202,6 +199,10 @@ function getGachaCommands() {
       .addSubcommand(sc => sc.setName('channel').setDescription('Restrict which channels the game works in')
         .addStringOption(o => o.setName('action').setDescription('add/remove/clear').setRequired(true).addChoices({ name: 'add', value: 'add' }, { name: 'remove', value: 'remove' }, { name: 'clear (allow all)', value: 'clear' }))
         .addChannelOption(o => o.setName('channel').setDescription('Channel (for add/remove)').setRequired(false)))
+      .addSubcommand(sc => sc.setName('optin').setDescription('Force a member into the game (make them claimable)')
+        .addUserOption(o => o.setName('user').setDescription('The member').setRequired(true)))
+      .addSubcommand(sc => sc.setName('resetroll').setDescription('Reset roll cooldown for a member, or everyone if none given')
+        .addUserOption(o => o.setName('user').setDescription('The member (leave empty for everyone)').setRequired(false)))
       .addSubcommand(sc => sc.setName('override').setDescription('Override a member\'s rarity and/or Dinar value')
         .addUserOption(o => o.setName('user').setDescription('The member').setRequired(true))
         .addStringOption(o => o.setName('rarity').setDescription('Force a rarity (or clear)').setRequired(false).addChoices(...TIERS.map(t => ({ name: t, value: t })), { name: 'clear override', value: 'clear' }))
@@ -220,9 +221,14 @@ function getGachaCommands() {
 // ─── Init ────────────────────────────────────────────────────────────────────
 function initGacha({ client, db, saveData }) {
   const CMDS = new Set([
-    'roll', 'gacha-optin', 'gacha-optout', 'wish', 'wishlist', 'daily', 'dinar',
-    'collection', 'release', 'gacha-trade', 'gacha-leaderboard', 'gacha-admin',
+    'gacha-roll', 'gacha-optin', 'gacha-optout', 'gacha-wish', 'gacha-wishlist', 'gacha-daily',
+    'gacha-dinar', 'gacha-collection', 'gacha-rarest', 'gacha-release', 'gacha-trade', 'gacha-leaderboard', 'gacha-admin',
   ]);
+
+  // Transient live-roll state, keyed by message ID (kept in memory, NOT in db,
+  // so it never bloats Mongo). Multiple cards can be live at once now that rolls
+  // are per-user. { guildId, memberId, type, claimed, dinarClaimed, expiresAt }
+  const liveRolls = {};
 
   // Periodic rarity recompute across all guilds
   setInterval(() => {
@@ -247,15 +253,16 @@ function initGacha({ client, db, saveData }) {
       }
 
       switch (interaction.commandName) {
-        case 'roll':              return cmdRoll(interaction, s);
+        case 'gacha-roll':        return cmdRoll(interaction, s);
         case 'gacha-optin':       return cmdOptIn(interaction, s);
         case 'gacha-optout':      return cmdOptOut(interaction, s);
-        case 'wish':              return cmdWish(interaction, s);
-        case 'wishlist':          return cmdWishlist(interaction, s);
-        case 'daily':             return cmdDaily(interaction, s);
-        case 'dinar':             return cmdDinar(interaction, s);
-        case 'collection':        return cmdCollection(interaction, s);
-        case 'release':           return cmdRelease(interaction, s);
+        case 'gacha-wish':        return cmdWish(interaction, s);
+        case 'gacha-wishlist':    return cmdWishlist(interaction, s);
+        case 'gacha-daily':       return cmdDaily(interaction, s);
+        case 'gacha-dinar':       return cmdDinar(interaction, s);
+        case 'gacha-collection':  return cmdCollection(interaction, s);
+        case 'gacha-rarest':      return cmdRarest(interaction, s);
+        case 'gacha-release':     return cmdRelease(interaction, s);
         case 'gacha-trade':       return cmdTrade(interaction, s);
         case 'gacha-leaderboard': return cmdLeaderboard(interaction, s);
         case 'gacha-admin':       return cmdAdmin(interaction, s);
@@ -268,58 +275,54 @@ function initGacha({ client, db, saveData }) {
     }
   });
 
-  // ── /roll ────────────────────────────────────────────────────────────────
+  // ── /gacha-roll ────────────────────────────────────────────────────────────
   async function cmdRoll(interaction, s) {
     const uid = interaction.user.id;
     ensureFreshRarities(db, interaction.guild.id);
     if (!Object.keys(s.pool).length) return interaction.reply(eph('Nobody has opted in yet. Be the first with `/gacha-optin`!'));
 
-    // GLOBAL hourly cooldown
-    const wait = (s.lastRollTs || 0) + ROLL_COOLDOWN_MS - Date.now();
+    // PER-USER cooldown: one roll every 2 hours
+    const cd = (s.cooldowns[uid] ||= {});
+    const wait = (cd.roll || 0) + ROLL_COOLDOWN_MS - Date.now();
     if (wait > 0) {
-      const m = Math.ceil(wait / 60000);
-      return interaction.reply(eph(`⏳ A roll was used recently. The next server roll is available in **${m} minute${m === 1 ? '' : 's'}**.`));
+      const h = Math.floor(wait / 3600000), m = Math.ceil((wait % 3600000) / 60000);
+      return interaction.reply(eph(`⏳ You can roll again in **${h}h ${m}m**.`));
     }
-    s.lastRollTs = Date.now();   // consume the slot immediately (anti double-roll)
+    cd.roll = Date.now();
+    (s.stats[uid] ||= { rolls: 0, claims: 0 }).rolls++;
 
     const rolledId = weightedRoll(s);
     const entry = s.pool[rolledId];
     const ownerId = s.owners[rolledId];
     let member; try { member = await interaction.guild.members.fetch(rolledId); } catch {}
 
-    // Nudge a roller who isn't opted in
-    if (!s.pool[uid]) interaction.followUp(eph('💡 You\'re not opted in, so others can\'t roll *you*. Join the game with `/gacha-optin`!')).catch(() => {});
+    if (!s.pool[uid]) interaction.followUp(eph('💡 You\'re not opted in, so others can\'t roll *you*. Join with `/gacha-optin`!')).catch(() => {});
 
     await interaction.reply('🎴 **A card is dropping in 5 seconds…**');
+    saveData(interaction.guild.id);
 
     setTimeout(async () => {
       try {
         const embed = cardEmbed(member, entry, ownerId);
-        const wishers = Object.keys(s.wishlists).filter(w => (s.wishlists[w] || []).includes(rolledId) && w !== rolledId);
+        const wishers = Object.keys(s.wishlists).filter(w => (s.wishlists[w] || []).includes(rolledId) && w !== rolledId && w !== uid);
         const name = member?.displayName || 'this member';
-
+        let row, content;
         if (ownerId) {
-          // Already owned → Dinar Drop
-          s.activeRoll = { memberId: rolledId, type: 'dinardrop', dinarClaimed: false, expiresAt: Date.now() + ROLL_EXPIRY_MS };
-          const row = new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId('gacha_dinardrop').setLabel('Dinar Drop').setStyle(ButtonStyle.Success).setEmoji('💵'));
-          const content = wishers.length ? `🔔 ${wishers.map(w => `<@${w}>`).join(' ')} — **${name}** appeared (already owned)!` : undefined;
-          await interaction.editReply({ content, embeds: [embed], components: [row], allowedMentions: { users: wishers } });
+          row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId('gacha_dinardrop').setLabel('Claim Dinar').setStyle(ButtonStyle.Success).setEmoji('💵'));
+          content = wishers.length ? `🔔 ${wishers.map(w => `<@${w}>`).join(' ')} — **${name}** appeared (already owned)!` : undefined;
         } else {
-          // Claimable
-          s.activeRoll = { memberId: rolledId, type: 'claim', claimed: false, expiresAt: Date.now() + ROLL_EXPIRY_MS };
-          const row = new ActionRowBuilder().addComponents(
+          row = new ActionRowBuilder().addComponents(
             new ButtonBuilder().setCustomId(`gacha_claim:${rolledId}`).setLabel('Claim').setStyle(ButtonStyle.Success).setEmoji('🎴'));
-          const content = wishers.length ? `🔔 ${wishers.map(w => `<@${w}>`).join(' ')} — one of your wished members appeared: **${name}**!` : undefined;
-          await interaction.editReply({ content, embeds: [embed], components: [row], allowedMentions: { users: wishers } });
+          content = wishers.length ? `🔔 ${wishers.map(w => `<@${w}>`).join(' ')} — one of your wished members appeared: **${name}**!` : undefined;
         }
-        saveData(interaction.guild.id);
+        const msg = await interaction.editReply({ content, embeds: [embed], components: [row], allowedMentions: { users: wishers } });
+        liveRolls[msg.id] = { guildId: interaction.guild.id, memberId: rolledId, type: ownerId ? 'dinardrop' : 'claim', claimed: false, dinarClaimed: false, expiresAt: Date.now() + ROLL_EXPIRY_MS };
 
-        // Expire after 60s
-        setTimeout(async () => {
-          if (s.activeRoll && s.activeRoll.memberId === rolledId && !s.activeRoll.claimed && !s.activeRoll.dinarClaimed) {
-            s.activeRoll = null;
-            saveData(interaction.guild.id);
+        setTimeout(() => {
+          const lr = liveRolls[msg.id];
+          if (lr && !lr.claimed && !lr.dinarClaimed) {
+            delete liveRolls[msg.id];
             interaction.editReply({ components: [] }).catch(() => {});
           }
         }, ROLL_EXPIRY_MS).unref?.();
@@ -345,7 +348,7 @@ function initGacha({ client, db, saveData }) {
     return interaction.reply(eph('👋 You\'ve opted out. You\'ve been removed from the pool, and every claim and wishlist of you has been dissolved. Your own collection is untouched.'));
   }
 
-  // ── /wish + /wishlist ──────────────────────────────────────────────────────
+  // ── /gacha-wish + /gacha-wishlist ──────────────────────────────────────────
   async function cmdWish(interaction, s) {
     const uid = interaction.user.id;
     const target = interaction.options.getUser('user');
@@ -356,11 +359,9 @@ function initGacha({ client, db, saveData }) {
     if (wl.length >= 20)        return interaction.reply(eph('Your wishlist is full (20 max).'));
     wl.push(target.id);
     saveData(interaction.guild.id);
-
-    // Public ping so the target sees they're wanted (drives opt-ins)
     const optedIn = !!s.pool[target.id];
     const msg = optedIn
-      ? `⭐ <@${target.id}> — **${interaction.user.username}** added you to their wishlist! They'll be racing to claim you when you're rolled.`
+      ? `⭐ <@${target.id}> — **${interaction.user.username}** added you to their wishlist! They'll race to claim you when you're rolled.`
       : `⭐ <@${target.id}> — **${interaction.user.username}** wants to collect you, but you're not in the game yet! Use \`/gacha-optin\` to become a claimable card.`;
     await interaction.reply({ content: msg, allowedMentions: { users: [target.id] } });
   }
@@ -368,7 +369,7 @@ function initGacha({ client, db, saveData }) {
     const uid = interaction.user.id;
     const action = interaction.options.getString('action') || 'view';
     const wl = (s.wishlists[uid] ||= []);
-    if (action === 'view') return interaction.reply(eph(wl.length ? `⭐ Your wishlist: ${wl.map(w => `<@${w}>`).join(', ')}` : 'Your wishlist is empty. Add someone with `/wish`.'));
+    if (action === 'view') return interaction.reply(eph(wl.length ? `⭐ Your wishlist: ${wl.map(w => `<@${w}>`).join(', ')}` : 'Your wishlist is empty. Add someone with `/gacha-wish`.'));
     const target = interaction.options.getUser('user');
     if (!target) return interaction.reply(eph('Pick a member to remove.'));
     s.wishlists[uid] = wl.filter(x => x !== target.id);
@@ -376,7 +377,7 @@ function initGacha({ client, db, saveData }) {
     return interaction.reply(eph(`Removed <@${target.id}> from your wishlist.`));
   }
 
-  // ── /daily + /dinar ────────────────────────────────────────────────────────
+  // ── /gacha-daily + /gacha-dinar ────────────────────────────────────────────
   function cmdDaily(interaction, s) {
     const uid = interaction.user.id;
     const cd = (s.cooldowns[uid] ||= {});
@@ -398,7 +399,7 @@ function initGacha({ client, db, saveData }) {
     return interaction.reply(eph(`💰 **${target.username}** has **${fmt(dinarOf(s, target.id))} Dinar**.`));
   }
 
-  // ── /collection ────────────────────────────────────────────────────────────
+  // ── /gacha-collection ──────────────────────────────────────────────────────
   function cmdCollection(interaction, s) {
     const target = interaction.options.getUser('user') || interaction.user;
     ensureFreshRarities(db, interaction.guild.id);
@@ -410,12 +411,28 @@ function initGacha({ client, db, saveData }) {
     for (const t of [...TIERS].reverse()) if (byTier[t]?.length) lines.push(`${TIER_EMOJI[t]} **${t}** (${byTier[t].length}): ${byTier[t].map(c => `<@${c}>`).join(', ')}`);
     const embed = new EmbedBuilder().setColor(0x9B59B6)
       .setTitle(`🎴 ${target.username}'s Collection`).setThumbnail(target.displayAvatarURL())
-      .setDescription(owned.length ? lines.join('\n') : '_Empty — roll with `/roll` and claim someone!_')
+      .setDescription(owned.length ? lines.join('\n') : '_Empty — roll with `/gacha-roll` and claim someone!_')
       .addFields({ name: 'Members owned', value: `${owned.length}`, inline: true }, { name: 'Total value', value: `💰 ${fmt(totalValue)} Dinar`, inline: true });
     return interaction.reply({ embeds: [embed] });
   }
 
-  // ── /release (divorce) ─────────────────────────────────────────────────────
+  // ── /gacha-rarest (top 15) ─────────────────────────────────────────────────
+  function cmdRarest(interaction, s) {
+    ensureFreshRarities(db, interaction.guild.id);
+    const ids = Object.keys(s.pool);
+    if (!ids.length) return interaction.reply(eph('Nobody has opted in yet.'));
+    const ranked = ids.map(id => ({ id, ...s.pool[id] }))
+      .sort((a, b) => (b.value - a.value) || (b.score - a.score))
+      .slice(0, 15);
+    const lines = ranked.map((e, i) => {
+      const owner = s.owners[e.id] ? `owned by <@${s.owners[e.id]}>` : '_unclaimed_';
+      return `**${i + 1}.** ${TIER_EMOJI[e.rarity]} <@${e.id}> · ${e.rarity} · 💰 ${fmt(e.value)} · ${owner}`;
+    });
+    const embed = new EmbedBuilder().setColor(0xE74C3C).setTitle('💎 Top 15 Rarest Cards').setDescription(lines.join('\n'));
+    return interaction.reply({ embeds: [embed] });
+  }
+
+  // ── /gacha-release (divorce) ───────────────────────────────────────────────
   function cmdRelease(interaction, s) {
     const uid = interaction.user.id;
     const target = interaction.options.getUser('user');
@@ -474,8 +491,8 @@ function initGacha({ client, db, saveData }) {
     if (action === 'gacha_claim') {
       const memberId = arg;
       const uid = interaction.user.id;
-      const ar = s.activeRoll;
-      if (!ar || ar.memberId !== memberId || ar.type !== 'claim' || ar.claimed || Date.now() > ar.expiresAt) {
+      const lr = liveRolls[interaction.message.id];
+      if (!lr || lr.memberId !== memberId || lr.type !== 'claim' || lr.claimed || Date.now() > lr.expiresAt) {
         return interaction.reply(eph('⌛ Too late — this card is no longer claimable.'));
       }
       if (s.owners[memberId]) return interaction.reply(eph(`Already owned by <@${s.owners[memberId]}>.`));
@@ -486,10 +503,11 @@ function initGacha({ client, db, saveData }) {
         const left = CLAIM_COOLDOWN_MS - csince;
         return interaction.reply(eph(`⏳ You've already claimed today. Next claim in ${Math.floor(left / 3600000)}h ${Math.ceil((left % 3600000) / 60000)}m.`));
       }
-      ar.claimed = true;
+      lr.claimed = true;
       s.owners[memberId] = uid;
       cd.claim = Date.now();
       (s.stats[uid] ||= { rolls: 0, claims: 0 }).claims++;
+      delete liveRolls[interaction.message.id];
       saveData(interaction.guild.id);
       await interaction.update({ components: [] }).catch(() => {});
       return interaction.followUp({ content: `🎴 <@${uid}> claimed <@${memberId}>!` }).catch(() => {});
@@ -497,13 +515,14 @@ function initGacha({ client, db, saveData }) {
 
     if (action === 'gacha_dinardrop') {
       const uid = interaction.user.id;
-      const ar = s.activeRoll;
-      if (!ar || ar.type !== 'dinardrop' || ar.dinarClaimed || Date.now() > ar.expiresAt) {
+      const lr = liveRolls[interaction.message.id];
+      if (!lr || lr.type !== 'dinardrop' || lr.dinarClaimed || Date.now() > lr.expiresAt) {
         return interaction.reply(eph('⌛ Too late — the Dinar has already been grabbed.'));
       }
-      ar.dinarClaimed = true;
+      lr.dinarClaimed = true;
       const amount = DINAR_DROP_MIN + Math.floor(Math.random() * (DINAR_DROP_MAX - DINAR_DROP_MIN + 1));
       addDinar(s, uid, amount);
+      delete liveRolls[interaction.message.id];
       saveData(interaction.guild.id);
       await interaction.update({ components: [] }).catch(() => {});
       return interaction.followUp({ content: `💵 <@${uid}> grabbed **${fmt(amount)} Dinar**!` }).catch(() => {});
@@ -547,6 +566,24 @@ function initGacha({ client, db, saveData }) {
       if (act === 'add') { if (!s.channels.includes(ch.id)) s.channels.push(ch.id); } else s.channels = s.channels.filter(c => c !== ch.id);
       saveData(gid);
       return interaction.reply(eph(`✅ Allowed channels: ${s.channels.length ? s.channels.map(c => `<#${c}>`).join(', ') : 'everywhere'}.`));
+    }
+    if (sub === 'optin') {
+      const u = interaction.options.getUser('user');
+      if (s.pool[u.id]) return interaction.reply(eph(`<@${u.id}> is already opted in.`));
+      s.pool[u.id] = { rarity: 'Common', score: 0, value: TIER_VALUE.Common, rarityOverride: null, valueOverride: null };
+      recomputeRarities(db, gid); saveData(gid);
+      return interaction.reply(eph(`✅ Forced <@${u.id}> into the game as ${TIER_EMOJI[s.pool[u.id].rarity]} ${s.pool[u.id].rarity}.`));
+    }
+    if (sub === 'resetroll') {
+      const u = interaction.options.getUser('user');
+      if (u) {
+        if (s.cooldowns[u.id]) delete s.cooldowns[u.id].roll;
+        saveData(gid);
+        return interaction.reply(eph(`✅ Roll cooldown reset for <@${u.id}>.`));
+      }
+      for (const k of Object.keys(s.cooldowns)) delete s.cooldowns[k].roll;
+      saveData(gid);
+      return interaction.reply(eph('✅ Roll cooldown reset for **everyone**.'));
     }
     if (sub === 'override') {
       const u = interaction.options.getUser('user');
