@@ -1690,6 +1690,11 @@ async function handleCommand(interaction, commandName, user, guild) {
     const yrData   = db[guild.id]?.__yarayt?.users?.[target.id] || {};
     const yrTotal  = (yrData.relatable || 0) + (yrData.funny || 0) + (yrData.wholesome || 0) + (yrData.bold || 0);
 
+    // Get Post of the Day stats
+    const potdData       = db[guild.id]?.__potd?.hallOfFame?.[target.id] || {};
+    const potdWins       = potdData.wins || 0;
+    const potdBestStreak = potdData.bestStreak || 0;
+
     // Get clan
     const targetClan = getUserClan(guild.id, target.id);
 
@@ -1714,8 +1719,11 @@ async function handleCommand(interaction, commandName, user, guild) {
         { name: '🇱🇾 Ya Rayt LP',    value: `${lp.yaraytLP} LP`,        inline: true },
         { name: '❤️ Total Reactions', value: `${yrTotal}`,               inline: true },
         { name: '\u200b',             value: '\u200b',                    inline: true },
+        { name: '⭐ POTD Wins',        value: `${potdWins}`,              inline: true },
+        { name: '🔥 Best POTD Streak', value: `${potdBestStreak}`,        inline: true },
+        { name: '\u200b',             value: '\u200b',                    inline: true },
       )
-      .setFooter({ text: 'LP earned across clan wars, Pokémon and Ya Rayt' });
+      .setFooter({ text: 'LP earned across clan wars, Pokémon, Ya Rayt and Post of the Day' });
 
     return safeReply(interaction, { embeds: [embed], flags: isSelf ? 64 : 0 });
   }
