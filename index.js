@@ -536,6 +536,7 @@ const initBlackMarketExchange = require('./black-market-exchange');
 //const initJobs = require('./jobs');
 const { initPOTD } = require('./potd');
 const { getLibyaChatCommands, initLibyaChat } = require('./libya-chat');
+const { getGachaCommands, initGacha, awardDinar } = require('./gacha');
 //const initTranslator = require('./translator');
 
 function getAllCommands() {
@@ -588,7 +589,13 @@ function getAllCommands() {
   } catch (e) {
     console.error('Could not load libya-chat.js commands:', e.message);
   }
-  _allCommands = [...commands, ...pokeCommands, ...yaraytCommands, ...exchangeCommands, ...newsCommands, ...jobsCommands, ...potdCommands, ...translatorCommands, ...libyaChatCommands];
+  let gachaCommands = [];
+  try {
+    gachaCommands = getGachaCommands();
+  } catch (e) {
+    console.error('Could not load gacha.js commands:', e.message);
+  }
+  _allCommands = [...commands, ...pokeCommands, ...yaraytCommands, ...exchangeCommands, ...newsCommands, ...jobsCommands, ...potdCommands, ...translatorCommands, ...libyaChatCommands, ...gachaCommands];
   console.log(`📋 Command list built: ${_allCommands.map(c => c.name).join(', ')}`);
   return _allCommands;
 }
@@ -1310,7 +1317,7 @@ async function runWar(guild, channel, challengerName, defenderName, gameChoice) 
         if (!c) continue;
         c.xp = (c.xp || 0) + DRAW_XP;
         const roster = [c.leader, ...(c.officers || []), ...(c.members || [])];
-        for (const uid of roster) awardLP(guild.id, uid, DRAW_LP, 'war_draw');
+        for (const uid of roster) { awardLP(guild.id, uid, DRAW_LP, 'war_draw'); awardDinar(db, guild.id, uid, 250, saveData); }
       }
       delete activeWars[guild.id];
       saveData();
@@ -1336,7 +1343,7 @@ async function runWar(guild, channel, challengerName, defenderName, gameChoice) 
     // Award Libyan Points to all members of both clans
     if (winnerClan) {
       const winMembers = [winnerClan.leader, ...(winnerClan.officers || []), ...(winnerClan.members || [])];
-      for (const uid of winMembers) awardLP(guild.id, uid, 50, 'war_win');
+      for (const uid of winMembers) { awardLP(guild.id, uid, 50, 'war_win'); awardDinar(db, guild.id, uid, 1000, saveData); }
     }
     if (loserClan) {
       const loseMembers = [loserClan.leader, ...(loserClan.officers || []), ...(loserClan.members || [])];
@@ -2327,6 +2334,9 @@ initPOTD({ client, db, saveData, awardLP });
 
 // Libya Chat / Announce (owner-only bot messages)
 initLibyaChat(client);
+
+// Qa'ima — Server Collection Game (Dinar economy)
+initGacha({ client, db, saveData });
 
 // Translator (reaction-based Arabic → English)
 //initTranslator(client, db, saveData);
