@@ -1317,7 +1317,7 @@ async function runWar(guild, channel, challengerName, defenderName, gameChoice) 
         if (!c) continue;
         c.xp = (c.xp || 0) + DRAW_XP;
         const roster = [c.leader, ...(c.officers || []), ...(c.members || [])];
-        for (const uid of roster) { awardLP(guild.id, uid, DRAW_LP, 'war_draw'); awardDinar(db, guild.id, uid, 250, saveData); }
+        for (const uid of roster) { awardLP(guild.id, uid, DRAW_LP, 'war_draw'); awardDinar(db, guild.id, uid, 50, saveData); }
       }
       delete activeWars[guild.id];
       saveData();
@@ -1343,7 +1343,7 @@ async function runWar(guild, channel, challengerName, defenderName, gameChoice) 
     // Award Libyan Points to all members of both clans
     if (winnerClan) {
       const winMembers = [winnerClan.leader, ...(winnerClan.officers || []), ...(winnerClan.members || [])];
-      for (const uid of winMembers) { awardLP(guild.id, uid, 50, 'war_win'); awardDinar(db, guild.id, uid, 1000, saveData); }
+      for (const uid of winMembers) { awardLP(guild.id, uid, 50, 'war_win'); awardDinar(db, guild.id, uid, 100, saveData); }
     }
     if (loserClan) {
       const loseMembers = [loserClan.leader, ...(loserClan.officers || []), ...(loserClan.members || [])];
