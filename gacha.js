@@ -176,8 +176,12 @@ function getGachaCommands() {
         .addChoices({ name: 'view', value: 'view' }, { name: 'remove', value: 'remove' }))
       .addUserOption(o => o.setName('user').setDescription('Member to remove').setRequired(false)),
     new SlashCommandBuilder().setName('gacha-daily').setDescription('Claim your daily Dinar').setDMPermission(false),
-    new SlashCommandBuilder().setName('gacha-dinar').setDescription('Check a Dinar balance').setDMPermission(false)
+    new SlashCommandBuilder().setName('dinar').setDescription('Check a Dinar balance').setDMPermission(false)
       .addUserOption(o => o.setName('user').setDescription('Whose balance (default: you)').setRequired(false)),
+    new SlashCommandBuilder().setName('dinar-set').setDescription('Set a member\'s Dinar balance exactly (admin only)')
+      .setDMPermission(false).setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+      .addUserOption(o => o.setName('user').setDescription('The member').setRequired(true))
+      .addIntegerOption(o => o.setName('amount').setDescription('New balance (e.g. 0 to reset)').setRequired(true).setMinValue(0)),
     new SlashCommandBuilder().setName('gacha-collection').setDescription('View a collection').setDMPermission(false)
       .addUserOption(o => o.setName('user').setDescription('Whose collection (default: you)').setRequired(false)),
     new SlashCommandBuilder().setName('gacha-rarest').setDescription('Show the top 15 rarest cards in the server').setDMPermission(false),
@@ -207,9 +211,6 @@ function getGachaCommands() {
         .addUserOption(o => o.setName('user').setDescription('The member').setRequired(true))
         .addStringOption(o => o.setName('rarity').setDescription('Force a rarity (or clear)').setRequired(false).addChoices(...TIERS.map(t => ({ name: t, value: t })), { name: 'clear override', value: 'clear' }))
         .addIntegerOption(o => o.setName('value').setDescription('Force a Dinar value (-1 to clear)').setRequired(false)))
-      .addSubcommand(sc => sc.setName('givedinar').setDescription('Give Dinar to a member')
-        .addUserOption(o => o.setName('user').setDescription('The member').setRequired(true))
-        .addIntegerOption(o => o.setName('amount').setDescription('Amount (can be negative)').setRequired(true)))
       .addSubcommand(sc => sc.setName('release').setDescription('Force-release a member from whoever owns them')
         .addUserOption(o => o.setName('user').setDescription('The claimed member').setRequired(true)))
       .addSubcommand(sc => sc.setName('forceremove').setDescription('Remove a member from the game entirely')
@@ -222,8 +223,11 @@ function getGachaCommands() {
 function initGacha({ client, db, saveData }) {
   const CMDS = new Set([
     'gacha-roll', 'gacha-optin', 'gacha-optout', 'gacha-wish', 'gacha-wishlist', 'gacha-daily',
-    'gacha-dinar', 'gacha-collection', 'gacha-rarest', 'gacha-release', 'gacha-trade', 'gacha-leaderboard', 'gacha-admin',
+    'dinar', 'dinar-set', 'gacha-collection', 'gacha-rarest', 'gacha-release', 'gacha-trade', 'gacha-leaderboard', 'gacha-admin',
   ]);
+  // Currency commands are exempt from the kill-switch and channel gate, since
+  // Dinar is shared across the other games.
+  const EXEMPT = new Set(['gacha-admin', 'dinar', 'dinar-set']);
 
   // Transient live-roll state, keyed by message ID (kept in memory, NOT in db,
   // so it never bloats Mongo). Multiple cards can be live at once now that rolls
@@ -247,8 +251,8 @@ function initGacha({ client, db, saveData }) {
       if (!interaction.guild) return interaction.reply(eph('This game only works in a server.')).catch(() => {});
 
       const s = getState(db, interaction.guild.id);
-      if (!s.enabled && interaction.commandName !== 'gacha-admin') return interaction.reply(eph('🚫 The collection game is currently disabled.')).catch(() => {});
-      if (interaction.commandName !== 'gacha-admin' && !channelAllowed(s, interaction.channelId)) {
+      if (!s.enabled && !EXEMPT.has(interaction.commandName)) return interaction.reply(eph('🚫 The collection game is currently disabled.')).catch(() => {});
+      if (!EXEMPT.has(interaction.commandName) && !channelAllowed(s, interaction.channelId)) {
         return interaction.reply(eph(`🚫 The game can only be used in: ${s.channels.map(c => `<#${c}>`).join(', ')}`)).catch(() => {});
       }
 
@@ -259,7 +263,8 @@ function initGacha({ client, db, saveData }) {
         case 'gacha-wish':        return cmdWish(interaction, s);
         case 'gacha-wishlist':    return cmdWishlist(interaction, s);
         case 'gacha-daily':       return cmdDaily(interaction, s);
-        case 'gacha-dinar':       return cmdDinar(interaction, s);
+        case 'dinar':             return cmdDinar(interaction, s);
+        case 'dinar-set':         return cmdDinarSet(interaction, s);
         case 'gacha-collection':  return cmdCollection(interaction, s);
         case 'gacha-rarest':      return cmdRarest(interaction, s);
         case 'gacha-release':     return cmdRelease(interaction, s);
@@ -398,6 +403,14 @@ function initGacha({ client, db, saveData }) {
     const target = interaction.options.getUser('user') || interaction.user;
     return interaction.reply(eph(`💰 **${target.username}** has **${fmt(dinarOf(s, target.id))} Dinar**.`));
   }
+  function cmdDinarSet(interaction, s) {
+    if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) return interaction.reply(eph('🚫 Admins only.'));
+    const u = interaction.options.getUser('user');
+    const amount = Math.max(0, interaction.options.getInteger('amount'));
+    s.dinar[u.id] = amount;
+    saveData(interaction.guild.id);
+    return interaction.reply(eph(`✅ Set <@${u.id}>'s balance to **${fmt(amount)} Dinar**.`));
+  }
 
   // ── /gacha-collection ──────────────────────────────────────────────────────
   function cmdCollection(interaction, s) {
@@ -503,6 +516,11 @@ function initGacha({ client, db, saveData }) {
         const left = CLAIM_COOLDOWN_MS - csince;
         return interaction.reply(eph(`⏳ You've already claimed today. Next claim in ${Math.floor(left / 3600000)}h ${Math.ceil((left % 3600000) / 60000)}m.`));
       }
+      const cost = s.pool[memberId]?.value || 0;
+      if (dinarOf(s, uid) < cost) {
+        return interaction.reply(eph(`💰 You need **${fmt(cost)} Dinar** to claim this ${s.pool[memberId]?.rarity || ''} card, but you only have **${fmt(dinarOf(s, uid))}**. Earn more with \`/gacha-daily\` and the other games.`));
+      }
+      addDinar(s, uid, -cost);
       lr.claimed = true;
       s.owners[memberId] = uid;
       cd.claim = Date.now();
@@ -510,7 +528,7 @@ function initGacha({ client, db, saveData }) {
       delete liveRolls[interaction.message.id];
       saveData(interaction.guild.id);
       await interaction.update({ components: [] }).catch(() => {});
-      return interaction.followUp({ content: `🎴 <@${uid}> claimed <@${memberId}>!` }).catch(() => {});
+      return interaction.followUp({ content: `🎴 <@${uid}> claimed <@${memberId}> for 💰 ${fmt(cost)} Dinar!` }).catch(() => {});
     }
 
     if (action === 'gacha_dinardrop') {
@@ -594,11 +612,6 @@ function initGacha({ client, db, saveData }) {
       if (value  != null) s.pool[u.id].valueOverride  = value < 0 ? null : value;
       recomputeRarities(db, gid); saveData(gid);
       return interaction.reply(eph(`✅ <@${u.id}> → ${TIER_EMOJI[s.pool[u.id].rarity]} ${s.pool[u.id].rarity} · 💰 ${fmt(s.pool[u.id].value)} Dinar.`));
-    }
-    if (sub === 'givedinar') {
-      const u = interaction.options.getUser('user');
-      addDinar(s, u.id, interaction.options.getInteger('amount')); saveData(gid);
-      return interaction.reply(eph(`✅ <@${u.id}> now has **${fmt(dinarOf(s, u.id))} Dinar**.`));
     }
     if (sub === 'release') {
       const u = interaction.options.getUser('user');
