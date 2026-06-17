@@ -44,8 +44,8 @@ const ROLL_EXPIRY_MS     = 60 * 1000;            // claim window
 const RARITY_RECALC_MS   = 6 * 60 * 60 * 1000;
 const TRADE_TTL_MS       = 5 * 60 * 1000;
 const DAILY_BASE         = 500;
-const DINAR_DROP_MIN     = 50;
-const DINAR_DROP_MAX     = 250;
+const DINAR_DROP_MIN     = 25;
+const DINAR_DROP_MAX     = 125;
 const RELEASE_REFUND     = 0.5;
 
 function defaults() {
@@ -192,6 +192,7 @@ function getGachaCommands() {
       .addUserOption(o => o.setName('give').setDescription('A member YOU own to give').setRequired(true))
       .addUserOption(o => o.setName('receive').setDescription('A member THEY own to receive').setRequired(true)),
     new SlashCommandBuilder().setName('gacha-leaderboard').setDescription('Top collectors in the server').setDMPermission(false),
+    new SlashCommandBuilder().setName('gacha-list').setDescription('See who is opted in to the collection game (private)').setDMPermission(false),
 
     // ── Admin ──────────────────────────────────────────────────────────────
     new SlashCommandBuilder().setName('gacha-admin').setDescription('Gacha admin controls (admin only)')
@@ -223,7 +224,7 @@ function getGachaCommands() {
 function initGacha({ client, db, saveData }) {
   const CMDS = new Set([
     'gacha-roll', 'gacha-optin', 'gacha-optout', 'gacha-wish', 'gacha-wishlist', 'gacha-daily',
-    'dinar', 'dinar-set', 'gacha-collection', 'gacha-rarest', 'gacha-release', 'gacha-trade', 'gacha-leaderboard', 'gacha-admin',
+    'dinar', 'dinar-set', 'gacha-collection', 'gacha-rarest', 'gacha-release', 'gacha-trade', 'gacha-leaderboard', 'gacha-list', 'gacha-admin',
   ]);
   // Currency commands are exempt from the kill-switch and channel gate, since
   // Dinar is shared across the other games.
@@ -270,6 +271,7 @@ function initGacha({ client, db, saveData }) {
         case 'gacha-release':     return cmdRelease(interaction, s);
         case 'gacha-trade':       return cmdTrade(interaction, s);
         case 'gacha-leaderboard': return cmdLeaderboard(interaction, s);
+        case 'gacha-list':        return cmdList(interaction, s);
         case 'gacha-admin':       return cmdAdmin(interaction, s);
       }
     } catch (err) {
@@ -498,6 +500,25 @@ function initGacha({ client, db, saveData }) {
     return interaction.reply({ embeds: [embed] });
   }
 
+  // ── /gacha-list (private — may be a long list) ─────────────────────────────
+  function cmdList(interaction, s) {
+    ensureFreshRarities(db, interaction.guild.id);
+    const ids = Object.keys(s.pool);
+    if (!ids.length) return interaction.reply(eph('Nobody is opted in yet. Be the first with `/gacha-optin`!'));
+    const ranked = ids.map(id => ({ id, ...s.pool[id] })).sort((a, b) => (b.value - a.value) || (b.score - a.score));
+    const lines = ranked.map(e => `${TIER_EMOJI[e.rarity]} <@${e.id}>${s.owners[e.id] ? ' 🔒' : ''}`);
+    let desc = '', shown = 0;
+    for (const line of lines) {
+      if (desc.length + line.length + 1 > 3800) break;
+      desc += (desc ? '\n' : '') + line; shown++;
+    }
+    if (shown < lines.length) desc += `\n…and ${lines.length - shown} more`;
+    const embed = new EmbedBuilder().setColor(0x2ECC71)
+      .setTitle(`🎴 Opted-in Members (${ids.length})`).setDescription(desc)
+      .setFooter({ text: '🔒 = already owned' });
+    return interaction.reply({ embeds: [embed], flags: 64 });
+  }
+
   // ── Buttons ────────────────────────────────────────────────────────────────
   async function handleButton(interaction) {
     const s = getState(db, interaction.guild.id);
@@ -511,6 +532,7 @@ function initGacha({ client, db, saveData }) {
       if (!lr || lr.memberId !== memberId || lr.type !== 'claim' || lr.claimed || Date.now() > lr.expiresAt) {
         return interaction.reply(eph('⌛ Too late — this card is no longer claimable.'));
       }
+      if (!s.pool[uid]) return interaction.reply(eph('🎴 You need to join the game before you can collect cards! Use `/gacha-optin` to opt in, then come back and claim.'));
       if (s.owners[memberId]) return interaction.reply(eph(`Already owned by <@${s.owners[memberId]}>.`));
       if (memberId === uid)   return interaction.reply(eph('You can\'t own yourself!'));
       const cd = (s.cooldowns[uid] ||= {});
@@ -540,6 +562,7 @@ function initGacha({ client, db, saveData }) {
       if (!lr || lr.type !== 'dinardrop' || lr.dinarClaimed || Date.now() > lr.expiresAt) {
         return interaction.reply(eph('⌛ Too late — the Dinar has already been grabbed.'));
       }
+      if (!s.pool[uid]) return interaction.reply(eph('💵 You need to join the game before you can collect Dinar! Use `/gacha-optin` to opt in.'));
       lr.dinarClaimed = true;
       const amount = DINAR_DROP_MIN + Math.floor(Math.random() * (DINAR_DROP_MAX - DINAR_DROP_MIN + 1));
       addDinar(s, uid, amount);
