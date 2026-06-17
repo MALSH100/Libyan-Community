@@ -205,7 +205,7 @@ function getGachaCommands() {
         .addChannelOption(o => o.setName('channel').setDescription('Channel (for add/remove)').setRequired(false)))
       .addSubcommand(sc => sc.setName('optin').setDescription('Force a member into the game (make them claimable)')
         .addUserOption(o => o.setName('user').setDescription('The member').setRequired(true)))
-      .addSubcommand(sc => sc.setName('resetroll').setDescription('Reset roll cooldown for a member, or everyone if none given')
+      .addSubcommand(sc => sc.setName('resetroll').setDescription('Reset roll & claim cooldowns for a member, or everyone if none given')
         .addUserOption(o => o.setName('user').setDescription('The member (leave empty for everyone)').setRequired(false)))
       .addSubcommand(sc => sc.setName('override').setDescription('Override a member\'s rarity and/or Dinar value')
         .addUserOption(o => o.setName('user').setDescription('The member').setRequired(true))
@@ -328,7 +328,10 @@ function initGacha({ client, db, saveData }) {
           const lr = liveRolls[msg.id];
           if (lr && !lr.claimed && !lr.dinarClaimed) {
             delete liveRolls[msg.id];
-            interaction.editReply({ components: [] }).catch(() => {});
+            embed.setFooter({ text: ownerId
+              ? '⌛ Time ran out — nobody grabbed the Dinar Drop.'
+              : '⌛ Time ran out — nobody claimed this card. They stay unclaimed.' });
+            interaction.editReply({ embeds: [embed], components: [] }).catch(() => {});
           }
         }, ROLL_EXPIRY_MS).unref?.();
       } catch (e) { console.error('[gacha] reveal:', e.message); }
@@ -595,13 +598,13 @@ function initGacha({ client, db, saveData }) {
     if (sub === 'resetroll') {
       const u = interaction.options.getUser('user');
       if (u) {
-        if (s.cooldowns[u.id]) delete s.cooldowns[u.id].roll;
+        if (s.cooldowns[u.id]) { delete s.cooldowns[u.id].roll; delete s.cooldowns[u.id].claim; }
         saveData(gid);
-        return interaction.reply(eph(`✅ Roll cooldown reset for <@${u.id}>.`));
+        return interaction.reply(eph(`✅ Roll & claim cooldowns reset for <@${u.id}>.`));
       }
-      for (const k of Object.keys(s.cooldowns)) delete s.cooldowns[k].roll;
+      for (const k of Object.keys(s.cooldowns)) { delete s.cooldowns[k].roll; delete s.cooldowns[k].claim; }
       saveData(gid);
-      return interaction.reply(eph('✅ Roll cooldown reset for **everyone**.'));
+      return interaction.reply(eph('✅ Roll & claim cooldowns reset for **everyone**.'));
     }
     if (sub === 'override') {
       const u = interaction.options.getUser('user');
