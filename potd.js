@@ -11,6 +11,7 @@
 //   module.exports.commands  (array of toJSON() command definitions)
 
 const { SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits } = require('discord.js');
+const { awardDinar } = require('./gacha');
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -264,6 +265,7 @@ async function runPOTD(client, db, saveData, awardLP, guildId, forced = false) {
     }
 
     awardLP(guildId, winnerId, lpAwarded, 'potd');
+    awardDinar(db, guildId, winnerId, 300, saveData);
 
     // ── Give role, strip from previous holder ─────────────────────────────────
     await guild.members.fetch().catch(err =>

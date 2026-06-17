@@ -13,6 +13,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const { SlashCommandBuilder, EmbedBuilder, REST, Routes, PermissionFlagsBits } = require('discord.js');
+const { awardDinar } = require('./gacha');
 
 // ─── Reaction definitions ─────────────────────────────────────────────────────
 
@@ -248,6 +249,7 @@ async function startRound(guild, forced = false) {
     // Award +10 LP bonus to round winner
     if (results.length > 0 && results[0].total > 0 && awardLP) {
       awardLP(guild.id, results[0].userId, 10, 'yarayt');
+      awardDinar(db, guild.id, results[0].userId, 500, saveData);
     }
 
     // Clear current round

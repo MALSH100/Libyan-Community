@@ -11,6 +11,7 @@ const {
   ButtonStyle,
   ActionRowBuilder,
 } = require('discord.js');
+const { awardDinar } = require('./gacha');
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -954,6 +955,7 @@ async function handleSpawnInteraction(i, spawn, channel, db, saveData, getGuildC
 
         // Award LP for catching
         if (awardLP) awardLP(guildId, userId, 1, 'pokemon');
+        awardDinar(db, guildId, userId, 20, saveData);
 
         // Catch streak tracking
         let streakMsg = '';
@@ -1965,6 +1967,7 @@ module.exports = function initPokemon({ client, db, saveData, getGuildClans, get
           winnerData.battleWins = (winnerData.battleWins || 0) + 1;
           winnerData.pokemon[winnerSlot].battleWins = (winnerData.pokemon[winnerSlot].battleWins || 0) + 1;
           if (awardLP) awardLP(battle.guildId, winnerActual, 15, 'pokemon');
+          awardDinar(db, battle.guildId, winnerActual, 75, saveData);
           if (levelled) {
             await channel.send(`⬆️ **${capitalize(winnerData.pokemon[winnerSlot].name)}** levelled up to **Lv.${winnerData.pokemon[winnerSlot].level}**!`).catch(() => {});
           }

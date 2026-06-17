@@ -37,13 +37,13 @@ const TIER_VALUE  = { Common: 100, Rare: 500, Epic: 1500, Legendary: 5000, Mythi
 const TIER_WEIGHT = { Common: 100, Rare: 40, Epic: 15, Legendary: 5, Mythic: 1 };   // roll odds
 const TIER_COLOR  = { Common: 0x95A5A6, Rare: 0x3498DB, Epic: 0x9B59B6, Legendary: 0xF1C40F, Mythic: 0xE74C3C };
 
-const ROLL_COOLDOWN_MS   = 2 * 60 * 60 * 1000;   // PER-USER: one roll every 2 hours
-const CLAIM_COOLDOWN_MS  = 24 * 60 * 60 * 1000;  // per-user: one claim per day
+const ROLL_COOLDOWN_MS   = 3 * 60 * 60 * 1000;   // PER-USER: one roll every 3 hours
+const CLAIM_COOLDOWN_MS  = 3 * 60 * 60 * 1000;   // per-user: one claim every 3 hours
 const ROLL_DROP_DELAY_MS = 5 * 1000;             // warning before the card reveals
 const ROLL_EXPIRY_MS     = 60 * 1000;            // claim window
 const RARITY_RECALC_MS   = 6 * 60 * 60 * 1000;
 const TRADE_TTL_MS       = 5 * 60 * 1000;
-const DAILY_BASE         = 500;
+const DAILY_BASE         = 50;
 const DINAR_DROP_MIN     = 25;
 const DINAR_DROP_MAX     = 125;
 const RELEASE_REFUND     = 0.5;
@@ -539,7 +539,7 @@ function initGacha({ client, db, saveData }) {
       const csince = Date.now() - (cd.claim || 0);
       if (csince < CLAIM_COOLDOWN_MS) {
         const left = CLAIM_COOLDOWN_MS - csince;
-        return interaction.reply(eph(`⏳ You've already claimed today. Next claim in ${Math.floor(left / 3600000)}h ${Math.ceil((left % 3600000) / 60000)}m.`));
+        return interaction.reply(eph(`⏳ You've claimed recently. Next claim in ${Math.floor(left / 3600000)}h ${Math.ceil((left % 3600000) / 60000)}m.`));
       }
       const cost = s.pool[memberId]?.value || 0;
       if (dinarOf(s, uid) < cost) {
