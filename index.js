@@ -535,6 +535,7 @@ const initBlackMarketExchange = require('./black-market-exchange');
 //const initLibyaNews = require('./libya-news');
 //const initJobs = require('./jobs');
 const { initPOTD } = require('./potd');
+const { getLibyaChatCommands, initLibyaChat } = require('./libya-chat');
 //const initTranslator = require('./translator');
 
 function getAllCommands() {
@@ -581,7 +582,13 @@ function getAllCommands() {
   } catch (e) {
     console.error('Could not load translator.js commands:', e.message);
   }
-  _allCommands = [...commands, ...pokeCommands, ...yaraytCommands, ...exchangeCommands, ...newsCommands, ...jobsCommands, ...potdCommands, ...translatorCommands];   // ADD ...translatorCommands  // ← ADD ...jobsCommands
+  let libyaChatCommands = [];
+  try {
+    libyaChatCommands = getLibyaChatCommands();
+  } catch (e) {
+    console.error('Could not load libya-chat.js commands:', e.message);
+  }
+  _allCommands = [...commands, ...pokeCommands, ...yaraytCommands, ...exchangeCommands, ...newsCommands, ...jobsCommands, ...potdCommands, ...translatorCommands, ...libyaChatCommands];
   console.log(`📋 Command list built: ${_allCommands.map(c => c.name).join(', ')}`);
   return _allCommands;
 }
@@ -2309,6 +2316,9 @@ initBlackMarketExchange({ client, db, saveData });
 
 // Post of the Day
 initPOTD({ client, db, saveData, awardLP });
+
+// Libya Chat / Announce (owner-only bot messages)
+initLibyaChat(client);
 
 // Translator (reaction-based Arabic → English)
 //initTranslator(client, db, saveData);
