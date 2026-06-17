@@ -387,7 +387,7 @@ async function runPOTD(client, db, saveData, awardLP, guildId, forced = false) {
             { name: '🏅 Total POTD Wins', value: `${hof.wins}`,              inline: true },
         )
         .setThumbnail(winner.author.displayAvatarURL())
-        .setFooter({ text: `Post of the Day • Minimum ${MIN_REACTIONS} reactions required` })
+        .setFooter({ text: 'See the all-time top posters with /potd-hall-of-fame' })
         .setTimestamp();
 
     if (streakText) embed.addFields({ name: '\u200b', value: streakText });
