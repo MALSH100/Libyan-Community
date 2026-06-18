@@ -386,6 +386,7 @@ async function runPOTD(client, db, saveData, awardLP, guildId, forced = false) {
         .addFields(
             { name: '🏆 Reactions',       value: `${best.count}`,            inline: true },
             { name: '🪙 LP Awarded',      value: `+${lpAwarded} LP`,         inline: true },
+            { name: '💰 Dinar Awarded',   value: `+300 Dinar`,               inline: true },
             { name: '🏅 Total POTD Wins', value: `${hof.wins}`,              inline: true },
         )
         .setThumbnail(winner.author.displayAvatarURL())
