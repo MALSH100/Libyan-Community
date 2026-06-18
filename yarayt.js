@@ -273,11 +273,13 @@ async function startRound(guild, forced = false) {
         return `${medal} **${name}** — ${r.total} reactions\n   *"${r.wish}"*\n   ${bars}`;
       }).join('\n\n');
 
+      const winnerName = memberNames[results[0].userId] || `<@${results[0].userId}>`;
       const embed = new EmbedBuilder()
         .setColor(0xFFD700)
         .setTitle('🇱🇾 Ya Rayt Round Results!')
-        .setDescription(desc || 'No wishes were submitted this round.')
-        .setFooter({ text: 'LP has been awarded! Next round next Friday.' });
+        .setDescription((desc || 'No wishes were submitted this round.') +
+          `\n\n🏆 **${winnerName}** wins the round — **+10 LP** and **+500 Dinar** 💰!\nEveryone also earns **+1 LP** for each reaction they received.`)
+        .setFooter({ text: 'Rewards awarded! Next round next Friday.' });
 
       await channel.send({ embeds: [embed] }).catch(e => console.error('Could not send Ya Rayt results:', e.message));
     }
