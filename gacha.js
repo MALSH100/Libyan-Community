@@ -235,10 +235,18 @@ function initGacha({ client, db, saveData }) {
   // are per-user. { guildId, memberId, type, claimed, dinarClaimed, expiresAt }
   const liveRolls = {};
 
-  // Periodic rarity recompute across all guilds
+  // Periodic rarity recompute + cleanup of abandoned trade offers across guilds
   setInterval(() => {
+    const now = Date.now();
     for (const gid of Object.keys(db)) {
-      if (db[gid]?.__gacha && Object.keys(db[gid].__gacha.pool || {}).length) {
+      const g = db[gid]?.__gacha;
+      if (!g) continue;
+      // Sweep abandoned trades (nobody accepted/declined) so they don't pile up
+      // in the saved DB forever.
+      if (g.trades) for (const tid of Object.keys(g.trades)) {
+        if (now - (g.trades[tid].ts || 0) > TRADE_TTL_MS) delete g.trades[tid];
+      }
+      if (Object.keys(g.pool || {}).length) {
         try { recomputeRarities(db, gid); } catch (e) { console.error('[gacha] recompute:', e.message); }
       }
     }
@@ -303,9 +311,8 @@ function initGacha({ client, db, saveData }) {
     const ownerId = s.owners[rolledId];
     let member; try { member = await interaction.guild.members.fetch(rolledId); } catch {}
 
-    if (!s.pool[uid]) interaction.followUp(eph('💡 You\'re not opted in, so others can\'t roll *you*. Join with `/gacha-optin`!')).catch(() => {});
-
     await interaction.reply('🎴 **A card is dropping in 5 seconds…**');
+    if (!s.pool[uid]) interaction.followUp(eph('💡 You\'re not opted in, so others can\'t roll *you*. Join with `/gacha-optin`!')).catch(() => {});
     saveData(interaction.guild.id);
 
     setTimeout(async () => {
