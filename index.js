@@ -414,7 +414,7 @@ const GAME_MENU = [
   { num: 4, name: '💬 Type the Word',    desc: 'Bot shows a word — type it first to score. 8 rounds.' },
   { num: 5, name: '🔢 Guess the Number', desc: 'Bot picks 1–100. One guess per player, locked in. Closest clan average wins.' },
   { num: 6, name: '🔡 Missing Letters',  desc: 'Fill in the blanks: _ p p _ e. Type the full word first. 8 rounds.' },
-  { num: 7, name: '💣 Hidden Bomb',      desc: 'Clan leader picks 1–10 per round. One number is the bomb. Best of 5 rounds.' },
+  { num: 7, name: '💣 Hidden Bomb',      desc: 'Any clan member picks a number — the range shrinks each round (1–10 down to 1–2). Pick the bomb and lose the round. Best of 5.' },
   { num: 8, name: '➕ Maths Quiz',       desc: '8 maths questions, easy to hard (addition → subtraction → × → ÷). Lock in your answer.' },
 ];
 
@@ -517,10 +517,10 @@ new SlashCommandBuilder()
         { name: 'off — disable spawns & item drops', value: 'off' },
         { name: 'on — enable spawns & item drops',  value: 'on'  },
       )),
-  new SlashCommandBuilder().setName('clan-war').setDescription('Challenge another clan to a war (Leader only)')
+  new SlashCommandBuilder().setName('clan-war').setDescription('Challenge another clan to a war (Leader/Officer)')
     .addStringOption(o => o.setName('clan').setDescription('Name of the clan to challenge').setRequired(true)),
-  new SlashCommandBuilder().setName('clan-war-accept').setDescription('Accept a pending clan war challenge (Leader only)'),
-  new SlashCommandBuilder().setName('clan-war-decline').setDescription('Decline a pending clan war challenge (Leader only)'),
+  new SlashCommandBuilder().setName('clan-war-accept').setDescription('Accept a pending clan war challenge (Leader/Officer)'),
+  new SlashCommandBuilder().setName('clan-war-decline').setDescription('Decline a pending clan war challenge (Leader/Officer)'),
 ].map(c => c.toJSON());
 
 // ─── Register Commands ────────────────────────────────────────────────────────
@@ -1328,7 +1328,7 @@ async function runWar(guild, channel, challengerName, defenderName, gameChoice) 
         embeds: [new EmbedBuilder().setColor(0xFFD700).setTitle('🤝 WAR DRAWN!')
           .setDescription(
             `${cR ?? `**${challengerName}**`} vs ${dR ?? `**${defenderName}**`}\n\n` +
-            `It's a **draw** — neither clan takes the win. Both clans earn **+${DRAW_XP} XP** for the battle. GG! 🤝`
+            `It's a **draw** — neither clan takes the win. Both clans earn **+${DRAW_XP} XP**, and every member gets **+${DRAW_LP} LP** and **+50 Dinar** 💰. GG! 🤝`
           )]
       }).catch(() => {});
       return;
@@ -1357,8 +1357,10 @@ async function runWar(guild, channel, challengerName, defenderName, gameChoice) 
     await channel.send({
       embeds: [new EmbedBuilder().setColor(0x57F287).setTitle('🏆 WAR OVER!')
         .setDescription(
-          `🎉 **Winner: ${wR ?? `**${winnerId}**`}** — +100 XP\n` +
-          `😔 **Loser: ${lR ?? `**${loserId}**`}** — +20 XP for participating\n\nGG to both clans! 🤝`
+          `🎉 **Winner: ${wR ?? `**${winnerId}**`}**\n` +
+          `+100 XP · every member earns **+50 LP** and **+100 Dinar** 💰\n\n` +
+          `😔 **Loser: ${lR ?? `**${loserId}**`}**\n` +
+          `+20 XP · every member earns **+10 LP** for taking part\n\nGG to both clans! 🤝`
         )]
     }).catch(() => {});
 
@@ -1622,7 +1624,7 @@ async function handleCommand(interaction, commandName, user, guild) {
           { name: '🏰 Management', value: ['`/clan-create <name>` — Create a clan', '`/clan-disband` — Delete your clan *(Leader)*', '`/clan-rename <name> [emoji]` *(Leader)*', '`/clan-description <text>` *(Leader/Officer)*', '`/clan-motto <text>` *(Leader/Officer)*', '`/clan-ranks <member> <officer> <leader>` *(Leader)*'].join('\n') },
           { name: '👥 Membership', value: ['`/clan-invite @user` *(Leader/Officer)*', '`/clan-invite-accept`', '`/clan-invite-decline`', '`/clan-kick @user` *(Leader/Officer)*', '`/clan-leave`'].join('\n') },
           { name: '🛡️ Ranks', value: ['`/clan-promote @user` *(Leader)*', '`/clan-demote @user` *(Leader)*', '`/clan-transfer @user` *(Leader)*'].join('\n') },
-          { name: '📢 Channel & Wars', value: ['`/clan-channel-create` *(Leader)*', '`/clan-channel-delete` *(Leader)*', '`/clan-war <clan>` *(Leader/Officer)*', '`/clan-war-accept` *(Leader)*', '`/clan-war-decline` *(Leader)*'].join('\n') },
+          { name: '📢 Channel & Wars', value: ['`/clan-channel-create` *(Leader)*', '`/clan-channel-delete` *(Leader)*', '`/clan-war <clan>` *(Leader/Officer)*', '`/clan-war-accept` *(Leader/Officer)*', '`/clan-war-decline` *(Leader/Officer)*'].join('\n') },
         ).setFooter({ text: 'Page 1 of 6 — use buttons to navigate' }),
 
       new EmbedBuilder().setColor(0xFF0000).setTitle('🎮 Libyan Community Bot — Page 2/6: Pokémon')
@@ -1754,7 +1756,7 @@ async function handleCommand(interaction, commandName, user, guild) {
       )
       .setFooter({ text: 'LP comes from clan wars, Pokémon, Ya Rayt & POTD · Dinar is the collection-game currency (/gacha-roll)' });
 
-    return safeReply(interaction, { embeds: [embed], flags: isSelf ? 64 : 0 });
+    return safeReply(interaction, { embeds: [embed] });
   }
 
   // ── /clan-info ──────────────────────────────────────────────────────────────
@@ -2248,11 +2250,13 @@ async function handleCommand(interaction, commandName, user, guild) {
     }
     const defender = gc[defenderName];
     activeWars[guild.id] = { challengerClan: result.name, defenderClan: defenderName, channelId: interaction.channelId, pending: true };
-    let defMention = `the Leader of **${defenderName}**`;
-    try { await guild.members.fetch(defender.leader); defMention = `<@${defender.leader}>`; } catch {}
+    const warResponders = [defender.leader, ...(defender.officers || [])].filter(Boolean);
+    const responderPings = warResponders.map(id => `<@${id}>`).join(' ');
     await safeReply(interaction, {
+      content: warResponders.length ? `${responderPings} — your clan has been challenged to war!` : undefined,
       embeds: [new EmbedBuilder().setColor(0xFF0000).setTitle('⚔️ Clan War Challenge!')
-        .setDescription(`**${result.name}** challenged **${defenderName}** to a clan war!\n\n${defMention} — use \`/clan-war-accept\` or \`/clan-war-decline\`.\n\n⏰ Expires in **2 minutes**.`)]
+        .setDescription(`**${result.name}** challenged **${defenderName}** to a clan war!\n\nThe **Leader** or an **Officer** of **${defenderName}** can use \`/clan-war-accept\` or \`/clan-war-decline\`.\n\n⏰ Expires in **2 minutes**.`)],
+      allowedMentions: { users: warResponders },
     });
     setTimeout(() => {
       if (activeWars[guild.id]?.pending && activeWars[guild.id]?.challengerClan === result.name) {
@@ -2284,7 +2288,8 @@ async function handleCommand(interaction, commandName, user, guild) {
   if (commandName === 'clan-war-accept') {
     const result = getUserClan(guild.id, user.id);
     if (!result) return safeReply(interaction, { content: '❌ You are not in a clan.', flags: 64 });
-    if (result.clan.leader !== user.id) return safeReply(interaction, { content: '❌ Only the Leader can accept a war.', flags: 64 });
+    const acceptRank = getUserRank(result.clan, user.id);
+    if (acceptRank !== 'Leader' && acceptRank !== 'Officer') return safeReply(interaction, { content: '❌ Only the Leader or an Officer can accept a war.', flags: 64 });
     const war = activeWars[guild.id];
     if (!war || !war.pending) return safeReply(interaction, { content: '❌ No pending war challenge found.', flags: 64 });
     if (war.defenderClan !== result.name) return safeReply(interaction, { content: `❌ This challenge is for **${war.defenderClan}**, not your clan.`, flags: 64 });
@@ -2302,7 +2307,8 @@ async function handleCommand(interaction, commandName, user, guild) {
   if (commandName === 'clan-war-decline') {
     const result = getUserClan(guild.id, user.id);
     if (!result) return safeReply(interaction, { content: '❌ You are not in a clan.', flags: 64 });
-    if (result.clan.leader !== user.id) return safeReply(interaction, { content: '❌ Only the Leader can decline a war.', flags: 64 });
+    const declineRank = getUserRank(result.clan, user.id);
+    if (declineRank !== 'Leader' && declineRank !== 'Officer') return safeReply(interaction, { content: '❌ Only the Leader or an Officer can decline a war.', flags: 64 });
     const war = activeWars[guild.id];
     if (!war || !war.pending) return safeReply(interaction, { content: '❌ No pending war challenge found.', flags: 64 });
     if (war.defenderClan !== result.name) return safeReply(interaction, { content: `❌ This challenge is for **${war.defenderClan}**, not your clan.`, flags: 64 });
