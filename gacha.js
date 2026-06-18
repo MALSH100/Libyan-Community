@@ -354,7 +354,7 @@ function initGacha({ client, db, saveData }) {
     s.pool[uid] = { rarity: 'Common', score: 0, value: TIER_VALUE.Common, rarityOverride: null, valueOverride: null };
     recomputeRarities(db, interaction.guild.id);
     saveData(interaction.guild.id);
-    return interaction.reply(eph(`🎴 You're in! You're now a **${s.pool[uid].rarity}** card worth 💰 ${fmt(s.pool[uid].value)} Dinar. Use \`/gacha-optout\` anytime to leave and wipe all claims of you.`));
+    return interaction.reply({ content: `🎴 **${interaction.user.username}** joined the collection game — now a **${s.pool[uid].rarity}** card worth 💰 ${fmt(s.pool[uid].value)} Dinar! Opt out anytime with \`/gacha-optout\`.` });
   }
   function cmdOptOut(interaction, s) {
     const uid = interaction.user.id;
@@ -362,7 +362,7 @@ function initGacha({ client, db, saveData }) {
     dissolveMember(s, uid);
     recomputeRarities(db, interaction.guild.id);
     saveData(interaction.guild.id);
-    return interaction.reply(eph('👋 You\'ve opted out. You\'ve been removed from the pool, and every claim and wishlist of you has been dissolved. Your own collection is untouched.'));
+    return interaction.reply({ content: `👋 **${interaction.user.username}** opted out of the collection game. They've been removed from the pool, and every claim and wishlist of them has been dissolved.` });
   }
 
   // ── /gacha-wish + /gacha-wishlist ──────────────────────────────────────────
@@ -413,7 +413,7 @@ function initGacha({ client, db, saveData }) {
   }
   function cmdDinar(interaction, s) {
     const target = interaction.options.getUser('user') || interaction.user;
-    return interaction.reply(eph(`💰 **${target.username}** has **${fmt(dinarOf(s, target.id))} Dinar**.`));
+    return interaction.reply({ content: `💰 **${target.username}** has **${fmt(dinarOf(s, target.id))} Dinar**.` });
   }
   function cmdDinarSet(interaction, s) {
     if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) return interaction.reply(eph('🚫 Admins only.'));
