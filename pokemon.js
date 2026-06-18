@@ -990,6 +990,7 @@ async function handleSpawnInteraction(i, spawn, channel, db, saveData, getGuildC
               `**Ball used:** ${ballEmoji} ${ballName}\n` +
               `**Level:** ${spawn.level}\n` +
               `**Type:** ${spawn.types.map(t => `${TYPE_EMOJI[t] || ''}${capitalize(t)}`).join(' / ')}\n\n` +
+              `🪙 **+1 LP** · 💰 **+20 Dinar**\n` +
               `Use \`/pokemon-team\` to see your Pokémon!` +
               streakMsg
             )
@@ -1921,7 +1922,7 @@ module.exports = function initPokemon({ client, db, saveData, getGuildClans, get
               .setTitle('🏆 Battle Over!')
               .setDescription(
                 `💀 **${capitalize(loserPoke.name)}** fainted!\n\n` +
-                `🎉 **${winnerName}** wins the battle!\n` +
+                `🎉 **${winnerName}** wins the battle — **+15 LP** and **+75 Dinar** 💰!\n` +
                 `😔 **${loserName}** fought well!`
               )]
           }).catch(() => {});
@@ -1976,7 +1977,7 @@ module.exports = function initPokemon({ client, db, saveData, getGuildClans, get
         if (loserData.pokemon[loserSlot]) {
           const { xpGain } = await awardBattleXp(loserData.pokemon[loserSlot], false);
           if (awardLP) awardLP(battle.guildId, loserActual, 3, 'pokemon');
-          await channel.send(`⭐ **${capitalize(loserPoke.name)}** gained **${xpGain} XP** for participating!`).catch(() => {});
+          await channel.send(`⭐ **${capitalize(loserPoke.name)}** gained **${xpGain} XP** and the trainer earns **+3 LP** for participating!`).catch(() => {});
         }
       }
 
