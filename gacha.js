@@ -52,6 +52,7 @@ function defaults() {
   return {
     enabled:        true,
     channels:       [],     // allowed channel IDs; [] = anywhere
+    rollChannels:   [],     // channels where /gacha-roll may be used; [] = no extra restriction
     tradingEnabled: true,
     lastRarityCalc: 0,
     pool:        {},   // userId -> { rarity, score, value, rarityOverride, valueOverride }
@@ -147,6 +148,7 @@ function dissolveMember(s, uid) {
 }
 
 const channelAllowed = (s, channelId) => !s.channels.length || s.channels.includes(channelId);
+const rollChannelAllowed = (s, channelId) => !s.rollChannels?.length || s.rollChannels.includes(channelId);
 
 function cardEmbed(member, entry, ownerId) {
   const name = member?.displayName || 'User';
@@ -202,6 +204,9 @@ function getGachaCommands() {
       .addSubcommand(sc => sc.setName('trading').setDescription('Enable or disable trading')
         .addStringOption(o => o.setName('state').setDescription('on/off').setRequired(true).addChoices({ name: 'on', value: 'on' }, { name: 'off', value: 'off' })))
       .addSubcommand(sc => sc.setName('channel').setDescription('Restrict which channels the game works in')
+        .addStringOption(o => o.setName('action').setDescription('add/remove/clear').setRequired(true).addChoices({ name: 'add', value: 'add' }, { name: 'remove', value: 'remove' }, { name: 'clear (allow all)', value: 'clear' }))
+        .addChannelOption(o => o.setName('channel').setDescription('Channel (for add/remove)').setRequired(false)))
+      .addSubcommand(sc => sc.setName('rollchannel').setDescription('Restrict which channels /gacha-roll works in (keeps rolls public)')
         .addStringOption(o => o.setName('action').setDescription('add/remove/clear').setRequired(true).addChoices({ name: 'add', value: 'add' }, { name: 'remove', value: 'remove' }, { name: 'clear (allow all)', value: 'clear' }))
         .addChannelOption(o => o.setName('channel').setDescription('Channel (for add/remove)').setRequired(false)))
       .addSubcommand(sc => sc.setName('optin').setDescription('Force a member into the game (make them claimable)')
@@ -295,6 +300,12 @@ function initGacha({ client, db, saveData }) {
     const uid = interaction.user.id;
     ensureFreshRarities(db, interaction.guild.id);
     if (!Object.keys(s.pool).length) return interaction.reply(eph('Nobody has opted in yet. Be the first with `/gacha-optin`!'));
+
+    // Roll-only channel restriction: keeps rolls public so they can't be sniped
+    // uncontested in private clan channels.
+    if (!rollChannelAllowed(s, interaction.channelId)) {
+      return interaction.reply(eph(`🎲 Rolling is only allowed in: ${s.rollChannels.map(c => `<#${c}>`).join(', ')}`));
+    }
 
     // PER-USER cooldown: one roll every 2 hours
     const cd = (s.cooldowns[uid] ||= {});
@@ -617,6 +628,16 @@ function initGacha({ client, db, saveData }) {
       if (act === 'add') { if (!s.channels.includes(ch.id)) s.channels.push(ch.id); } else s.channels = s.channels.filter(c => c !== ch.id);
       saveData(gid);
       return interaction.reply(eph(`✅ Allowed channels: ${s.channels.length ? s.channels.map(c => `<#${c}>`).join(', ') : 'everywhere'}.`));
+    }
+    if (sub === 'rollchannel') {
+      const act = interaction.options.getString('action');
+      if (!s.rollChannels) s.rollChannels = [];
+      if (act === 'clear') { s.rollChannels = []; saveData(gid); return interaction.reply(eph('✅ Cleared — `/gacha-roll` now works in any channel the game allows.')); }
+      const ch = interaction.options.getChannel('channel');
+      if (!ch) return interaction.reply(eph('Pick a channel for add/remove.'));
+      if (act === 'add') { if (!s.rollChannels.includes(ch.id)) s.rollChannels.push(ch.id); } else s.rollChannels = s.rollChannels.filter(c => c !== ch.id);
+      saveData(gid);
+      return interaction.reply(eph(`✅ \`/gacha-roll\` is now allowed in: ${s.rollChannels.length ? s.rollChannels.map(c => `<#${c}>`).join(', ') : 'any channel (no roll restriction)'}.`));
     }
     if (sub === 'optin') {
       const u = interaction.options.getUser('user');

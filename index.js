@@ -1746,7 +1746,7 @@ async function handleCommand(interaction, commandName, user, guild) {
         { name: '\u200b',             value: '\u200b',                    inline: true },
         { name: '🎮 Pokémon LP',      value: `${lp.pokemonLP} LP`,       inline: true },
         { name: '🐾 Pokémon Caught',  value: `${pokeCaught}`,            inline: true },
-        { name: '🏆 Battle Wins',     value: `${pokeBattleWins}`,        inline: true },
+        { name: '🏆 Pokémon Battle Wins', value: `${pokeBattleWins}`,    inline: true },
         { name: '🇱🇾 Ya Rayt LP',    value: `${lp.yaraytLP} LP`,        inline: true },
         { name: '❤️ Total Reactions', value: `${yrTotal}`,               inline: true },
         { name: '\u200b',             value: '\u200b',                    inline: true },

@@ -1124,7 +1124,7 @@ async function runBattleTurn(battle, channel, db, saveData, moveNameOrAction, us
       logEntry = `🧪 **${atkName}** used a Potion! **${capitalize(attacker.name)}** restored **${heal} HP**.`;
 
     } else if (moveNameOrAction === 'super_potion') {
-      const actualUserId  = isP1 ? battle.p1ActualUserId : battle.p2ActualUserId;
+      const actualUserId  = userId;  // clicker is already the real Discord user
       const userData      = getMemberPokemon(db, battle.guildId, actualUserId);
       if (!useItem(userData, 'super_potion')) return null;
       saveData();
@@ -1133,7 +1133,7 @@ async function runBattleTurn(battle, channel, db, saveData, moveNameOrAction, us
       logEntry = `🧪 **${atkName}** used a Super Potion! **${capitalize(attacker.name)}** restored **${heal} HP**.`;
 
     } else if (moveNameOrAction === 'hyper_potion') {
-      const actualUserId  = isP1 ? battle.p1ActualUserId : battle.p2ActualUserId;
+      const actualUserId  = userId;  // clicker is already the real Discord user
       const userData      = getMemberPokemon(db, battle.guildId, actualUserId);
       if (!useItem(userData, 'hyper_potion')) return null;
       saveData();
@@ -1475,8 +1475,6 @@ module.exports = function initPokemon({ client, db, saveData, getGuildClans, get
         channelId:        battleChannel.id,
         p1SlotIndex:      p1GoesFirst ? challenge.challengerSlot : slot,
         p2SlotIndex:      p1GoesFirst ? slot : challenge.challengerSlot,
-        p1ActualUserId:   challenge.challengerUserId,
-        p2ActualUserId:   user.id,
       };
 
       activeBattles[`${guild.id}_${challenge.challengerUserId}`] = battle;
@@ -1952,8 +1950,8 @@ module.exports = function initPokemon({ client, db, saveData, getGuildClans, get
       // winnerUserId is the speed-ordered p1/p2 userId
       // We need to map back to the actual user IDs and their correct slot indices
       const winnerIsP1    = winnerUserId === battle.p1UserId;
-      const winnerActual  = winnerIsP1 ? battle.p1ActualUserId : battle.p2ActualUserId;
-      const loserActual   = winnerIsP1 ? battle.p2ActualUserId : battle.p1ActualUserId;
+      const winnerActual  = winnerIsP1 ? battle.p1UserId : battle.p2UserId;
+      const loserActual   = winnerIsP1 ? battle.p2UserId : battle.p1UserId;
       const winnerSlot    = winnerIsP1 ? battle.p1SlotIndex    : battle.p2SlotIndex;
       const loserSlot     = winnerIsP1 ? battle.p2SlotIndex    : battle.p1SlotIndex;
       const winnerPoke    = winnerIsP1 ? battle.p1Pokemon      : battle.p2Pokemon;
@@ -1987,8 +1985,8 @@ module.exports = function initPokemon({ client, db, saveData, getGuildClans, get
     } catch (err) {
       console.error('endBattle error:', err);
     } finally {
-      delete activeBattles[`${battle.guildId}_${battle.p1ActualUserId}`];
-      delete activeBattles[`${battle.guildId}_${battle.p2ActualUserId}`];
+      delete activeBattles[`${battle.guildId}_${battle.p1UserId}`];
+      delete activeBattles[`${battle.guildId}_${battle.p2UserId}`];
     }
   }
 
