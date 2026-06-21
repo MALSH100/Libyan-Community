@@ -321,7 +321,8 @@ function initGacha({ client, db, saveData }) {
       const [raidId, raid] = entry;
       // The targeted owner's ❌ defends the card — resolve it immediately.
       if (reaction.emoji.name === RAID_EMOJI && user.id === raid.owner) {
-        return resolveRaid(s, gid, raidId, 'defended', reaction.message);
+        await resolveRaid(s, gid, raidId, 'defended', reaction.message);
+        return;
       }
       // Anything else (other emoji, or ❌ from someone who isn't the owner) is stripped.
       await reaction.users.remove(user.id).catch(() => {});
@@ -633,21 +634,29 @@ function initGacha({ client, db, saveData }) {
       saveData(gid);
       const defendedEmbed = new EmbedBuilder().setColor(0x2ECC71).setTitle('🛡️ Raid Defended!')
         .setDescription(`<@${r.owner}> defended ${TIER_EMOJI[r.rarity]} <@${r.cardId}>! <@${r.raider}>'s raid failed.\n\n<@${r.raider}> lost the **${fmt(r.fee)} Dinar** fee, and <@${r.owner}> earned **+${fmt(r.comp)} Dinar** for defending.`);
-      if (message) {
-        await message.edit({ embeds: [defendedEmbed] }).catch(() => {});
-        // Re-post as a fresh message so it shows at the bottom of the chat (people don't scroll up).
-        await message.channel.send({ embeds: [defendedEmbed] }).catch(() => {});
-      }
+      await announceRaidResult(r, defendedEmbed, message);
     } else {
       const transferred = s.owners[r.cardId] === r.owner;   // guard against trade/release mid-raid
       if (transferred) s.owners[r.cardId] = r.raider;
       saveData(gid);
-      if (message) await message.edit({ embeds: [new EmbedBuilder().setColor(0xE67E22).setTitle(transferred ? '⚔️ Raid Successful!' : '⚔️ Raid Ended')
+      const successEmbed = new EmbedBuilder().setColor(0xE67E22).setTitle(transferred ? '⚔️ Raid Successful!' : '⚔️ Raid Ended')
         .setDescription(transferred
           ? `<@${r.owner}> didn't defend in time — ${TIER_EMOJI[r.rarity]} <@${r.cardId}> now belongs to <@${r.raider}>!\n\nFee paid: **${fmt(r.fee)} Dinar**.`
-          : `The raid on <@${r.cardId}> ended, but its ownership had already changed. <@${r.raider}>'s **${fmt(r.fee)} Dinar** fee was spent.`)] }).catch(() => {});
+          : `The raid on <@${r.cardId}> ended, but its ownership had already changed. <@${r.raider}>'s **${fmt(r.fee)} Dinar** fee was spent.`);
+      await announceRaidResult(r, successEmbed, message);
     }
-    if (message) await message.reactions.removeAll().catch(() => {});   // tidy up the resolved alert
+  }
+
+  // Reliably announce a raid result as a FRESH message in the channel (interaction-reply
+  // alerts can't always be edited later), then best-effort edit/clear the original alert.
+  async function announceRaidResult(r, embed, message) {
+    let channel = null;
+    try { channel = await client.channels.fetch(r.channelId); } catch {}
+    if (channel) await channel.send({ embeds: [embed] }).catch((e) => console.error('[gacha] raid announce:', e.message));
+    try {
+      const original = message || (channel && await channel.messages.fetch(r.messageId).catch(() => null));
+      if (original) { await original.edit({ embeds: [embed] }).catch(() => {}); await original.reactions.removeAll().catch(() => {}); }
+    } catch { /* original gone or not editable — the fresh announcement already covered it */ }
   }
 
   // Keep a raid message clean: only the targeted owner's ❌ may remain. Removes any
