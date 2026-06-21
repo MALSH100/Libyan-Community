@@ -50,7 +50,7 @@ const RELEASE_REFUND     = 0.5;
 
 // ─── Raid system ─────────────────────────────────────────────────────────────
 const RAID_COST_PCT   = { Common: 0.10, Rare: 0.10, Epic: 0.10, Legendary: 0.10, Mythic: 0.10 };
-const RAID_DEFEND_MS  = 24 * 60 * 60 * 1000;      // owner has 24h to defend
+const RAID_DEFEND_MS  = 10 * 60 * 60 * 1000;      // owner has 10h to defend
 const RAID_DEFEND_REWARD = 50;                    // defender gets a flat 50, capped at the fee paid
 const RAID_USER_CD_MS = 24 * 60 * 60 * 1000;      // one raid initiated per user per day
 const RAID_CARD_CD_MS = 2 * 24 * 60 * 60 * 1000;  // a card can't be re-raided for 2 days
@@ -208,7 +208,7 @@ function getGachaCommands() {
       .addUserOption(o => o.setName('with').setDescription('The collector to trade with').setRequired(true))
       .addUserOption(o => o.setName('give').setDescription('A member YOU own to give').setRequired(true))
       .addUserOption(o => o.setName('receive').setDescription('A member THEY own to receive').setRequired(true)),
-    new SlashCommandBuilder().setName('gacha-raid').setDescription('Attempt to acquire a card from another collector (they have 24h to defend)').setDMPermission(false)
+    new SlashCommandBuilder().setName('gacha-raid').setDescription('Attempt to acquire a card from another collector (they have 10h to defend)').setDMPermission(false)
       .addUserOption(o => o.setName('owner').setDescription('The current owner of the card').setRequired(true))
       .addUserOption(o => o.setName('card').setDescription('The member-card you want to acquire').setRequired(true)),
     new SlashCommandBuilder().setName('gacha-leaderboard').setDescription('Top collectors in the server').setDMPermission(false),
@@ -602,7 +602,7 @@ function initGacha({ client, db, saveData }) {
       embeds: [new EmbedBuilder().setColor(0xE74C3C).setTitle('🚨 Raid Alert!')
         .setDescription(
           `<@${raider}> is attempting to acquire ${TIER_EMOJI[entry.rarity]} <@${card.id}> (**${entry.rarity}** · 💰 ${fmt(entry.value)}) from <@${owner.id}>'s collection.\n\n` +
-          `<@${owner.id}> — react with ${RAID_EMOJI} within **24 hours** to defend your ownership.\n` +
+          `<@${owner.id}> — react with ${RAID_EMOJI} within **10 hours** to defend your ownership.\n` +
           `If you don't defend in time, the card transfers to <@${raider}>.`)
         .setFooter({ text: `Raid fee: ${fmt(fee)} Dinar · defend to keep the card and earn ${fmt(comp)} Dinar` })],
       allowedMentions: { users: [owner.id] },
