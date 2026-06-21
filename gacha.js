@@ -49,9 +49,9 @@ const DINAR_DROP_MAX     = 125;
 const RELEASE_REFUND     = 0.5;
 
 // ─── Raid system ─────────────────────────────────────────────────────────────
-const RAID_COST_PCT   = { Common: 0.50, Rare: 0.60, Epic: 0.75, Legendary: 0.90, Mythic: 1.00 };
+const RAID_COST_PCT   = { Common: 0.10, Rare: 0.10, Epic: 0.10, Legendary: 0.10, Mythic: 0.10 };
 const RAID_DEFEND_MS  = 24 * 60 * 60 * 1000;      // owner has 24h to defend
-const RAID_OWNER_COMP = 0.10;                     // defender keeps 10% of the fee
+const RAID_DEFEND_REWARD = 50;                    // defender gets a flat 50, capped at the fee paid
 const RAID_USER_CD_MS = 24 * 60 * 60 * 1000;      // one raid initiated per user per day
 const RAID_CARD_CD_MS = 2 * 24 * 60 * 60 * 1000;  // a card can't be re-raided for 2 days
 const RAID_MAX_ACTIVE = 3;                        // max simultaneous raids one raider can run
@@ -232,6 +232,8 @@ function getGachaCommands() {
       .addSubcommand(sc => sc.setName('optin').setDescription('Force a member into the game (make them claimable)')
         .addUserOption(o => o.setName('user').setDescription('The member').setRequired(true)))
       .addSubcommand(sc => sc.setName('resetroll').setDescription('Reset roll & claim cooldowns for a member, or everyone if none given')
+        .addUserOption(o => o.setName('user').setDescription('The member (leave empty for everyone)').setRequired(false)))
+      .addSubcommand(sc => sc.setName('resetraid').setDescription('Reset raid cooldowns + clear all card protections (for testing)')
         .addUserOption(o => o.setName('user').setDescription('The member (leave empty for everyone)').setRequired(false)))
       .addSubcommand(sc => sc.setName('override').setDescription('Override a member\'s rarity and/or Dinar value')
         .addUserOption(o => o.setName('user').setDescription('The member').setRequired(true))
@@ -591,7 +593,7 @@ function initGacha({ client, db, saveData }) {
     const fee   = Math.floor((entry.value || 0) * pct);
     if (fee <= 0)                 return interaction.reply(eph('That card has no value to raid.'));
     if (dinarOf(s, raider) < fee) return interaction.reply(eph(`You need **${fmt(fee)} Dinar** to raid this ${entry.rarity} card (you have **${fmt(dinarOf(s, raider))}**).`));
-    const comp = Math.floor(fee * RAID_OWNER_COMP);
+    const comp = Math.min(RAID_DEFEND_REWARD, fee);   // flat 50, but never more than the raider paid (no minting)
 
     // Post the alert first; only charge if it actually posts.
     await interaction.reply({
@@ -629,8 +631,13 @@ function initGacha({ client, db, saveData }) {
     if (outcome === 'defended') {
       addDinar(s, r.owner, r.comp);
       saveData(gid);
-      if (message) await message.edit({ embeds: [new EmbedBuilder().setColor(0x2ECC71).setTitle('🛡️ Raid Defended!')
-        .setDescription(`<@${r.owner}> defended ${TIER_EMOJI[r.rarity]} <@${r.cardId}>! <@${r.raider}>'s raid failed.\n\n<@${r.raider}> lost the **${fmt(r.fee)} Dinar** fee, and <@${r.owner}> earned **+${fmt(r.comp)} Dinar** for defending.`)] }).catch(() => {});
+      const defendedEmbed = new EmbedBuilder().setColor(0x2ECC71).setTitle('🛡️ Raid Defended!')
+        .setDescription(`<@${r.owner}> defended ${TIER_EMOJI[r.rarity]} <@${r.cardId}>! <@${r.raider}>'s raid failed.\n\n<@${r.raider}> lost the **${fmt(r.fee)} Dinar** fee, and <@${r.owner}> earned **+${fmt(r.comp)} Dinar** for defending.`);
+      if (message) {
+        await message.edit({ embeds: [defendedEmbed] }).catch(() => {});
+        // Re-post as a fresh message so it shows at the bottom of the chat (people don't scroll up).
+        await message.channel.send({ embeds: [defendedEmbed] }).catch(() => {});
+      }
     } else {
       const transferred = s.owners[r.cardId] === r.owner;   // guard against trade/release mid-raid
       if (transferred) s.owners[r.cardId] = r.raider;
@@ -834,6 +841,18 @@ function initGacha({ client, db, saveData }) {
       for (const k of Object.keys(s.cooldowns)) { delete s.cooldowns[k].roll; delete s.cooldowns[k].claim; }
       saveData(gid);
       return interaction.reply(eph('✅ Roll & claim cooldowns reset for **everyone**.'));
+    }
+    if (sub === 'resetraid') {
+      const u = interaction.options.getUser('user');
+      s.raidCardCd = {};   // clear all 2-day per-card protections so any card can be re-raided
+      if (u) {
+        delete s.raidUserCd[u.id];
+        saveData(gid);
+        return interaction.reply(eph(`✅ Raid cooldown reset for <@${u.id}>, and all card protections cleared.`));
+      }
+      s.raidUserCd = {};
+      saveData(gid);
+      return interaction.reply(eph('✅ Raid cooldowns reset for **everyone**, and all card protections cleared.'));
     }
     if (sub === 'override') {
       const u = interaction.options.getUser('user');
