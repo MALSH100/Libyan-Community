@@ -314,12 +314,15 @@ function initGacha({ client, db, saveData }) {
       if (!gid) return;
       const s = db[gid]?.__gacha;
       if (!s?.raids) return;
-      const raid = Object.values(s.raids).find(r => r.messageId === reaction.message.id);
-      if (!raid) return;
-      // Only the targeted owner's ❌ is allowed — strip everything else.
-      if (reaction.emoji.name !== RAID_EMOJI || user.id !== raid.owner) {
-        await reaction.users.remove(user.id).catch(() => {});
+      const entry = Object.entries(s.raids).find(([, r]) => r.messageId === reaction.message.id);
+      if (!entry) return;
+      const [raidId, raid] = entry;
+      // The targeted owner's ❌ defends the card — resolve it immediately.
+      if (reaction.emoji.name === RAID_EMOJI && user.id === raid.owner) {
+        return resolveRaid(s, gid, raidId, 'defended', reaction.message);
       }
+      // Anything else (other emoji, or ❌ from someone who isn't the owner) is stripped.
+      await reaction.users.remove(user.id).catch(() => {});
     } catch { /* ignore */ }
   });
 
@@ -637,6 +640,7 @@ function initGacha({ client, db, saveData }) {
           ? `<@${r.owner}> didn't defend in time — ${TIER_EMOJI[r.rarity]} <@${r.cardId}> now belongs to <@${r.raider}>!\n\nFee paid: **${fmt(r.fee)} Dinar**.`
           : `The raid on <@${r.cardId}> ended, but its ownership had already changed. <@${r.raider}>'s **${fmt(r.fee)} Dinar** fee was spent.`)] }).catch(() => {});
     }
+    if (message) await message.reactions.removeAll().catch(() => {});   // tidy up the resolved alert
   }
 
   // Keep a raid message clean: only the targeted owner's ❌ may remain. Removes any
