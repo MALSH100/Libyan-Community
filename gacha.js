@@ -48,6 +48,16 @@ const DINAR_DROP_MIN     = 25;
 const DINAR_DROP_MAX     = 125;
 const RELEASE_REFUND     = 0.5;
 
+// ─── Raid system ─────────────────────────────────────────────────────────────
+const RAID_COST_PCT   = { Common: 0.50, Rare: 0.60, Epic: 0.75, Legendary: 0.90, Mythic: 1.00 };
+const RAID_DEFEND_MS  = 24 * 60 * 60 * 1000;      // owner has 24h to defend
+const RAID_OWNER_COMP = 0.10;                     // defender keeps 10% of the fee
+const RAID_USER_CD_MS = 24 * 60 * 60 * 1000;      // one raid initiated per user per day
+const RAID_CARD_CD_MS = 2 * 24 * 60 * 60 * 1000;  // a card can't be re-raided for 2 days
+const RAID_MAX_ACTIVE = 3;                        // max simultaneous raids one raider can run
+const RAID_SWEEP_MS   = 15 * 60 * 1000;           // how often pending raids are checked
+const RAID_EMOJI      = '❌';
+
 function defaults() {
   return {
     enabled:        true,
@@ -62,6 +72,10 @@ function defaults() {
     cooldowns:   {},   // userId -> { roll, claim, daily }
     stats:       {},   // userId -> { rolls, claims }
     trades:      {},   // tradeId -> { from, to, give, receive, ts }
+    raidsEnabled:   true,
+    raids:       {},   // raidId -> { raider, owner, cardId, fee, comp, rarity, messageId, channelId, createdAt, expiresAt }
+    raidUserCd:  {},   // raiderId -> last raid-initiation ts
+    raidCardCd:  {},   // cardId -> last raid-attempt ts
   };
 }
 
@@ -79,6 +93,7 @@ function addDinar(s, uid, n) { s.dinar[uid] = Math.max(0, (s.dinar[uid] || 0) + 
 const collectionOf = (s, ownerId) => Object.keys(s.owners).filter(cid => s.owners[cid] === ownerId);
 const eph = (content) => ({ content, flags: 64 });
 const fmt = (n) => n.toLocaleString('en-US');
+const fmtDur = (ms) => { const h = Math.floor(ms / 3600000), m = Math.ceil((ms % 3600000) / 60000); return h > 0 ? `${h}h ${m}m` : `${m}m`; };
 
 // Exported so other systems (clan wars, Ya Rayt, POTD, Pokémon) can pay out Dinar.
 function awardDinar(db, guildId, userId, amount, saveData) {
@@ -193,6 +208,9 @@ function getGachaCommands() {
       .addUserOption(o => o.setName('with').setDescription('The collector to trade with').setRequired(true))
       .addUserOption(o => o.setName('give').setDescription('A member YOU own to give').setRequired(true))
       .addUserOption(o => o.setName('receive').setDescription('A member THEY own to receive').setRequired(true)),
+    new SlashCommandBuilder().setName('gacha-raid').setDescription('Attempt to acquire a card from another collector (they have 24h to defend)').setDMPermission(false)
+      .addUserOption(o => o.setName('owner').setDescription('The current owner of the card').setRequired(true))
+      .addUserOption(o => o.setName('card').setDescription('The member-card you want to acquire').setRequired(true)),
     new SlashCommandBuilder().setName('gacha-leaderboard').setDescription('Top collectors in the server').setDMPermission(false),
     new SlashCommandBuilder().setName('gacha-list').setDescription('See who is opted in to the collection game (private)').setDMPermission(false),
 
@@ -202,6 +220,8 @@ function getGachaCommands() {
       .addSubcommand(sc => sc.setName('toggle').setDescription('Enable or disable the whole game')
         .addStringOption(o => o.setName('state').setDescription('on/off').setRequired(true).addChoices({ name: 'on', value: 'on' }, { name: 'off', value: 'off' })))
       .addSubcommand(sc => sc.setName('trading').setDescription('Enable or disable trading')
+        .addStringOption(o => o.setName('state').setDescription('on/off').setRequired(true).addChoices({ name: 'on', value: 'on' }, { name: 'off', value: 'off' })))
+      .addSubcommand(sc => sc.setName('raids').setDescription('Enable or disable the raid system')
         .addStringOption(o => o.setName('state').setDescription('on/off').setRequired(true).addChoices({ name: 'on', value: 'on' }, { name: 'off', value: 'off' })))
       .addSubcommand(sc => sc.setName('channel').setDescription('Restrict which channels the game works in')
         .addStringOption(o => o.setName('action').setDescription('add/remove/clear').setRequired(true).addChoices({ name: 'add', value: 'add' }, { name: 'remove', value: 'remove' }, { name: 'clear (allow all)', value: 'clear' }))
@@ -229,7 +249,7 @@ function getGachaCommands() {
 function initGacha({ client, db, saveData }) {
   const CMDS = new Set([
     'gacha-roll', 'gacha-optin', 'gacha-optout', 'gacha-wish', 'gacha-wishlist', 'gacha-daily',
-    'dinar', 'dinar-set', 'gacha-collection', 'gacha-rarest', 'gacha-release', 'gacha-trade', 'gacha-leaderboard', 'gacha-list', 'gacha-admin',
+    'dinar', 'dinar-set', 'gacha-collection', 'gacha-rarest', 'gacha-release', 'gacha-trade', 'gacha-leaderboard', 'gacha-list', 'gacha-admin', 'gacha-raid',
   ]);
   // Currency commands are exempt from the kill-switch and channel gate, since
   // Dinar is shared across the other games.
@@ -258,6 +278,51 @@ function initGacha({ client, db, saveData }) {
     saveData();
   }, RARITY_RECALC_MS).unref();
 
+  // Resolve pending raids: defended (owner reacted ❌) or expired (transfers to raider).
+  // Polls each raid's message — restart-robust, no reliance on cached reaction events.
+  setInterval(async () => {
+    for (const gid of Object.keys(db)) {
+      const s = db[gid]?.__gacha;
+      if (!s?.raids || !Object.keys(s.raids).length) continue;
+      for (const [raidId, r] of Object.entries(s.raids)) {
+        let message = null;
+        try {
+          const ch = await client.channels.fetch(r.channelId);
+          message = await ch.messages.fetch(r.messageId);
+        } catch { /* channel/message gone — fall through to expiry handling */ }
+
+        let defended = false;
+        if (message) {
+          const rx = message.reactions.cache.find(x => x.emoji.name === RAID_EMOJI);
+          if (rx) { try { const users = await rx.users.fetch(); defended = users.has(r.owner); } catch {} }
+        }
+
+        if (defended)                        await resolveRaid(s, gid, raidId, 'defended', message);
+        else if (Date.now() >= r.expiresAt)  await resolveRaid(s, gid, raidId, 'success', message);
+        else if (message)                    await enforceRaidReactions(message, r.owner);  // still pending: strip stray reactions
+      }
+    }
+  }, RAID_SWEEP_MS).unref();
+
+  // Real-time lockdown for raid messages while they're still cached: remove any
+  // reaction that isn't the targeted owner's ❌. The 15-min sweep is the backstop
+  // for messages that have aged out of cache (no partials configured on the client).
+  client.on('messageReactionAdd', async (reaction, user) => {
+    try {
+      if (user.bot) return;   // keep the bot's own ❌ pre-react
+      const gid = reaction.message.guildId || reaction.message.guild?.id;
+      if (!gid) return;
+      const s = db[gid]?.__gacha;
+      if (!s?.raids) return;
+      const raid = Object.values(s.raids).find(r => r.messageId === reaction.message.id);
+      if (!raid) return;
+      // Only the targeted owner's ❌ is allowed — strip everything else.
+      if (reaction.emoji.name !== RAID_EMOJI || user.id !== raid.owner) {
+        await reaction.users.remove(user.id).catch(() => {});
+      }
+    } catch { /* ignore */ }
+  });
+
   client.on('interactionCreate', async (interaction) => {
     try {
       if (interaction.isButton() && interaction.customId.startsWith('gacha_')) return handleButton(interaction);
@@ -283,6 +348,7 @@ function initGacha({ client, db, saveData }) {
         case 'gacha-rarest':      return cmdRarest(interaction, s);
         case 'gacha-release':     return cmdRelease(interaction, s);
         case 'gacha-trade':       return cmdTrade(interaction, s);
+        case 'gacha-raid':        return cmdRaid(interaction, s);
         case 'gacha-leaderboard': return cmdLeaderboard(interaction, s);
         case 'gacha-list':        return cmdList(interaction, s);
         case 'gacha-admin':       return cmdAdmin(interaction, s);
@@ -473,12 +539,118 @@ function initGacha({ client, db, saveData }) {
     const uid = interaction.user.id;
     const target = interaction.options.getUser('user');
     if (s.owners[target.id] !== uid) return interaction.reply(eph(`You don't own <@${target.id}>.`));
+    if (cardHasActiveRaid(s, target.id)) return interaction.reply(eph("That card is under an active raid — you can't release it until the raid resolves."));
     ensureFreshRarities(db, interaction.guild.id);
     const refund = Math.floor((s.pool[target.id]?.value || 0) * RELEASE_REFUND);
     delete s.owners[target.id];
     addDinar(s, uid, refund);
     saveData(interaction.guild.id);
     return interaction.reply(eph(`💔 Released <@${target.id}> and received **+${fmt(refund)} Dinar**. They're claimable again. Balance: **${fmt(dinarOf(s, uid))}**.`));
+  }
+
+  // ── /gacha-raid ────────────────────────────────────────────────────────────
+  const cardHasActiveRaid = (s, cardId) => Object.values(s.raids || {}).some(r => r.cardId === cardId);
+
+  async function cmdRaid(interaction, s) {
+    const gid    = interaction.guild.id;
+    const raider = interaction.user.id;
+    if (!s.raidsEnabled) return interaction.reply(eph('🚫 Raids are currently disabled.'));
+
+    // Raids must be public: if the owner can't see the alert, they can't defend.
+    // Requiring @everyone view access guarantees the targeted owner can see it.
+    const everyonePerms = interaction.channel?.permissionsFor(interaction.guild.roles.everyone);
+    if (everyonePerms && !everyonePerms.has(PermissionFlagsBits.ViewChannel)) {
+      return interaction.reply(eph('🔒 Raids must be started in a **public channel** so the owner can see the alert and defend. Please run this in a channel everyone can view.'));
+    }
+    ensureFreshRarities(db, gid);
+
+    const owner = interaction.options.getUser('owner');
+    const card  = interaction.options.getUser('card');
+
+    if (!s.pool[raider])                return interaction.reply(eph('You must be opted in to raid. Use `/gacha-optin` first.'));
+    if (card.id === raider)             return interaction.reply(eph("You can't raid your own card."));
+    if (!s.owners[card.id])             return interaction.reply(eph(`<@${card.id}> isn't owned by anyone — there's nothing to raid.`));
+    if (s.owners[card.id] === raider)   return interaction.reply(eph('You already own that card.'));
+    if (s.owners[card.id] !== owner.id) return interaction.reply(eph(`<@${owner.id}> doesn't own <@${card.id}> — the current owner is <@${s.owners[card.id]}>.`));
+    if (cardHasActiveRaid(s, card.id))  return interaction.reply(eph('That card already has an active raid running.'));
+
+    const cardWait = (s.raidCardCd[card.id] || 0) + RAID_CARD_CD_MS - Date.now();
+    if (cardWait > 0) return interaction.reply(eph(`That card was raided recently — it's protected for another **${fmtDur(cardWait)}**.`));
+
+    const userWait = (s.raidUserCd[raider] || 0) + RAID_USER_CD_MS - Date.now();
+    if (userWait > 0) return interaction.reply(eph(`You can only start one raid per day. Try again in **${fmtDur(userWait)}**.`));
+
+    if (Object.values(s.raids).filter(r => r.raider === raider).length >= RAID_MAX_ACTIVE)
+      return interaction.reply(eph(`You already have ${RAID_MAX_ACTIVE} raids running. Wait for one to resolve first.`));
+
+    const entry = s.pool[card.id] || { rarity: 'Common', value: TIER_VALUE.Common };
+    const pct   = RAID_COST_PCT[entry.rarity] ?? 0.30;
+    const fee   = Math.floor((entry.value || 0) * pct);
+    if (fee <= 0)                 return interaction.reply(eph('That card has no value to raid.'));
+    if (dinarOf(s, raider) < fee) return interaction.reply(eph(`You need **${fmt(fee)} Dinar** to raid this ${entry.rarity} card (you have **${fmt(dinarOf(s, raider))}**).`));
+    const comp = Math.floor(fee * RAID_OWNER_COMP);
+
+    // Post the alert first; only charge if it actually posts.
+    await interaction.reply({
+      content: `<@${owner.id}>`,
+      embeds: [new EmbedBuilder().setColor(0xE74C3C).setTitle('🚨 Raid Alert!')
+        .setDescription(
+          `<@${raider}> is attempting to acquire ${TIER_EMOJI[entry.rarity]} <@${card.id}> (**${entry.rarity}** · 💰 ${fmt(entry.value)}) from <@${owner.id}>'s collection.\n\n` +
+          `<@${owner.id}> — react with ${RAID_EMOJI} within **24 hours** to defend your ownership.\n` +
+          `If you don't defend in time, the card transfers to <@${raider}>.`)
+        .setFooter({ text: `Raid fee: ${fmt(fee)} Dinar · defend to keep the card and earn ${fmt(comp)} Dinar` })],
+      allowedMentions: { users: [owner.id] },
+    });
+    const msg = await interaction.fetchReply();
+    await msg.react(RAID_EMOJI).catch(() => {});
+
+    // Charge + record only after a successful post.
+    addDinar(s, raider, -fee);
+    s.raidUserCd[raider]  = Date.now();
+    s.raidCardCd[card.id] = Date.now();
+    s.raids[`${card.id}-${Date.now()}`] = {
+      raider, owner: owner.id, cardId: card.id, fee, comp, rarity: entry.rarity,
+      messageId: msg.id, channelId: msg.channelId || msg.channel?.id,
+      createdAt: Date.now(), expiresAt: Date.now() + RAID_DEFEND_MS,
+    };
+    saveData(gid);
+  }
+
+  // Resolve a raid. outcome: 'defended' (owner kept it) | 'success' (transfers to raider).
+  async function resolveRaid(s, gid, raidId, outcome, message) {
+    const r = s.raids[raidId];
+    if (!r) return;
+    delete s.raids[raidId];
+    s.raidCardCd[r.cardId] = Date.now();   // start the 2-day protection from resolution
+
+    if (outcome === 'defended') {
+      addDinar(s, r.owner, r.comp);
+      saveData(gid);
+      if (message) await message.edit({ embeds: [new EmbedBuilder().setColor(0x2ECC71).setTitle('🛡️ Raid Defended!')
+        .setDescription(`<@${r.owner}> defended ${TIER_EMOJI[r.rarity]} <@${r.cardId}>! <@${r.raider}>'s raid failed.\n\n<@${r.raider}> lost the **${fmt(r.fee)} Dinar** fee, and <@${r.owner}> earned **+${fmt(r.comp)} Dinar** for defending.`)] }).catch(() => {});
+    } else {
+      const transferred = s.owners[r.cardId] === r.owner;   // guard against trade/release mid-raid
+      if (transferred) s.owners[r.cardId] = r.raider;
+      saveData(gid);
+      if (message) await message.edit({ embeds: [new EmbedBuilder().setColor(0xE67E22).setTitle(transferred ? '⚔️ Raid Successful!' : '⚔️ Raid Ended')
+        .setDescription(transferred
+          ? `<@${r.owner}> didn't defend in time — ${TIER_EMOJI[r.rarity]} <@${r.cardId}> now belongs to <@${r.raider}>!\n\nFee paid: **${fmt(r.fee)} Dinar**.`
+          : `The raid on <@${r.cardId}> ended, but its ownership had already changed. <@${r.raider}>'s **${fmt(r.fee)} Dinar** fee was spent.`)] }).catch(() => {});
+    }
+  }
+
+  // Keep a raid message clean: only the targeted owner's ❌ may remain. Removes any
+  // other emoji entirely, and any ❌ added by someone other than the owner.
+  // (Requires the bot to have the Manage Messages permission in that channel.)
+  async function enforceRaidReactions(message, ownerId) {
+    if (!message?.reactions) return;
+    for (const rx of message.reactions.cache.values()) {
+      if (rx.emoji.name !== RAID_EMOJI) { await rx.remove().catch(() => {}); continue; }
+      let users; try { users = await rx.users.fetch(); } catch { continue; }
+      for (const u of users.values()) {
+        if (!u.bot && u.id !== ownerId) await rx.users.remove(u.id).catch(() => {});
+      }
+    }
   }
 
   // ── /gacha-trade ───────────────────────────────────────────────────────────
@@ -492,6 +664,7 @@ function initGacha({ client, db, saveData }) {
     if (other.bot)        return interaction.reply(eph('You can\'t trade with a bot.'));
     if (s.owners[give.id] !== uid)     return interaction.reply(eph(`You don't own <@${give.id}>.`));
     if (s.owners[recv.id] !== other.id) return interaction.reply(eph(`<@${other.id}> doesn't own <@${recv.id}>.`));
+    if (cardHasActiveRaid(s, give.id) || cardHasActiveRaid(s, recv.id)) return interaction.reply(eph('A card in this trade is under an active raid — wait for it to resolve first.'));
     const tradeId = `${uid}-${Date.now()}`;
     s.trades[tradeId] = { from: uid, to: other.id, give: give.id, receive: recv.id, ts: Date.now() };
     saveData(interaction.guild.id);
@@ -620,6 +793,7 @@ function initGacha({ client, db, saveData }) {
     const gid = interaction.guild.id;
     if (sub === 'toggle')  { s.enabled = interaction.options.getString('state') === 'on'; saveData(gid); return interaction.reply(eph(`Game is now **${s.enabled ? 'enabled' : 'disabled'}**.`)); }
     if (sub === 'trading') { s.tradingEnabled = interaction.options.getString('state') === 'on'; saveData(gid); return interaction.reply(eph(`Trading is now **${s.tradingEnabled ? 'enabled' : 'disabled'}**.`)); }
+    if (sub === 'raids')   { s.raidsEnabled = interaction.options.getString('state') === 'on'; saveData(gid); return interaction.reply(eph(`Raids are now **${s.raidsEnabled ? 'enabled' : 'disabled'}**. ${!s.raidsEnabled ? 'Existing raids will still resolve.' : ''}`)); }
     if (sub === 'channel') {
       const act = interaction.options.getString('action');
       if (act === 'clear') { s.channels = []; saveData(gid); return interaction.reply(eph('✅ Cleared — the game now works everywhere.')); }
