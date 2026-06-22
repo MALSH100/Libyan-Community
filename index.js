@@ -1317,7 +1317,7 @@ async function runWar(guild, channel, challengerName, defenderName, gameChoice) 
         if (!c) continue;
         c.xp = (c.xp || 0) + DRAW_XP;
         const roster = [c.leader, ...(c.officers || []), ...(c.members || [])];
-        for (const uid of roster) { awardLP(guild.id, uid, DRAW_LP, 'war_draw'); awardDinar(db, guild.id, uid, 50, saveData); }
+        for (const uid of roster) { awardLP(guild.id, uid, DRAW_LP, 'war_draw'); awardDinar(db, guild.id, uid, 50, saveData, 'war'); }
       }
       delete activeWars[guild.id];
       saveData();
@@ -1343,7 +1343,7 @@ async function runWar(guild, channel, challengerName, defenderName, gameChoice) 
     // Award Libyan Points to all members of both clans
     if (winnerClan) {
       const winMembers = [winnerClan.leader, ...(winnerClan.officers || []), ...(winnerClan.members || [])];
-      for (const uid of winMembers) { awardLP(guild.id, uid, 50, 'war_win'); awardDinar(db, guild.id, uid, 100, saveData); }
+      for (const uid of winMembers) { awardLP(guild.id, uid, 50, 'war_win'); awardDinar(db, guild.id, uid, 100, saveData, 'war'); }
     }
     if (loserClan) {
       const loseMembers = [loserClan.leader, ...(loserClan.officers || []), ...(loserClan.members || [])];
@@ -1662,7 +1662,7 @@ async function handleCommand(interaction, commandName, user, guild) {
           { name: '🎲 Playing', value: ['`/gacha-roll` — Drop a random member as a card *(once every 3h)*', '`/gacha-wish @user` — Wishlist someone (pings them)', '`/gacha-wishlist` — View / clear your wishlist', '`/gacha-collection [@user]` — View a collection', '`/gacha-rarest` — The 15 rarest cards in the server'].join('\n') },
           { name: '💰 Dinar & trading', value: ['`/dinar [@user]` — Check a Dinar balance', '`/gacha-daily` — Claim daily Dinar', '`/gacha-release @user` — Release a card for Dinar', '`/gacha-trade @with @give @receive` — Swap cards', '`/gacha-raid @owner @card` — Try to take a card from someone'].join('\n') },
           { name: '⚡ How a roll works', value: ['• `/gacha-roll` warns, then drops the card after **5s**', '• **Anyone** can hit Claim — first click wins (sniping!)', '• A card expires if unclaimed after **60s**', '• Roll an already-owned member → a **💵 Dinar Drop** button appears instead', '• You must be **opted in** to claim cards or grab Dinar'].join('\n') },
-          { name: '⚔️ How a raid works', value: ['• `/gacha-raid` lets you try to take an owned card — for a fee (10% of its value)', '• Must be run in a **public channel** so the owner can see & defend', '• The owner has **10h** to react ❌ to **defend**', '• Defended → you lose the fee, the owner keeps the card + a **50 Dinar** reward', '• Not defended → the card is **yours**', '• 1 raid/day, max 3 active, and each card is safe for 2 days after a raid', '• **Active owners almost never lose** — just defend!'].join('\n') },
+          { name: '⚔️ How a raid works', value: ['• `/gacha-raid` lets you try to take an owned card — for a fee (10% of its value)', '• Must be run in a **public channel** so the owner can see & defend', '• The owner has **10h** to react ❌ to **defend**', '• Defended → you lose the fee, the owner keeps the card + up to a **50 Dinar** reward', '• Not defended → the card is **yours**', '• 1 raid/day, max 3 active, and each card is safe for 2 days after a raid', '• **Active owners almost never lose** — just defend!'].join('\n') },
         ).setFooter({ text: 'Page 5 of 6 — use buttons to navigate' }),
 
       new EmbedBuilder().setColor(0xF1C40F).setTitle('💎 Libyan Community Bot — Page 6/6: Rarity & Earning Dinar')
@@ -1671,7 +1671,7 @@ async function handleCommand(interaction, commandName, user, guild) {
           { name: '⭐ How rarity is decided', value: ['Each opted-in member gets an **activity score** from:', '• 🏆 Clan war wins', '• 🇱🇾 Ya Rayt participation', '• 📸 Post of the Day wins', '• 🎮 Pokémon caught & battle wins', 'Your score is ranked against everyone in the pool to set your tier.'].join('\n') },
           { name: '🏅 The tiers (rarest → most common)', value: ['🔴 **Mythic** — top 1% · 15,000 Dinar', '🟡 **Legendary** — top 5% · 5,000 Dinar', '🟣 **Epic** — top 20% · 1,500 Dinar', '🔵 **Rare** — top 50% · 500 Dinar', '⚪ **Common** — everyone else · 100 Dinar'].join('\n') },
           { name: '📈 Rarity is LIVE', value: 'Rarities recalculate regularly. The more active you are, the rarer and more valuable **your** card becomes — and as the whole server gets more active, the bar to stay rare rises. Stay active to keep your value up!' },
-          { name: '💰 How to earn Dinar', value: ['• `/gacha-daily` — **+50** per day', '• 💵 Grab **Dinar Drops** when an owned card is rolled', '• 🏆 Win a Clan War — **+100**', '• 🇱🇾 Win Ya Rayt — **+500**', '• 📸 Win Post of the Day — **+300**', '• 🎮 Catch a Pokémon — **+20** · win a battle — **+75**', '• 💔 Release a card — **50%** of its value back', '• 🔁 Trade with other collectors'].join('\n') },
+          { name: '💰 How to earn Dinar', value: ['• `/gacha-daily` — **+50** per day', '• 💵 Grab **Dinar Drops** when an owned card is rolled', '• 🏆 Win a Clan War — **+100**', '• 🇱🇾 Win Ya Rayt — **+500**', '• 📸 Win Post of the Day — **+300**', '• 🎮 Catch a Pokémon — **+20** · win a battle — **+75**', '• 💔 Release a card — **50%** of its value back', '• 🔁 Trade with other collectors', '• ⚠️ Clan wars & Pokémon battles each cap at **300 Dinar/day** (anti-farming)'].join('\n') },
           { name: '🛒 Spending Dinar', value: 'Claiming a card costs its **Dinar value** (a Mythic costs 15,000!). Winning the games is how you afford the best cards.' },
         ).setFooter({ text: 'Page 6 of 6 — use buttons to navigate' }),
     ];
