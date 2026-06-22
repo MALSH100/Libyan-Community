@@ -1966,7 +1966,8 @@ module.exports = function initPokemon({ client, db, saveData, getGuildClans, get
           winnerData.battleWins = (winnerData.battleWins || 0) + 1;
           winnerData.pokemon[winnerSlot].battleWins = (winnerData.pokemon[winnerSlot].battleWins || 0) + 1;
           if (awardLP) awardLP(battle.guildId, winnerActual, 15, 'pokemon');
-          awardDinar(db, battle.guildId, winnerActual, 75, saveData);
+          const dinarGot = awardDinar(db, battle.guildId, winnerActual, 75, saveData, 'battle');
+          if (dinarGot < 75) await channel.send('⚠️ Daily battle Dinar limit reached — no Dinar from further battles today (XP and the win still count).').catch(() => {});
           if (levelled) {
             await channel.send(`⬆️ **${capitalize(winnerData.pokemon[winnerSlot].name)}** levelled up to **Lv.${winnerData.pokemon[winnerSlot].level}**!`).catch(() => {});
           }
