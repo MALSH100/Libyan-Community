@@ -69,6 +69,7 @@ function defaults() {
     owners:      {},   // claimedUserId -> ownerId
     wishlists:   {},   // userId -> [wishedUserId, ...]
     dinar:       {},   // userId -> balance
+    earnCaps:    {},   // userId -> { date, war, battle } daily Dinar earned per capped source
     cooldowns:   {},   // userId -> { roll, claim, daily }
     stats:       {},   // userId -> { rolls, claims }
     trades:      {},   // tradeId -> { from, to, give, receive, ts }
@@ -96,11 +97,29 @@ const fmt = (n) => n.toLocaleString('en-US');
 const fmtDur = (ms) => { const h = Math.floor(ms / 3600000), m = Math.ceil((ms % 3600000) / 60000); return h > 0 ? `${h}h ${m}m` : `${m}m`; };
 
 // Exported so other systems (clan wars, Ya Rayt, POTD, Pokémon) can pay out Dinar.
-function awardDinar(db, guildId, userId, amount, saveData) {
-  if (!guildId || !userId || !amount) return;
+// Per-user daily Dinar caps for farmable PvP sources (anti-abuse). Sources not
+// listed here are uncapped. Tunable — lower these if farming continues.
+const DINAR_DAILY_CAPS = { war: 300, battle: 300 };
+
+// Returns the amount actually credited (0 if that source's daily cap is already hit).
+function awardDinar(db, guildId, userId, amount, saveData, source) {
+  if (!guildId || !userId || !amount) return 0;
   const s = getState(db, guildId);
-  addDinar(s, userId, amount);
+
+  let award = amount;
+  if (source && DINAR_DAILY_CAPS[source] != null) {
+    if (!s.earnCaps) s.earnCaps = {};
+    const today = new Date().toISOString().slice(0, 10);
+    let cap = s.earnCaps[userId];
+    if (!cap || cap.date !== today) cap = s.earnCaps[userId] = { date: today };
+    const used = cap[source] || 0;
+    award = Math.max(0, Math.min(amount, DINAR_DAILY_CAPS[source] - used));
+    cap[source] = used + award;
+  }
+
+  if (award > 0) addDinar(s, userId, award);
   if (typeof saveData === 'function') saveData(guildId);
+  return award;
 }
 
 // ─── Rarity from existing stats ──────────────────────────────────────────────
