@@ -79,6 +79,7 @@ function defaults() {
     wishlists:   {},   // userId -> [wishedUserId, ...]
     dinar:       {},   // userId -> balance
     earnCaps:    {},   // userId -> { date, war, battle } daily Dinar earned per capped source
+    flipStats:   {},   // userId -> { wins, losses, won, lost } coin-flip record
     cooldowns:   {},   // userId -> { roll, claim, daily }
     stats:       {},   // userId -> { rolls, claims }
     trades:      {},   // tradeId -> { from, to, give, receive, ts }
@@ -231,6 +232,8 @@ function getGachaCommands() {
       .addIntegerOption(o => o.setName('amount').setDescription(`How much to bet (${FLIP_MIN_BET}–${FLIP_MAX_BET} Dinar)`).setRequired(true).setMinValue(FLIP_MIN_BET).setMaxValue(FLIP_MAX_BET))
       .addStringOption(o => o.setName('side').setDescription('Your call').setRequired(true)
         .addChoices({ name: 'Heads', value: 'heads' }, { name: 'Tails', value: 'tails' })),
+    new SlashCommandBuilder().setName('dinar-richest').setDescription('Top 10 richest members by Dinar').setDMPermission(false),
+    new SlashCommandBuilder().setName('dinar-flip-leaderboard').setDescription('Top 10 coin-flip winners (with win/loss %)').setDMPermission(false),
     new SlashCommandBuilder().setName('gacha-collection').setDescription('View a collection').setDMPermission(false)
       .addUserOption(o => o.setName('user').setDescription('Whose collection (default: you)').setRequired(false)),
     new SlashCommandBuilder().setName('gacha-rarest').setDescription('Show the top 15 rarest cards in the server').setDMPermission(false),
@@ -283,7 +286,7 @@ function getGachaCommands() {
 function initGacha({ client, db, saveData }) {
   const CMDS = new Set([
     'gacha-roll', 'gacha-optin', 'gacha-optout', 'gacha-wish', 'gacha-wishlist', 'gacha-daily',
-    'dinar', 'dinar-set', 'gacha-collection', 'gacha-rarest', 'gacha-release', 'gacha-trade', 'gacha-leaderboard', 'gacha-list', 'gacha-admin', 'gacha-raid', 'dinar-flip',
+    'dinar', 'dinar-set', 'gacha-collection', 'gacha-rarest', 'gacha-release', 'gacha-trade', 'gacha-leaderboard', 'gacha-list', 'gacha-admin', 'gacha-raid', 'dinar-flip', 'dinar-richest', 'dinar-flip-leaderboard',
   ]);
   // Currency commands are exempt from the kill-switch and channel gate, since
   // Dinar is shared across the other games.
@@ -382,6 +385,8 @@ function initGacha({ client, db, saveData }) {
         case 'gacha-daily':       return cmdDaily(interaction, s);
         case 'dinar':             return cmdDinar(interaction, s);
         case 'dinar-flip':        return cmdFlip(interaction, s);
+        case 'dinar-richest':     return cmdRichest(interaction, s);
+        case 'dinar-flip-leaderboard': return cmdFlipBoard(interaction, s);
         case 'dinar-set':         return cmdDinarSet(interaction, s);
         case 'gacha-collection':  return cmdCollection(interaction, s);
         case 'gacha-rarest':      return cmdRarest(interaction, s);
@@ -552,6 +557,9 @@ function initGacha({ client, db, saveData }) {
     const win = Math.random() < FLIP_WIN_CHANCE;
     const landed = win ? side : (side === 'heads' ? 'tails' : 'heads');
     addDinar(s, uid, win ? amount : -amount);
+    if (!s.flipStats) s.flipStats = {};
+    const fstat = (s.flipStats[uid] ||= { wins: 0, losses: 0, won: 0, lost: 0 });
+    if (win) { fstat.wins++; fstat.won += amount; } else { fstat.losses++; fstat.lost += amount; }
     cd.flip = Date.now();
     saveData(interaction.guild.id);
 
@@ -580,6 +588,41 @@ function initGacha({ client, db, saveData }) {
       .setImage(`attachment://${faceFile}`)
       .setFooter({ text: `One flip every ${Math.round(FLIP_CD_MS / 3600000)} hours` });
     await interaction.editReply({ embeds: [resultEmbed], files: [coinFile(faceFile)], attachments: [] }).catch(() => {});
+  }
+
+  function cmdRichest(interaction, s) {
+    const medals = ['🥇', '🥈', '🥉'];
+    const ranked = Object.entries(s.dinar || {})
+      .filter(([, bal]) => bal > 0)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10);
+    const embed = new EmbedBuilder().setColor(0xF1C40F).setTitle('💰 Richest in Dinar — Top 10')
+      .setDescription(ranked.length
+        ? ranked.map(([id, bal], i) => `${medals[i] || `**${i + 1}.**`} <@${id}> — **${fmt(bal)}** Dinar`).join('\n')
+        : '_Nobody has any Dinar yet._');
+    return interaction.reply({ embeds: [embed] });
+  }
+
+  function cmdFlipBoard(interaction, s) {
+    const medals = ['🥇', '🥈', '🥉'];
+    const rows = Object.entries(s.flipStats || {})
+      .map(([id, st]) => {
+        const wins = st.wins || 0, losses = st.losses || 0, games = wins + losses;
+        return { id, wins, losses, games, net: (st.won || 0) - (st.lost || 0), winPct: games ? (wins / games) * 100 : 0 };
+      })
+      .filter(r => r.games > 0)
+      .sort((a, b) => b.net - a.net)
+      .slice(0, 10);
+    const embed = new EmbedBuilder().setColor(0xE6B840).setTitle('🪙 Coin Flip Leaderboard — Top 10')
+      .setDescription(rows.length
+        ? rows.map((r, i) => {
+            const sign = r.net >= 0 ? '+' : '';
+            return `${medals[i] || `**${i + 1}.**`} <@${r.id}> — **${sign}${fmt(r.net)}** Dinar\n` +
+                   `　${r.wins}W / ${r.losses}L · ${r.winPct.toFixed(0)}% win · ${(100 - r.winPct).toFixed(0)}% loss`;
+          }).join('\n')
+        : '_No coin flips yet. Be the first with `/dinar-flip`!_')
+      .setFooter({ text: 'Ranked by net Dinar won' });
+    return interaction.reply({ embeds: [embed] });
   }
   function cmdDinarSet(interaction, s) {
     if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) return interaction.reply(eph('🚫 Admins only.'));

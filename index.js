@@ -509,6 +509,7 @@ new SlashCommandBuilder()
   new SlashCommandBuilder().setName('clan-transfer').setDescription('Transfer leadership to another member (Leader only)')
     .addUserOption(o => o.setName('user').setDescription('Member to transfer to').setRequired(true)),
   new SlashCommandBuilder().setName('clan-channel-create').setDescription('Create a private clan channel (Leader only)'),
+  new SlashCommandBuilder().setName('clan-channel-link').setDescription('Set THIS channel as your clan\'s Pokémon spawn channel (Leader only)'),
   new SlashCommandBuilder().setName('clan-channel-delete').setDescription('Delete the private clan channel (Leader only)'),
   new SlashCommandBuilder().setName('clan-pokemon').setDescription('Turn Pokémon spawns & item drops on/off in your clan channel (Leader/Officer)')
     .setDMPermission(false)
@@ -1624,7 +1625,7 @@ async function handleCommand(interaction, commandName, user, guild) {
           { name: '🏰 Management', value: ['`/clan-create <name>` — Create a clan', '`/clan-disband` — Delete your clan *(Leader)*', '`/clan-rename <name> [emoji]` *(Leader)*', '`/clan-description <text>` *(Leader/Officer)*', '`/clan-motto <text>` *(Leader/Officer)*', '`/clan-ranks <member> <officer> <leader>` *(Leader)*'].join('\n') },
           { name: '👥 Membership', value: ['`/clan-invite @user` *(Leader/Officer)*', '`/clan-invite-accept`', '`/clan-invite-decline`', '`/clan-kick @user` *(Leader/Officer)*', '`/clan-leave`'].join('\n') },
           { name: '🛡️ Ranks', value: ['`/clan-promote @user` *(Leader)*', '`/clan-demote @user` *(Leader)*', '`/clan-transfer @user` *(Leader)*'].join('\n') },
-          { name: '📢 Channel & Wars', value: ['`/clan-channel-create` *(Leader)*', '`/clan-channel-delete` *(Leader)*', '`/clan-war <clan>` *(Leader/Officer)*', '`/clan-war-accept` *(Leader/Officer)*', '`/clan-war-decline` *(Leader/Officer)*'].join('\n') },
+          { name: '📢 Channel & Wars', value: ['`/clan-channel-create` *(Leader)*', '`/clan-channel-link` — set spawn channel *(Leader)*', '`/clan-channel-delete` *(Leader)*', '`/clan-war <clan>` *(Leader/Officer)*', '`/clan-war-accept` *(Leader/Officer)*', '`/clan-war-decline` *(Leader/Officer)*'].join('\n') },
         ).setFooter({ text: 'Page 1 of 6 — use buttons to navigate' }),
 
       new EmbedBuilder().setColor(0xFF0000).setTitle('🎮 Libyan Community Bot — Page 2/6: Pokémon')
@@ -1660,7 +1661,7 @@ async function handleCommand(interaction, commandName, user, guild) {
         .addFields(
           { name: '🚪 Getting in', value: ['`/gacha-optin` — Become a claimable card', '`/gacha-optout` — Leave & wipe all claims of you', '`/gacha-list` — See who has opted in'].join('\n') },
           { name: '🎲 Playing', value: ['`/gacha-roll` — Drop a random member as a card *(once every 3h)*', '`/gacha-wish @user` — Wishlist someone (pings them)', '`/gacha-wishlist` — View / clear your wishlist', '`/gacha-collection [@user]` — View a collection', '`/gacha-rarest` — The 15 rarest cards in the server'].join('\n') },
-          { name: '💰 Dinar & trading', value: ['`/dinar [@user]` — Check a Dinar balance', '`/gacha-daily` — Claim daily Dinar', '`/dinar-flip <bet> <heads/tails>` — Coin toss for Dinar (every 2h)', '`/gacha-release @user` — Release a card for Dinar', '`/gacha-trade @with @give @receive` — Swap cards', '`/gacha-raid @owner @card` — Try to take a card from someone'].join('\n') },
+          { name: '💰 Dinar & trading', value: ['`/dinar [@user]` — Check a Dinar balance', '`/gacha-daily` — Claim daily Dinar', '`/dinar-flip <bet> <heads/tails>` — Coin toss for Dinar (every 2h)', '`/dinar-richest` — Top 10 richest', '`/dinar-flip-leaderboard` — Top 10 coin-flip winners', '`/gacha-release @user` — Release a card for Dinar', '`/gacha-trade @with @give @receive` — Swap cards', '`/gacha-raid @owner @card` — Try to take a card from someone'].join('\n') },
           { name: '⚡ How a roll works', value: ['• `/gacha-roll` warns, then drops the card after **5s**', '• **Anyone** can hit Claim — first click wins (sniping!)', '• A card expires if unclaimed after **60s**', '• Roll an already-owned member → a **💵 Dinar Drop** button appears instead', '• You must be **opted in** to claim cards or grab Dinar'].join('\n') },
           { name: '⚔️ How a raid works', value: ['• `/gacha-raid` lets you try to take an owned card — for a fee (10% of its value)', '• Must be run in a **public channel** so the owner can see & defend', '• The owner has **10h** to react ❌ to **defend**', '• Defended → you lose the fee, the owner keeps the card + up to a **50 Dinar** reward', '• Not defended → the card is **yours**', '• 1 raid/day, max 3 active, and each card is safe for 2 days after a raid', '• **Active owners almost never lose** — just defend!'].join('\n') },
         ).setFooter({ text: 'Page 5 of 6 — use buttons to navigate' }),
@@ -2188,6 +2189,19 @@ async function handleCommand(interaction, commandName, user, guild) {
     return safeReply(interaction, { embeds: [new EmbedBuilder().setColor(0x5865F2).setTitle('👑 Leadership Transferred').setDescription(`<@${target.id}> is now the **Leader** of **${result.name}**!\n<@${user.id}> has stepped down to Member.`)] });
   }
 
+  // ── /clan-channel-link ──────────────────────────────────────────────────────
+  if (commandName === 'clan-channel-link') {
+    const result = getUserClan(guild.id, user.id);
+    if (!result) return safeReply(interaction, { content: '❌ You are not in a clan.', flags: 64 });
+    if (result.clan.leader !== user.id) return safeReply(interaction, { content: '❌ Only the Leader can set the clan channel.', flags: 64 });
+    result.clan.channelId = interaction.channelId;
+    result.clan.pokemonDisabled = false;
+    saveData();
+    try { scheduleSpawnFor(interaction.channel); } catch {}
+    return safeReply(interaction, { embeds: [new EmbedBuilder().setColor(0x57F287).setTitle('✅ Spawn channel linked')
+      .setDescription(`This channel is now **${result.name}**'s Pokémon channel. Wild Pokémon and item drops will appear here from now on.`)] });
+  }
+
   // ── /clan-channel-create ────────────────────────────────────────────────────
   if (commandName === 'clan-channel-create') {
     const result = getUserClan(guild.id, user.id);
@@ -2343,7 +2357,7 @@ process.on('SIGINT',  () => shutdown('SIGINT'));
 
 // ─── Pokemon System ───────────────────────────────────────────────────────────
 
-const { startSpawnTimers } = require('./pokemon')({ client, db, saveData, getGuildClans, getUserClan, awardLP });
+const { startSpawnTimers, scheduleSpawnFor } = require('./pokemon')({ client, db, saveData, getGuildClans, getUserClan, awardLP });
 
 // ─── Ya Rayt System ───────────────────────────────────────────────────────────
 

@@ -1214,18 +1214,25 @@ module.exports = function initPokemon({ client, db, saveData, getGuildClans, get
           if (!clan.channelId) continue;
 
           let channel = guild.channels.cache.get(clan.channelId);
+          let fetchErr = null;
           if (!channel) {
-            try { channel = await guild.channels.fetch(clan.channelId); } catch {}
+            try { channel = await guild.channels.fetch(clan.channelId); }
+            catch (e) { fetchErr = e; }
           }
 
           if (channel) {
             console.log(`🌿 Scheduling spawns for #${channel.name}`);
             scheduleNextSpawn(channel, db, saveData, getGuildClans, getUserClan, awardLP);
             scheduleNextDrop(channel);
-          } else {
-            console.warn(`⚠️ Could not find channel ${clan.channelId} — clearing stale channelId`);
+          } else if (fetchErr && (fetchErr.code === 10003 || fetchErr.status === 404)) {
+            // 10003 = Unknown Channel: it's genuinely deleted, so it's safe to clear.
+            console.warn(`⚠️ Channel ${clan.channelId} no longer exists — clearing.`);
             clan.channelId = null;
             saveData();
+          } else {
+            // Transient failure (cache not ready, rate-limit, network). Do NOT wipe the
+            // channelId — keep it and retry on the next boot so spawns can resume.
+            console.warn(`⚠️ Couldn't resolve channel ${clan.channelId} right now (${fetchErr ? fetchErr.message : 'not cached'}); keeping it, will retry.`);
           }
         }
       }
@@ -2088,6 +2095,13 @@ module.exports = function initPokemon({ client, db, saveData, getGuildClans, get
     }, 2000);
   });
 
-  return { startSpawnTimers };
+  // Allow index.js to (re)start spawns for a specific channel — used by /clan-channel-link.
+  function scheduleSpawnFor(channel) {
+    if (!channel) return;
+    scheduleNextSpawn(channel, db, saveData, getGuildClans, getUserClan, awardLP);
+    scheduleNextDrop(channel);
+  }
+
+  return { startSpawnTimers, scheduleSpawnFor };
 
 };
