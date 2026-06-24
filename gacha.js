@@ -27,8 +27,9 @@
 
 const {
   SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits,
-  ActionRowBuilder, ButtonBuilder, ButtonStyle,
+  ActionRowBuilder, ButtonBuilder, ButtonStyle, AttachmentBuilder,
 } = require('discord.js');
+const path = require('path');
 
 // ─── Tuning ──────────────────────────────────────────────────────────────────
 const TIERS       = ['Common', 'Rare', 'Epic', 'Legendary', 'Mythic'];
@@ -46,6 +47,14 @@ const TRADE_TTL_MS       = 5 * 60 * 1000;
 const DAILY_BASE         = 50;
 const DINAR_DROP_MIN     = 25;
 const DINAR_DROP_MAX     = 125;
+
+// ─── /dinar-flip (coin toss) ───────────────────────────────────────────────
+const FLIP_MIN_BET    = 1;
+const FLIP_MAX_BET    = 500;                 // max stake per flip
+const FLIP_WIN_CHANCE = 0.45;                // < 0.5 = house edge. 0.45 + 2x payout ≈ 10% edge
+const FLIP_CD_MS      = 2 * 60 * 60 * 1000;  // one flip every 2 hours per user
+const COIN_DIR        = path.join(__dirname, 'assets');
+const coinFile = (name) => new AttachmentBuilder(path.join(COIN_DIR, name), { name });
 const RELEASE_REFUND     = 0.5;
 
 // ─── Raid system ─────────────────────────────────────────────────────────────
@@ -218,6 +227,10 @@ function getGachaCommands() {
       .setDMPermission(false).setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
       .addUserOption(o => o.setName('user').setDescription('The member').setRequired(true))
       .addIntegerOption(o => o.setName('amount').setDescription('New balance (e.g. 0 to reset)').setRequired(true).setMinValue(0)),
+    new SlashCommandBuilder().setName('dinar-flip').setDescription('Bet Dinar on a Libyan coin toss — heads or tails!').setDMPermission(false)
+      .addIntegerOption(o => o.setName('amount').setDescription(`How much to bet (${FLIP_MIN_BET}–${FLIP_MAX_BET} Dinar)`).setRequired(true).setMinValue(FLIP_MIN_BET).setMaxValue(FLIP_MAX_BET))
+      .addStringOption(o => o.setName('side').setDescription('Your call').setRequired(true)
+        .addChoices({ name: 'Heads', value: 'heads' }, { name: 'Tails', value: 'tails' })),
     new SlashCommandBuilder().setName('gacha-collection').setDescription('View a collection').setDMPermission(false)
       .addUserOption(o => o.setName('user').setDescription('Whose collection (default: you)').setRequired(false)),
     new SlashCommandBuilder().setName('gacha-rarest').setDescription('Show the top 15 rarest cards in the server').setDMPermission(false),
@@ -270,7 +283,7 @@ function getGachaCommands() {
 function initGacha({ client, db, saveData }) {
   const CMDS = new Set([
     'gacha-roll', 'gacha-optin', 'gacha-optout', 'gacha-wish', 'gacha-wishlist', 'gacha-daily',
-    'dinar', 'dinar-set', 'gacha-collection', 'gacha-rarest', 'gacha-release', 'gacha-trade', 'gacha-leaderboard', 'gacha-list', 'gacha-admin', 'gacha-raid',
+    'dinar', 'dinar-set', 'gacha-collection', 'gacha-rarest', 'gacha-release', 'gacha-trade', 'gacha-leaderboard', 'gacha-list', 'gacha-admin', 'gacha-raid', 'dinar-flip',
   ]);
   // Currency commands are exempt from the kill-switch and channel gate, since
   // Dinar is shared across the other games.
@@ -368,6 +381,7 @@ function initGacha({ client, db, saveData }) {
         case 'gacha-wishlist':    return cmdWishlist(interaction, s);
         case 'gacha-daily':       return cmdDaily(interaction, s);
         case 'dinar':             return cmdDinar(interaction, s);
+        case 'dinar-flip':        return cmdFlip(interaction, s);
         case 'dinar-set':         return cmdDinarSet(interaction, s);
         case 'gacha-collection':  return cmdCollection(interaction, s);
         case 'gacha-rarest':      return cmdRarest(interaction, s);
@@ -516,6 +530,56 @@ function initGacha({ client, db, saveData }) {
   function cmdDinar(interaction, s) {
     const target = interaction.options.getUser('user') || interaction.user;
     return interaction.reply({ content: `💰 **${target.username}** has **${fmt(dinarOf(s, target.id))} Dinar**.` });
+  }
+
+  async function cmdFlip(interaction, s) {
+    const uid = interaction.user.id;
+    const name = interaction.member?.displayName || interaction.user.username;
+    const amount = interaction.options.getInteger('amount');
+    const side = interaction.options.getString('side');                 // 'heads' | 'tails'
+
+    // bet bounds are enforced by the slash command, but re-check defensively
+    if (amount < FLIP_MIN_BET || amount > FLIP_MAX_BET) {
+      return interaction.reply(eph(`🪙 Bet must be between **${fmt(FLIP_MIN_BET)}** and **${fmt(FLIP_MAX_BET)} Dinar**.`));
+    }
+    const cd = (s.cooldowns[uid] ||= {});
+    const since = Date.now() - (cd.flip || 0);
+    if (since < FLIP_CD_MS) return interaction.reply(eph(`⏳ You can flip again in **${fmtDur(FLIP_CD_MS - since)}**.`));
+    const bal = dinarOf(s, uid);
+    if (bal < amount) return interaction.reply(eph(`💸 You only have **${fmt(bal)} Dinar** — not enough to bet **${fmt(amount)}**.`));
+
+    // resolve now (house edge baked into FLIP_WIN_CHANCE), then animate
+    const win = Math.random() < FLIP_WIN_CHANCE;
+    const landed = win ? side : (side === 'heads' ? 'tails' : 'heads');
+    addDinar(s, uid, win ? amount : -amount);
+    cd.flip = Date.now();
+    saveData(interaction.guild.id);
+
+    const sideName = (x) => (x === 'heads' ? 'Heads' : 'Tails');
+    const newBal = dinarOf(s, uid);
+
+    // stage 1 — public "flipping" with the spinning coin
+    const spinEmbed = new EmbedBuilder().setColor(0xE6B840)
+      .setTitle('🪙 Libyan Coin Toss')
+      .setDescription(`**${name}** bet **${fmt(amount)} Dinar** on **${sideName(side)}**…\nThe coin is in the air! 🌀`)
+      .setImage('attachment://dinar-coin-spin.gif');
+    await interaction.reply({ embeds: [spinEmbed], files: [coinFile('dinar-coin-spin.gif')] }).catch(() => {});
+
+    await new Promise((r) => setTimeout(r, 2600));
+
+    // stage 2 — reveal the landed face + result
+    const faceFile = landed === 'heads' ? 'dinar-coin-heads.png' : 'dinar-coin-tails.png';
+    const resultEmbed = new EmbedBuilder().setColor(win ? 0x2ECC71 : 0xE74C3C)
+      .setTitle('🪙 Libyan Coin Toss')
+      .setDescription(
+        `The coin landed on **${sideName(landed)}**!\n\n` +
+        (win
+          ? `🎉 **${name}** called **${sideName(side)}** and won **+${fmt(amount)} Dinar**!`
+          : `💸 **${name}** called **${sideName(side)}** and lost **${fmt(amount)} Dinar**.`) +
+        `\n💰 New balance: **${fmt(newBal)} Dinar**`)
+      .setImage(`attachment://${faceFile}`)
+      .setFooter({ text: `One flip every ${Math.round(FLIP_CD_MS / 3600000)} hours` });
+    await interaction.editReply({ embeds: [resultEmbed], files: [coinFile(faceFile)], attachments: [] }).catch(() => {});
   }
   function cmdDinarSet(interaction, s) {
     if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) return interaction.reply(eph('🚫 Admins only.'));
