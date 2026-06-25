@@ -1650,7 +1650,7 @@ async function handleCommand(interaction, commandName, user, guild) {
           { name: '🌿 Catching', value: ['`/pokemon-team` — Your Pokémon', '`/pokemon-stats <slot>` — Detailed stats + XP bar', '`/pokemon-view @user` — View someone\'s Pokémon', '`/pokemon-release <slot>` — Release a Pokémon', '`/pokemon-nickname <slot> <name>` — Nickname', '`/pokemon-info <name>` — Look up any Pokémon'].join('\n') },
           { name: '⚔️ Battles', value: ['`/pokemon-challenge @user <slot>` — Challenge to 1v1', '`/pokemon-accept <slot>` — Accept challenge', '`/pokemon-decline` — Decline challenge'].join('\n') },
           { name: '🎒 Items', value: ['`/pokemon-bag` — Your item bag', '`/pokemon-claim` — Claim item drop in clan channel'].join('\n') },
-          { name: '🎴 Card Games', value: '`/battlecards @user [target] [bet]` — Duel: secret cards, highest wins, first to 3 or 5. Optional Dinar wager — winner takes the pot!' },
+          { name: '🎴 Card Games', value: ['`/battlecards @user [target] [bet]` — Duel: secret cards, highest wins, first to 3 or 5', '`/battlecards-leaderboard` — Top duelists', '`/battlecards-stats [user]` — Win/loss record', '*Wins give LP 🏅 + optional Dinar wager 💰*'].join('\n') },
           { name: '⚙️ Clan Channel', value: '`/clan-pokemon <on/off>` — Turn spawns & item drops on or off in your clan channel *(Leader/Officer)*' },
           { name: '📊 Stats', value: ['`/pokemon-leaderboard` — Clan Pokémon rankings', '`/pokemon-server` — Server top Pokémon by wins', '`/pokedex` — Clan Pokédex completion'].join('\n') },
           { name: '⏱️ Timings', value: 'Wild Pokémon spawn every **5 hours**, flee after **3 hours**\nItem drops every **7 hours**, expire after **5 hours**\nShiny chance: 1 in 50 🌟' },
@@ -2398,7 +2398,7 @@ initLibyaChat(client);
 
 // Qa'ima — Server Collection Game (Dinar economy)
 initGacha({ client, db, saveData });
-initBattleCards({ client, db, saveData });
+initBattleCards({ client, db, saveData, awardLP });
 
 // Translator (reaction-based Arabic → English)
 //initTranslator(client, db, saveData);
