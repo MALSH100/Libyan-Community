@@ -16,11 +16,20 @@ const { awardDinar, isAtDinarCap, dinarDailyCap } = require('./gacha');
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const MAX_POKEMON        = 30;
-const SPAWN_INTERVAL_MS  = 5 * 60 * 60 * 1000;   // 5 hours
+const SPAWN_INTERVAL_MS  = 5 * 60 * 60 * 1000;   // (legacy, no longer used for scheduling)
 const SPAWN_FLEE_MS      = 3 * 60 * 60 * 1000;   // 3 hours
-const DROP_INTERVAL_MS   = 7 * 60 * 60 * 1000;   // Item drops every 7 hours
+const DROP_INTERVAL_MS   = 7 * 60 * 60 * 1000;   // (legacy, no longer used for scheduling)
 const DROP_EXPIRE_MS     = 5 * 60 * 60 * 1000;   // Item drops expire in 5 hours
 const POKEBALL_PER_SPAWN = 3;
+
+// ─── Persistent daily spawn schedule (survives bot restarts/redeploys) ───────
+const LIBYA_OFFSET_MS    = 2 * 60 * 60 * 1000;   // Libya is UTC+2 year-round (no DST)
+const SPAWN_WINDOW_START = 9;                    // 09:00 Libya time
+const SPAWN_WINDOW_END   = 23;                   // 23:00 Libya time
+const SPAWNS_PER_DAY     = 3;
+const DROPS_PER_DAY      = 2;
+const MIN_GAP_MS         = 90 * 60 * 1000;       // ≥90 min between scheduled times
+const SCHED_TICK_MS      = 60 * 1000;            // re-check the schedule every minute
 const MAX_POKEMON_ID     = 898;
 const SHINY_CHANCE       = 50;
 const POTION_HEAL_PCT    = 0.30;
@@ -609,11 +618,8 @@ function clanForChannel(getGuildClans, channel) {
 }
 
 function scheduleNextSpawn(channel, db, saveData, getGuildClans, getUserClan, awardLP) {
-  if (spawnTimers[channel.id]) clearTimeout(spawnTimers[channel.id]);
-    spawnTimers[channel.id] = setTimeout(
-    () => triggerSpawn(channel, db, saveData, getGuildClans, getUserClan, awardLP),
-    SPAWN_INTERVAL_MS
-  );
+  // No-op: per-channel interval timers don't survive redeploys. Spawns are now driven
+  // by a persistent daily schedule (see ensureSchedule / scheduleTick in initPokemon).
 }
 
 async function triggerSpawn(channel, db, saveData, getGuildClans, getUserClan, awardLP) {
@@ -1203,42 +1209,122 @@ module.exports = function initPokemon({ client, db, saveData, getGuildClans, get
   // This must NOT be called from clientReady inside pokemon.js because db will
   // still be empty at that point — loadData() in index.js hasn't finished yet.
 
-  async function startSpawnTimers() {
-    // Short delay for the channel cache to settle after login
-    setTimeout(async () => {
-      for (const guild of client.guilds.cache.values()) {
-        try { await guild.channels.fetch(); } catch {}
+  // ─── Persistent daily spawn scheduler ───────────────────────────────────────
+  // Random spawn/drop times for the day are stored in the DB, so they survive
+  // restarts/redeploys. A 1-minute tick fires any times that are due and marks them
+  // 'fired' — so updating the bot never resets the schedule or double-spawns.
 
-        const gc = getGuildClans(guild.id);
-        for (const [__k, clan] of Object.entries(gc)) { if (__k.startsWith("__")) continue;
-          if (!clan.channelId) continue;
-
-          let channel = guild.channels.cache.get(clan.channelId);
-          let fetchErr = null;
-          if (!channel) {
-            try { channel = await guild.channels.fetch(clan.channelId); }
-            catch (e) { fetchErr = e; }
-          }
-
-          if (channel) {
-            console.log(`🌿 Scheduling spawns for #${channel.name}`);
-            scheduleNextSpawn(channel, db, saveData, getGuildClans, getUserClan, awardLP);
-            scheduleNextDrop(channel);
-          } else if (fetchErr && (fetchErr.code === 10003 || fetchErr.status === 404)) {
-            // 10003 = Unknown Channel: it's genuinely deleted, so it's safe to clear.
-            console.warn(`⚠️ Channel ${clan.channelId} no longer exists — clearing.`);
-            clan.channelId = null;
-            saveData();
-          } else {
-            // Transient failure (cache not ready, rate-limit, network). Do NOT wipe the
-            // channelId — keep it and retry on the next boot so spawns can resume.
-            console.warn(`⚠️ Couldn't resolve channel ${clan.channelId} right now (${fetchErr ? fetchErr.message : 'not cached'}); keeping it, will retry.`);
-          }
-        }
-      }
-    }, 3000);
+  function libyaDayInfo(nowMs) {
+    const lib = new Date(nowMs + LIBYA_OFFSET_MS);
+    const y = lib.getUTCFullYear(), mo = lib.getUTCMonth(), d = lib.getUTCDate();
+    const startOfDayUTC = Date.UTC(y, mo, d) - LIBYA_OFFSET_MS;   // 00:00 Libya, in UTC ms
+    const dateStr = `${y}-${String(mo + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+    return { dateStr, startOfDayUTC };
   }
 
+  // Pick `count` random times in [startMs, endMs] with at least `minGapMs` between them.
+  function pickTimes(startMs, endMs, count, minGapMs) {
+    const windowMs = endMs - startMs;
+    if (windowMs <= 0 || count <= 0) return [];
+    let gap = minGapMs;
+    if (windowMs - (count - 1) * gap < 0) gap = Math.floor(windowMs / count);   // shrink gap if the window is tight
+    const free = Math.max(0, windowMs - (count - 1) * gap);
+    const offsets = [];
+    for (let i = 0; i < count; i++) offsets.push(Math.random() * free);
+    offsets.sort((a, b) => a - b);
+    return offsets.map((o, i) => Math.round(startMs + o + i * gap));   // sorted, guaranteed ≥ gap apart
+  }
+
+  // Ensure today's schedule exists; (re)generate on each new Libya day.
+  function ensureSchedule(guildId, nowMs) {
+    const data = db[guildId];
+    if (!data) return null;
+    const { dateStr, startOfDayUTC } = libyaDayInfo(nowMs);
+    if (!data.__pokeSched || data.__pokeSched.date !== dateStr) {
+      const winStart = startOfDayUTC + SPAWN_WINDOW_START * 3600 * 1000;
+      const winEnd   = startOfDayUTC + SPAWN_WINDOW_END   * 3600 * 1000;
+      const effStart = Math.max(winStart, nowMs);          // if first run is mid-day, schedule only the remaining window
+      let spawns = [], drops = [];
+      if (winEnd - effStart > 5 * 60 * 1000) {              // at least 5 min of today's window left
+        spawns = pickTimes(effStart, winEnd, SPAWNS_PER_DAY, MIN_GAP_MS).map(at => ({ at, fired: false }));
+        drops  = pickTimes(effStart, winEnd, DROPS_PER_DAY,  MIN_GAP_MS).map(at => ({ at, fired: false }));
+      }
+      data.__pokeSched = { date: dateStr, spawns, drops };
+      saveData(guildId);
+      const fmt = (a) => a.length ? a.map(s => new Date(s.at).toISOString().slice(11, 16)).join(', ') : '(none today)';
+      console.log(`🗓️ Pokémon schedule ${dateStr} (guild ${guildId}) — spawns ${fmt(spawns)} | drops ${fmt(drops)} UTC`);
+    }
+    return data.__pokeSched;
+  }
+
+  // Resolve a clan's spawn channel (cache → fetch); clear only genuinely-deleted ones.
+  async function resolveClanChannel(guild, clan) {
+    if (!clan.channelId) return null;
+    const cached = guild.channels.cache.get(clan.channelId);
+    if (cached) return cached;
+    try { return await guild.channels.fetch(clan.channelId); }
+    catch (e) {
+      if (e && (e.code === 10003 || e.status === 404)) { clan.channelId = null; saveData(guild.id); }
+      return null;   // transient errors keep the channelId so it can resume later
+    }
+  }
+
+  async function runScheduledSpawn(guildId) {
+    const guild = client.guilds.cache.get(guildId);
+    if (!guild) return;
+    const gc = getGuildClans(guildId);
+    for (const [k, clan] of Object.entries(gc)) {
+      if (k.startsWith('__') || !clan.channelId || clan.pokemonDisabled) continue;
+      const channel = await resolveClanChannel(guild, clan);
+      if (channel) await triggerSpawn(channel, db, saveData, getGuildClans, getUserClan, awardLP);
+    }
+  }
+
+  async function runScheduledDrop(guildId) {
+    const guild = client.guilds.cache.get(guildId);
+    if (!guild) return;
+    const gc = getGuildClans(guildId);
+    for (const [k, clan] of Object.entries(gc)) {
+      if (k.startsWith('__') || !clan.channelId || clan.pokemonDisabled) continue;
+      const channel = await resolveClanChannel(guild, clan);
+      if (channel) await triggerDrop(channel);
+    }
+  }
+
+  // Every minute: fire any due spawn/drop. At most one of each per guild per tick, so
+  // if the bot was down through several scheduled times they spread out instead of bunching.
+  async function scheduleTick(nowOverride, executors) {
+    const now = nowOverride || Date.now();
+    const fireSpawn = (executors && executors.spawn) || runScheduledSpawn;
+    const fireDrop  = (executors && executors.drop)  || runScheduledDrop;
+    for (const guild of client.guilds.cache.values()) {
+      const gc = getGuildClans(guild.id);
+      const hasChannel = Object.entries(gc).some(([k, c]) => !k.startsWith('__') && c.channelId);
+      if (!hasChannel) continue;
+      const sched = ensureSchedule(guild.id, now);
+      if (!sched) continue;
+
+      const dueSpawn = sched.spawns.find(s => !s.fired && s.at <= now);
+      if (dueSpawn) {
+        dueSpawn.fired = true; saveData(guild.id);          // mark BEFORE firing so a redeploy can't double-spawn
+        Promise.resolve(fireSpawn(guild.id)).catch(e => console.error('[poke spawn]', e.message));
+      }
+      const dueDrop = sched.drops.find(s => !s.fired && s.at <= now);
+      if (dueDrop) {
+        dueDrop.fired = true; saveData(guild.id);
+        Promise.resolve(fireDrop(guild.id)).catch(e => console.error('[poke drop]', e.message));
+      }
+    }
+  }
+
+  async function startSpawnTimers() {
+    setTimeout(async () => {
+      for (const guild of client.guilds.cache.values()) { try { await guild.channels.fetch(); } catch {} }
+      await scheduleTick();                                  // catch up anything already due
+      setInterval(() => { scheduleTick().catch(e => console.error('[poke tick]', e.message)); }, SCHED_TICK_MS);
+      console.log('🗓️ Pokémon scheduler started — persistent daily schedule, checked every minute.');
+    }, 3000);
+  }
   // ─── Interaction handler ────────────────────────────────────────────────────
 
   client.on('interactionCreate', async interaction => {
@@ -2005,11 +2091,7 @@ module.exports = function initPokemon({ client, db, saveData, getGuildClans, get
   // ─── Item Drop System ─────────────────────────────────────────────────────
 
   function scheduleNextDrop(channel) {
-    if (dropTimers[channel.id]) clearTimeout(dropTimers[channel.id]);
-    dropTimers[channel.id] = setTimeout(
-      () => triggerDrop(channel),
-      DROP_INTERVAL_MS
-    );
+    // No-op: replaced by the persistent daily schedule (see scheduleTick).
   }
 
   async function triggerDrop(channel) {
@@ -2101,11 +2183,12 @@ module.exports = function initPokemon({ client, db, saveData, getGuildClans, get
 
   // Allow index.js to (re)start spawns for a specific channel — used by /clan-channel-link.
   function scheduleSpawnFor(channel) {
-    if (!channel) return;
-    scheduleNextSpawn(channel, db, saveData, getGuildClans, getUserClan, awardLP);
-    scheduleNextDrop(channel);
+    if (!channel || !channel.guild) return;
+    ensureSchedule(channel.guild.id, Date.now());   // make sure today's persistent schedule exists
+    // give immediate feedback that the channel is live, then it follows the daily schedule
+    triggerSpawn(channel, db, saveData, getGuildClans, getUserClan, awardLP).catch(() => {});
   }
 
-  return { startSpawnTimers, scheduleSpawnFor };
+  return { startSpawnTimers, scheduleSpawnFor, _sched: { ensureSchedule, scheduleTick, pickTimes, libyaDayInfo } };
 
 };
