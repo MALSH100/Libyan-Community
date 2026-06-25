@@ -11,7 +11,7 @@ const {
   ButtonStyle,
   ActionRowBuilder,
 } = require('discord.js');
-const { awardDinar } = require('./gacha');
+const { awardDinar, isAtDinarCap, dinarDailyCap } = require('./gacha');
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -1974,7 +1974,11 @@ module.exports = function initPokemon({ client, db, saveData, getGuildClans, get
           winnerData.pokemon[winnerSlot].battleWins = (winnerData.pokemon[winnerSlot].battleWins || 0) + 1;
           if (awardLP) awardLP(battle.guildId, winnerActual, 15, 'pokemon');
           const dinarGot = awardDinar(db, battle.guildId, winnerActual, 75, saveData, 'battle');
-          if (dinarGot < 75) await channel.send('⚠️ Daily battle Dinar limit reached — no Dinar from further battles today (XP and the win still count).').catch(() => {});
+          if (isAtDinarCap(db, battle.guildId, 'battle', winnerActual)) {
+            const who = guild?.members?.cache?.get(winnerActual)?.displayName
+                     || winnerData?.username || `<@${winnerActual}>`;
+            await channel.send(`⚠️ **${who}** has reached today's battle limit of **${dinarDailyCap('battle')} Dinar** (anti-farming). Battle wins won't earn Dinar again until tomorrow — wins and XP still count, and catching, daily, Ya Rayt and POTD still pay!`).catch(() => {});
+          }
           if (levelled) {
             await channel.send(`⬆️ **${capitalize(winnerData.pokemon[winnerSlot].name)}** levelled up to **Lv.${winnerData.pokemon[winnerSlot].level}**!`).catch(() => {});
           }
