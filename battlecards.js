@@ -503,27 +503,31 @@ function initBattleCards({ client, db, saveData, awardLP }) {
 
     if (!isPlayer) return interaction.reply(eph('🎴 You’re not in this duel.'));
 
-    // ── Rematch (only once the duel is over — must be checked BEFORE the 'playing' guard) ──
+    // ── Rematch: the clicker re-challenges; the OTHER player must accept (never forced) ──
     if (action === 'rematch') {
       if (g.status !== 'done') return interaction.reply(eph('🎴 The duel isn’t over yet.'));
-      if (g.bet > 0 && (getDinar(db, g.guildId, g.p1) < g.bet || getDinar(db, g.guildId, g.p2) < g.bet))
-        return interaction.reply(eph(`💸 Both players need **${g.bet} Dinar** for a rematch wager.`));
-      await interaction.deferUpdate();
-      if (g.bet > 0) {
-        const ok1 = spendDinar(db, g.guildId, g.p1, g.bet, saveData);
-        const ok2 = spendDinar(db, g.guildId, g.p2, g.bet, saveData);
-        if (!ok1 || !ok2) {
-          if (ok1) awardDinar(db, g.guildId, g.p1, g.bet, saveData);
-          if (ok2) awardDinar(db, g.guildId, g.p2, g.bet, saveData);
-          return interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLOR.grey)
-            .setTitle('🎴 Battle Cards — Rematch Cancelled')
-            .setDescription('Couldn’t place the rematch wager (insufficient Dinar). Any stake refunded.')], components: [] });
-        }
-        g.escrowed = true;
-      }
+      const opponent = (uid === g.p1) ? g.p2 : g.p1;
+      if (g.bet > 0 && getDinar(db, g.guildId, uid) < g.bet)
+        return interaction.reply(eph(`💸 You don't have **${g.bet} Dinar** to wager a rematch.`));
+      // re-arrange so the clicker is the challenger and the opponent is the one who must accept
+      const challengerName = (uid === g.p1) ? g.p1Name : g.p2Name;
+      const opponentName   = (uid === g.p1) ? g.p2Name : g.p1Name;
+      g.p1 = uid; g.p2 = opponent;
+      g.p1Name = challengerName; g.p2Name = opponentName;
       g.status = 'pending';
-      await beginMatch(g);
-      return interaction.editReply(roundPrompt(g));
+      g.escrowed = false;                          // stakes are only taken when the opponent accepts
+      const wagerLine = g.bet > 0 ? `\n💰 **Wager: ${g.bet} Dinar each** — winner takes the pot!` : '';
+      const embed = new EmbedBuilder().setColor(COLOR.blue)
+        .setTitle('🎴 Battle Cards — Rematch?')
+        .setDescription(
+          `**${challengerName}** wants a rematch against **${opponentName}**!${wagerLine}\n\n` +
+          `<@${opponent}>, do you accept?`);
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`bc:${g.id}:accept`).setLabel('✅ Accept').setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId(`bc:${g.id}:decline`).setLabel('❌ Decline').setStyle(ButtonStyle.Danger));
+      await interaction.update({ content: `<@${opponent}>`, embeds: [embed], components: [row], allowedMentions: { users: [opponent] } });
+      armTimer(g, CHALLENGE_TIMEOUT_MS, () => expireChallenge(g.id));
+      return;
     }
 
     if (g.status !== 'playing') return interaction.reply(eph('🎴 This duel isn’t active right now.'));
