@@ -537,7 +537,8 @@ const initBlackMarketExchange = require('./black-market-exchange');
 //const initJobs = require('./jobs');
 const { initPOTD } = require('./potd');
 const { getLibyaChatCommands, initLibyaChat } = require('./libya-chat');
-const { getGachaCommands, initGacha, awardDinar } = require('./gacha');
+const { getGachaCommands, initGacha, awardDinar, isAtDinarCap, dinarDailyCap } = require('./gacha');
+const { getBattleCardsCommands, initBattleCards } = require('./battlecards');
 //const initTranslator = require('./translator');
 
 function getAllCommands() {
@@ -596,7 +597,13 @@ function getAllCommands() {
   } catch (e) {
     console.error('Could not load gacha.js commands:', e.message);
   }
-  _allCommands = [...commands, ...pokeCommands, ...yaraytCommands, ...exchangeCommands, ...newsCommands, ...jobsCommands, ...potdCommands, ...translatorCommands, ...libyaChatCommands, ...gachaCommands];
+  let battleCardsCommands = [];
+  try {
+    battleCardsCommands = getBattleCardsCommands();
+  } catch (e) {
+    console.error('Could not load battlecards.js commands:', e.message);
+  }
+  _allCommands = [...commands, ...pokeCommands, ...yaraytCommands, ...exchangeCommands, ...newsCommands, ...jobsCommands, ...potdCommands, ...translatorCommands, ...libyaChatCommands, ...gachaCommands, ...battleCardsCommands];
   console.log(`📋 Command list built: ${_allCommands.map(c => c.name).join(', ')}`);
   return _allCommands;
 }
@@ -1313,23 +1320,28 @@ async function runWar(guild, channel, challengerName, defenderName, gameChoice) 
     if (winnerId == null) {
       const DRAW_XP = 50;   // clan XP each on a draw  (win = 100, loss = 20)
       const DRAW_LP = 25;   // member LP each on a draw (win = 50,  loss = 10)
+      let cappedDraw = [];
       for (const name of [challengerName, defenderName]) {
         const c = gc[name];
         if (!c) continue;
         c.xp = (c.xp || 0) + DRAW_XP;
         const roster = [c.leader, ...(c.officers || []), ...(c.members || [])];
         for (const uid of roster) { awardLP(guild.id, uid, DRAW_LP, 'war_draw'); awardDinar(db, guild.id, uid, 50, saveData, 'war'); }
+        cappedDraw.push(...roster.filter(uid => isAtDinarCap(db, guild.id, 'war', uid)));
       }
       delete activeWars[guild.id];
       saveData();
 
+      const drawCapNote = cappedDraw.length
+        ? `\n\n⚠️ ${cappedDraw.map(u => `<@${u}>`).join(', ')} reached today's war Dinar limit (${dinarDailyCap('war')}/day) — no more war Dinar until tomorrow (LP still counts).`
+        : '';
       const cR = guild.roles.cache.get(challenger.memberRoleId || challenger.roleId);
       const dR = guild.roles.cache.get(defender.memberRoleId   || defender.roleId);
       await channel.send({
         embeds: [new EmbedBuilder().setColor(0xFFD700).setTitle('🤝 WAR DRAWN!')
           .setDescription(
             `${cR ?? `**${challengerName}**`} vs ${dR ?? `**${defenderName}**`}\n\n` +
-            `It's a **draw** — neither clan takes the win. Both clans earn **+${DRAW_XP} XP**, and every member gets **+${DRAW_LP} LP** and **+50 Dinar** 💰. GG! 🤝`
+            `It's a **draw** — neither clan takes the win. Both clans earn **+${DRAW_XP} XP**, and every member gets **+${DRAW_LP} LP** and **+50 Dinar** 💰. GG! 🤝${drawCapNote}`
           )]
       }).catch(() => {});
       return;
@@ -1342,9 +1354,11 @@ async function runWar(guild, channel, challengerName, defenderName, gameChoice) 
     if (loserClan)  { loserClan.losses   = (loserClan.losses   || 0) + 1; loserClan.xp  = (loserClan.xp  || 0) + 20; }
 
     // Award Libyan Points to all members of both clans
+    let cappedWar = [];
     if (winnerClan) {
       const winMembers = [winnerClan.leader, ...(winnerClan.officers || []), ...(winnerClan.members || [])];
       for (const uid of winMembers) { awardLP(guild.id, uid, 50, 'war_win'); awardDinar(db, guild.id, uid, 100, saveData, 'war'); }
+      cappedWar = winMembers.filter(uid => isAtDinarCap(db, guild.id, 'war', uid));
     }
     if (loserClan) {
       const loseMembers = [loserClan.leader, ...(loserClan.officers || []), ...(loserClan.members || [])];
@@ -1353,6 +1367,9 @@ async function runWar(guild, channel, challengerName, defenderName, gameChoice) 
     delete activeWars[guild.id];
     saveData();
 
+    const warCapNote = cappedWar.length
+      ? `\n\n⚠️ ${cappedWar.map(u => `<@${u}>`).join(', ')} reached today's war Dinar limit (${dinarDailyCap('war')}/day) — no more war Dinar until tomorrow (LP still counts).`
+      : '';
     const wR = guild.roles.cache.get(winnerClan?.memberRoleId || winnerClan?.roleId);
     const lR = guild.roles.cache.get(loserClan?.memberRoleId  || loserClan?.roleId);
     await channel.send({
@@ -1361,7 +1378,7 @@ async function runWar(guild, channel, challengerName, defenderName, gameChoice) 
           `🎉 **Winner: ${wR ?? `**${winnerId}**`}**\n` +
           `+100 XP · every member earns **+50 LP** and **+100 Dinar** 💰\n\n` +
           `😔 **Loser: ${lR ?? `**${loserId}**`}**\n` +
-          `+20 XP · every member earns **+10 LP** for taking part\n\nGG to both clans! 🤝`
+          `+20 XP · every member earns **+10 LP** for taking part\n\nGG to both clans! 🤝${warCapNote}`
         )]
     }).catch(() => {});
 
@@ -1633,6 +1650,7 @@ async function handleCommand(interaction, commandName, user, guild) {
           { name: '🌿 Catching', value: ['`/pokemon-team` — Your Pokémon', '`/pokemon-stats <slot>` — Detailed stats + XP bar', '`/pokemon-view @user` — View someone\'s Pokémon', '`/pokemon-release <slot>` — Release a Pokémon', '`/pokemon-nickname <slot> <name>` — Nickname', '`/pokemon-info <name>` — Look up any Pokémon'].join('\n') },
           { name: '⚔️ Battles', value: ['`/pokemon-challenge @user <slot>` — Challenge to 1v1', '`/pokemon-accept <slot>` — Accept challenge', '`/pokemon-decline` — Decline challenge'].join('\n') },
           { name: '🎒 Items', value: ['`/pokemon-bag` — Your item bag', '`/pokemon-claim` — Claim item drop in clan channel'].join('\n') },
+          { name: '🎴 Card Games', value: '`/battlecards @user [target] [bet]` — Duel: secret cards, highest wins, first to 3 or 5. Optional Dinar wager — winner takes the pot!' },
           { name: '⚙️ Clan Channel', value: '`/clan-pokemon <on/off>` — Turn spawns & item drops on or off in your clan channel *(Leader/Officer)*' },
           { name: '📊 Stats', value: ['`/pokemon-leaderboard` — Clan Pokémon rankings', '`/pokemon-server` — Server top Pokémon by wins', '`/pokedex` — Clan Pokédex completion'].join('\n') },
           { name: '⏱️ Timings', value: 'Wild Pokémon spawn every **5 hours**, flee after **3 hours**\nItem drops every **7 hours**, expire after **5 hours**\nShiny chance: 1 in 50 🌟' },
@@ -2380,6 +2398,7 @@ initLibyaChat(client);
 
 // Qa'ima — Server Collection Game (Dinar economy)
 initGacha({ client, db, saveData });
+initBattleCards({ client, db, saveData });
 
 // Translator (reaction-based Arabic → English)
 //initTranslator(client, db, saveData);
