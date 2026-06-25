@@ -16,9 +16,14 @@ const BET_MIN  = 1;
 const BET_MAX  = 10000;       // max wager per player
 const RAKE_PCT = 0.05;        // table fee skimmed from the pot to the void (Dinar sink). Set 0 for winner-takes-all.
 
+// ─── Progression (Libyan Points) ─────────────────────────────────────────────
+const LP_PER_WIN         = 15;   // LP awarded to the winner of a duel
+const LP_WIN_CAP_PER_DAY = 5;    // max LP-earning wins per day (anti-farming); extra wins still count on the leaderboard
+
 // ─── Card helpers ────────────────────────────────────────────────────────────
 const SUITS        = ['S', 'H', 'D', 'C'];
 const SUIT_SYMBOL  = { S: '♠', H: '♥', D: '♦', C: '♣' };
+const SUIT_EMOJI   = { S: '♠️', H: '♥️', D: '♦️', C: '♣️' };   // colored emoji versions for buttons/messages
 const RANKS        = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '0', 'J', 'Q', 'K'];
 const RANK_VALUE   = { A: 14, K: 13, Q: 12, J: 11, '0': 10, '9': 9, '8': 8, '7': 7, '6': 6, '5': 5, '4': 4, '3': 3, '2': 2 };
 const RANK_LABEL   = { '0': '10', A: 'A', K: 'K', Q: 'Q', J: 'J', '9': '9', '8': '8', '7': '7', '6': '6', '5': '5', '4': '4', '3': '3', '2': '2' };
@@ -27,10 +32,13 @@ const cardImage    = (code) => `https://deckofcardsapi.com/static/img/${code}.pn
 function cardFromCode(code) {
   const rank = code.slice(0, -1);
   const suit = code.slice(-1);
+  const rankLabel = RANK_LABEL[rank];
   return {
     code, rank, suit,
     value: RANK_VALUE[rank],
-    label: `${RANK_LABEL[rank]}${SUIT_SYMBOL[suit]}`,
+    rankLabel,                                   // "A", "10", "K" — button text
+    suitEmoji: SUIT_EMOJI[suit],                 // ♥️ ♦️ ♠️ ♣️ — button emoji
+    label: `${rankLabel}${SUIT_EMOJI[suit]}`,    // "A♥️" — for chat messages
     red:   suit === 'H' || suit === 'D',
     image: cardImage(code),
   };
@@ -75,11 +83,20 @@ function getBattleCardsCommands() {
         .addChoices({ name: 'First to 3', value: 3 }, { name: 'First to 5', value: 5 }))
       .addIntegerOption(o => o.setName('bet').setDescription('Dinar to wager each — winner takes the pot (0 = friendly)')
         .setMinValue(0).setMaxValue(BET_MAX)),
+    new SlashCommandBuilder()
+      .setName('battlecards-leaderboard')
+      .setDescription('Top Battle Cards duelists by wins')
+      .setDMPermission(false),
+    new SlashCommandBuilder()
+      .setName('battlecards-stats')
+      .setDescription('Your Battle Cards record (or someone else’s)')
+      .setDMPermission(false)
+      .addUserOption(o => o.setName('user').setDescription('Whose record to view (default: you)')),
   ];
 }
 
 // ─── Game engine ─────────────────────────────────────────────────────────────
-function initBattleCards({ client, db, saveData }) {
+function initBattleCards({ client, db, saveData, awardLP }) {
   const games = new Map();                    // gameId -> game
   let seq = 0;
   const newId = () => `${Date.now().toString(36)}${(seq++ % 1000).toString(36)}`;
@@ -92,6 +109,59 @@ function initBattleCards({ client, db, saveData }) {
 
   function clearTimer(g) { if (g && g.timer) { clearTimeout(g.timer); g.timer = null; } }
   function armTimer(g, ms, fn) { clearTimer(g); g.timer = setTimeout(fn, ms); }
+
+  // Delete both players' lingering "Locked in" private (ephemeral) messages so they don't stack up.
+  function clearPickMessages(g) {
+    if (!g.pickMsg) return;
+    for (const uid of [g.p1, g.p2]) {
+      const pi = g.pickMsg[uid];
+      if (pi) pi.deleteReply().catch(() => {});
+    }
+    g.pickMsg = {};
+  }
+
+  // ── Stats & progression ──
+  const todayStr  = () => new Date().toISOString().slice(0, 10);
+  const blankStat = () => ({ name: '', wins: 0, losses: 0, draws: 0, played: 0, streak: 0, bestStreak: 0 });
+  function getBcState(guildId) {
+    if (!db[guildId]) db[guildId] = {};
+    if (!db[guildId].__battlecards) db[guildId].__battlecards = { stats: {}, lpDay: {} };
+    const s = db[guildId].__battlecards;
+    if (!s.stats) s.stats = {};
+    if (!s.lpDay) s.lpDay = {};
+    return s;
+  }
+  // Record a finished game: update W/L/D, streaks, and award LP to the winner (daily-capped).
+  function recordResult(g) {
+    const bc = getBcState(g.guildId);
+    if (!bc.stats[g.p1]) bc.stats[g.p1] = blankStat();
+    if (!bc.stats[g.p2]) bc.stats[g.p2] = blankStat();
+    const s1 = bc.stats[g.p1], s2 = bc.stats[g.p2];
+    s1.name = g.p1Name; s2.name = g.p2Name;
+    s1.played++; s2.played++;
+    g.lpAwarded = 0; g.lpCapped = false;
+    if (g.scores[g.p1] === g.scores[g.p2]) {
+      s1.draws++; s2.draws++;                          // draws leave streaks untouched
+    } else {
+      const winner = g.scores[g.p1] > g.scores[g.p2] ? g.p1 : g.p2;
+      const loser  = winner === g.p1 ? g.p2 : g.p1;
+      const ws = bc.stats[winner], ls = bc.stats[loser];
+      ws.wins++; ws.streak++; if (ws.streak > ws.bestStreak) ws.bestStreak = ws.streak;
+      ls.losses++; ls.streak = 0;
+      if (typeof awardLP === 'function') {             // award LP, capped per day to discourage farming
+        const today = todayStr();
+        if (!bc.lpDay[winner] || bc.lpDay[winner].date !== today) bc.lpDay[winner] = { date: today, count: 0 };
+        if (bc.lpDay[winner].count < LP_WIN_CAP_PER_DAY) {
+          bc.lpDay[winner].count++;
+          awardLP(g.guildId, winner, LP_PER_WIN, 'battlecards');   // awardLP persists on its own
+          g.lpAwarded = LP_PER_WIN;
+        } else {
+          g.lpCapped = true;
+        }
+      }
+    }
+    if (typeof saveData === 'function') saveData(g.guildId);
+  }
 
   async function editPublic(g, payload) {
     try {
@@ -114,6 +184,7 @@ function initBattleCards({ client, db, saveData }) {
     const g = games.get(gameId);
     if (!g) return;
     clearTimer(g);
+    clearPickMessages(g);
     let note = '';
     if (g.bet > 0 && g.escrowed) {                 // never let a glitch/timeout pocket the stakes
       g.escrowed = false;
@@ -144,8 +215,9 @@ function initBattleCards({ client, db, saveData }) {
     for (const card of g.hands[uid]) {
       row.addComponents(new ButtonBuilder()
         .setCustomId(`bc:${g.id}:pick:${card.code}`)
-        .setLabel(card.label)
-        .setStyle(card.red ? ButtonStyle.Danger : ButtonStyle.Secondary));
+        .setLabel(card.rankLabel)                  // big, clear rank
+        .setEmoji(card.suitEmoji)                  // colored suit emoji
+        .setStyle(ButtonStyle.Secondary));         // neutral so red emojis stay visible
     }
     return row;
   }
@@ -190,6 +262,12 @@ function initBattleCards({ client, db, saveData }) {
           ending += `\n💰 **${winnerName}** takes the pot: **+${g.payout} Dinar**!${feeNote}`;
         }
       }
+      if (g.lpAwarded > 0) {
+        const winnerName = g.scores[g.p1] > g.scores[g.p2] ? g.p1Name : g.p2Name;
+        ending += `\n🏅 **${winnerName}** earns **+${g.lpAwarded} LP**!`;
+      } else if (g.lpCapped) {
+        ending += `\n🏅 *Daily Battle Cards LP cap reached — the win still counts on the leaderboard.*`;
+      }
       gallery[0].setDescription(
         `**${g.p1Name}** played **${c1.label}**　vs　**${g.p2Name}** played **${c2.label}**\n\n` +
         `${resultText}\n\n${ending}`);
@@ -232,12 +310,14 @@ function initBattleCards({ client, db, saveData }) {
       }
       // keep the game around briefly so the Rematch button works
       armTimer(g, IDLE_TIMEOUT_MS, () => games.delete(g.id));
+      recordResult(g);   // update W/L/D, streaks, and award LP (after wager settle so display is correct)
     } else {
       g.round = finishedRound + 1;
       g.choices = { [g.p1]: null, [g.p2]: null };
       armTimer(g, IDLE_TIMEOUT_MS, () => abandonGame(g.id));
     }
     await editPublic(g, revealMessage(g, c1, c2, resultText, over));
+    clearPickMessages(g);   // reveal just posted — clear both "Locked in" private messages so they don't pile up
   }
 
   // ── Start / restart a match ──
@@ -248,6 +328,7 @@ function initBattleCards({ client, db, saveData }) {
     g.choices = { [g.p1]: null, [g.p2]: null };
     g.round   = 1;
     g.status  = 'playing';
+    g.pickMsg = {};                       // tracks each player's private "Locked in" message for cleanup
     armTimer(g, IDLE_TIMEOUT_MS, () => abandonGame(g.id));
   }
 
@@ -256,6 +337,12 @@ function initBattleCards({ client, db, saveData }) {
     try {
       if (interaction.isChatInputCommand() && interaction.commandName === 'battlecards') {
         return onChallenge(interaction);
+      }
+      if (interaction.isChatInputCommand() && interaction.commandName === 'battlecards-leaderboard') {
+        return onLeaderboard(interaction);
+      }
+      if (interaction.isChatInputCommand() && interaction.commandName === 'battlecards-stats') {
+        return onStats(interaction);
       }
       if (interaction.isButton() && interaction.customId.startsWith('bc:')) {
         const [, gameId, action, arg] = interaction.customId.split(':');
@@ -268,6 +355,61 @@ function initBattleCards({ client, db, saveData }) {
       }
     }
   });
+
+  // ── Leaderboard & personal stats ──
+  function winRate(s) {
+    const decisive = s.wins + s.losses;
+    return decisive > 0 ? Math.round((s.wins / decisive) * 100) : 0;
+  }
+
+  async function onLeaderboard(interaction) {
+    const bc = getBcState(interaction.guild.id);
+    const rows = Object.entries(bc.stats)
+      .map(([uid, s]) => ({ uid, ...s }))
+      .filter(s => s.played > 0)
+      .sort((a, b) => b.wins - a.wins || winRate(b) - winRate(a) || b.played - a.played)
+      .slice(0, 10);
+    if (!rows.length) {
+      return interaction.reply({ embeds: [new EmbedBuilder().setColor(COLOR.gold)
+        .setTitle('🎴 Battle Cards — Leaderboard')
+        .setDescription('No duels have been played yet. Start one with `/battlecards @user`!')] });
+    }
+    const medals = ['🥇', '🥈', '🥉'];
+    const lines = rows.map((s, i) => {
+      const rank   = medals[i] || `**${i + 1}.**`;
+      const name   = s.name || `<@${s.uid}>`;
+      const streak = s.streak >= 3 ? ` · 🔥${s.streak}` : '';
+      return `${rank} **${name}** — ${s.wins}W / ${s.losses}L · ${winRate(s)}% win${streak}`;
+    });
+    return interaction.reply({ embeds: [new EmbedBuilder().setColor(COLOR.gold)
+      .setTitle('🎴 Battle Cards — Top Duelists')
+      .setDescription(lines.join('\n'))
+      .setFooter({ text: 'Win duels to climb · 🔥 = current win streak' })] });
+  }
+
+  async function onStats(interaction) {
+    const target = interaction.options.getUser('user') || interaction.user;
+    const bc = getBcState(interaction.guild.id);
+    const s = bc.stats[target.id];
+    let displayName = target.username;
+    try { const m = await interaction.guild.members.fetch(target.id); if (m?.displayName) displayName = m.displayName; } catch {}
+    if (!s || s.played === 0) {
+      const who = target.id === interaction.user.id ? 'You have' : `**${displayName}** has`;
+      return interaction.reply({ embeds: [new EmbedBuilder().setColor(COLOR.grey)
+        .setTitle(`🎴 ${displayName} — Battle Cards`)
+        .setDescription(`${who} not played any duels yet.`)] });
+    }
+    return interaction.reply({ embeds: [new EmbedBuilder().setColor(COLOR.gold)
+      .setTitle(`🎴 ${displayName} — Battle Cards Record`)
+      .addFields(
+        { name: 'Played',      value: `${s.played}`,      inline: true },
+        { name: 'Wins',        value: `${s.wins}`,        inline: true },
+        { name: 'Losses',      value: `${s.losses}`,      inline: true },
+        { name: 'Draws',       value: `${s.draws}`,       inline: true },
+        { name: 'Win rate',    value: `${winRate(s)}%`,   inline: true },
+        { name: 'Best streak', value: `${s.bestStreak} 🔥`, inline: true })
+      .setFooter({ text: s.streak > 0 ? `Current win streak: ${s.streak}` : 'No active win streak' })] });
+  }
 
   async function onChallenge(interaction) {
     const challenger = interaction.user;
@@ -360,32 +502,8 @@ function initBattleCards({ client, db, saveData }) {
     }
 
     if (!isPlayer) return interaction.reply(eph('🎴 You’re not in this duel.'));
-    if (g.status !== 'playing') return interaction.reply(eph('🎴 This duel isn’t active right now.'));
 
-    // ── Open your hand ──
-    if (action === 'choose') {
-      if (g.choices[uid]) return interaction.reply(eph(`🔒 You already locked in **${g.choices[uid].label}**. Waiting for your opponent…`));
-      return interaction.reply({ content: '🎴 **Your hand** — pick a card to play this round:', components: [handRow(g, uid)], flags: 64 });
-    }
-
-    // ── Pick a card ──
-    if (action === 'pick') {
-      if (g.choices[uid]) return interaction.update({ content: `🔒 You already locked in **${g.choices[uid].label}**.`, components: [] });
-      const idx = g.hands[uid].findIndex(c => c.code === arg);
-      if (idx === -1) return interaction.update({ content: '🎴 That card is no longer in your hand.', components: [] });
-
-      const [card] = g.hands[uid].splice(idx, 1);   // remove from hand and lock it in
-      g.choices[uid] = card;
-      armTimer(g, IDLE_TIMEOUT_MS, () => abandonGame(g.id));
-
-      const bothChosen = g.choices[g.p1] && g.choices[g.p2];
-      await interaction.update({ content: `🔒 Locked in **${card.label}**.${bothChosen ? ' Revealing…' : ' Waiting for your opponent…'}`, components: [] });
-      if (bothChosen) await resolveRound(g);
-      else            await editPublic(g, roundPrompt(g));
-      return;
-    }
-
-    // ── Rematch ──
+    // ── Rematch (only once the duel is over — must be checked BEFORE the 'playing' guard) ──
     if (action === 'rematch') {
       if (g.status !== 'done') return interaction.reply(eph('🎴 The duel isn’t over yet.'));
       if (g.bet > 0 && (getDinar(db, g.guildId, g.p1) < g.bet || getDinar(db, g.guildId, g.p2) < g.bet))
@@ -406,6 +524,33 @@ function initBattleCards({ client, db, saveData }) {
       g.status = 'pending';
       await beginMatch(g);
       return interaction.editReply(roundPrompt(g));
+    }
+
+    if (g.status !== 'playing') return interaction.reply(eph('🎴 This duel isn’t active right now.'));
+
+    // ── Open your hand ──
+    if (action === 'choose') {
+      if (g.choices[uid]) return interaction.reply(eph(`🔒 You already locked in **${g.choices[uid].label}**. Waiting for your opponent…`));
+      return interaction.reply({ content: '🎴 **Your hand** — pick a card to play this round:', components: [handRow(g, uid)], flags: 64 });
+    }
+
+    // ── Pick a card ──
+    if (action === 'pick') {
+      if (g.choices[uid]) return interaction.update({ content: `🔒 You already locked in **${g.choices[uid].label}**.`, components: [] });
+      const idx = g.hands[uid].findIndex(c => c.code === arg);
+      if (idx === -1) return interaction.update({ content: '🎴 That card is no longer in your hand.', components: [] });
+
+      const [card] = g.hands[uid].splice(idx, 1);   // remove from hand and lock it in
+      g.choices[uid] = card;
+      armTimer(g, IDLE_TIMEOUT_MS, () => abandonGame(g.id));
+
+      const bothChosen = g.choices[g.p1] && g.choices[g.p2];
+      await interaction.update({ content: `🔒 Locked in **${card.label}**.${bothChosen ? ' Revealing…' : ' Waiting for your opponent…'}`, components: [] });
+      if (!g.pickMsg) g.pickMsg = {};
+      g.pickMsg[uid] = interaction;   // remember this private message so we can delete it once the round resolves
+      if (bothChosen) await resolveRound(g);
+      else            await editPublic(g, roundPrompt(g));
+      return;
     }
   }
 }
