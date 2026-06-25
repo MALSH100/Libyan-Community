@@ -132,6 +132,31 @@ function awardDinar(db, guildId, userId, amount, saveData, source) {
   return award;
 }
 
+// True if the user has reached today's daily Dinar cap for a capped source ('war'/'battle').
+// Lets callers post a clear "you've hit your daily limit" notice so players aren't confused.
+function isAtDinarCap(db, guildId, source, userId) {
+  const cap = DINAR_DAILY_CAPS[source];
+  if (cap == null) return false;
+  const e = db?.[guildId]?.__gacha?.earnCaps?.[userId];
+  if (!e || e.date !== new Date().toISOString().slice(0, 10)) return false;
+  return (e[source] || 0) >= cap;
+}
+const dinarDailyCap = (source) => DINAR_DAILY_CAPS[source];
+
+// External Dinar helpers for other games (e.g. Battle Cards wagers). Uncapped — these
+// move money for escrow/payouts/refunds, which are not farmable earnings.
+function getDinar(db, guildId, userId) {
+  return (db && db[guildId] && db[guildId].__gacha && db[guildId].__gacha.dinar && db[guildId].__gacha.dinar[userId]) || 0;
+}
+function spendDinar(db, guildId, userId, amount, saveData) {
+  if (!(amount > 0)) return true;
+  const s = getState(db, guildId);
+  if ((s.dinar[userId] || 0) < amount) return false;
+  addDinar(s, userId, -amount);
+  if (typeof saveData === 'function') saveData(guildId);
+  return true;
+}
+
 // ─── Rarity from existing stats ──────────────────────────────────────────────
 function activityScore(db, guildId, uid) {
   const g = db[guildId] || {};
@@ -1014,4 +1039,4 @@ function initGacha({ client, db, saveData }) {
   }
 }
 
-module.exports = { getGachaCommands, initGacha, awardDinar };
+module.exports = { getGachaCommands, initGacha, awardDinar, isAtDinarCap, dinarDailyCap, getDinar, spendDinar };
