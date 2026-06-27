@@ -26,8 +26,8 @@ const POKEBALL_PER_SPAWN = 3;
 const LIBYA_OFFSET_MS    = 2 * 60 * 60 * 1000;   // Libya is UTC+2 year-round (no DST)
 const SPAWN_WINDOW_START = 9;                    // 09:00 Libya time
 const SPAWN_WINDOW_END   = 23;                   // 23:00 Libya time
-const SPAWNS_PER_DAY     = 3;
-const DROPS_PER_DAY      = 2;
+const SPAWNS_PER_DAY     = 2;
+const DROPS_PER_DAY      = 1;
 const MIN_GAP_MS         = 90 * 60 * 1000;       // ≥90 min between scheduled times
 const SCHED_TICK_MS      = 60 * 1000;            // re-check the schedule every minute
 const MAX_POKEMON_ID     = 898;
@@ -441,7 +441,7 @@ function spawnEmbed(spawnHp, spawnMaxHp, pokeName, types, spriteUrl, isShiny, le
       `Use the buttons below to interact!\n` +
       `⚠️ Lower HP = easier to catch. Don't let it faint!`
     )
-    .setFooter({ text: 'Flees in 1 hour if ignored.' });
+    .setFooter({ text: `Flees in ${SPAWN_FLEE_MS / 3600000} hours if ignored.` });
 
   if (spriteUrl) embed.setThumbnail(spriteUrl);
   return embed;
