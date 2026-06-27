@@ -58,49 +58,34 @@ const BOSS_DEFS = [
 
 // ─── Cities (real Libyan locations; lon/lat drive the map projection) ──────────
 const CITY_DEFS = [
-  // ── Northwest coast & Nafusa (Tripolitania) ──
+  // ── Northwest & Nafusa (Tripolitania) ──
   { id: 'nalut',     name: 'Nalut',      lon: 10.98, lat: 31.87, level: 1 },
-  { id: 'alaluas',   name: 'Alalus',     lon: 11.55, lat: 31.88, level: 1 },
-  { id: 'regdalin',  name: 'Regdalin',   lon: 11.90, lat: 32.85, level: 1 },
-  { id: 'jumayl',    name: 'Jumayl',     lon: 12.06, lat: 32.88, level: 1 },
   { id: 'zuwara',    name: 'Zuwara',     lon: 12.08, lat: 32.93, level: 1 },
-  { id: 'zaltan',    name: 'Zaltan',     lon: 12.30, lat: 32.83, level: 1 },
-  { id: 'nafusa',    name: 'Nafusa Mts', lon: 12.40, lat: 31.85, level: 1 },
   { id: 'sabratha',  name: 'Sabratha',   lon: 12.49, lat: 32.79, level: 1 },
-  { id: 'sorman',    name: 'Sorman',     lon: 12.57, lat: 32.74, level: 1 },
-  { id: 'zawiya',    name: 'Zawiya',     lon: 12.73, lat: 32.76, level: 1 },
-  { id: 'asbia',     name: "Asbi'a",     lon: 12.86, lat: 32.04, level: 1 },
-  { id: 'warshafana',name: 'Warshafana', lon: 12.99, lat: 32.58, level: 1 },
+  { id: 'zawiya',    name: 'Zawiya',     lon: 12.73, lat: 32.76, level: 2 },
   { id: 'gharyan',   name: 'Gharyan',    lon: 13.02, lat: 32.17, level: 2 },
   { id: 'tripoli',   name: 'Tripoli',    lon: 13.19, lat: 32.89, level: 3 },
-  { id: 'tarhuna',   name: 'Tarhuna',    lon: 13.63, lat: 32.44, level: 2 },
-  { id: 'baniwalid', name: 'Bani Walid', lon: 13.99, lat: 31.76, level: 2 },
-  { id: 'msallata',  name: 'Msallata',   lon: 14.00, lat: 32.61, level: 1 },
-  { id: 'khoms',     name: 'Khoms',      lon: 14.26, lat: 32.65, level: 2 },
+  { id: 'tarhuna',   name: 'Tarhuna',    lon: 13.63, lat: 32.44, level: 1 },
+  { id: 'baniwalid', name: 'Bani Walid', lon: 13.99, lat: 31.76, level: 1 },
+  { id: 'khoms',     name: 'Khoms',      lon: 14.26, lat: 32.65, level: 1 },
   { id: 'zliten',    name: 'Zliten',     lon: 14.57, lat: 32.47, level: 2 },
-  { id: 'tawergha',  name: 'Tawergha',   lon: 15.06, lat: 32.05, level: 1 },
   { id: 'misrata',   name: 'Misrata',    lon: 15.09, lat: 32.38, level: 3 },
-  // ── Central coast (Sirte basin) ──
+  // ── Central coast ──
   { id: 'sirte',     name: 'Sirte',      lon: 16.59, lat: 31.20, level: 2 },
-  { id: 'nofaliya',  name: 'Nofaliya',   lon: 17.97, lat: 30.78, level: 1 },
-  { id: 'agheila',   name: 'El Agheila', lon: 19.21, lat: 30.25, level: 1 },
-  { id: 'ajdabiya',  name: 'Ajdabiya',   lon: 20.22, lat: 30.76, level: 2 },
   // ── Northeast (Cyrenaica) ──
   { id: 'benghazi',  name: 'Benghazi',   lon: 20.07, lat: 32.12, level: 3 },
-  { id: 'abyar',     name: 'Al Abyar',   lon: 20.59, lat: 32.18, level: 1 },
-  { id: 'tocra',     name: 'Tocra',      lon: 20.58, lat: 32.53, level: 1 },
+  { id: 'ajdabiya',  name: 'Ajdabiya',   lon: 20.22, lat: 30.76, level: 2 },
   { id: 'marj',      name: 'Marj',       lon: 20.88, lat: 32.50, level: 1 },
-  { id: 'bayda',     name: 'Bayda',      lon: 21.75, lat: 32.76, level: 1 },
-  { id: 'shahhat',   name: 'Shahhat',    lon: 21.86, lat: 32.82, level: 1 },
-  { id: 'alqubah',   name: 'Al Qubah',   lon: 22.24, lat: 32.73, level: 1 },
-  { id: 'derna',     name: 'Derna',      lon: 22.64, lat: 32.77, level: 1 },
+  { id: 'bayda',     name: 'Bayda',      lon: 21.75, lat: 32.76, level: 2 },
+  { id: 'derna',     name: 'Derna',      lon: 22.64, lat: 32.77, level: 2 },
   { id: 'tobruk',    name: 'Tobruk',     lon: 23.96, lat: 32.08, level: 2 },
-  // ── South (Fezzan & interior) ──
-  { id: 'ubari',     name: 'Ubari',      lon: 12.78, lat: 26.59, level: 1 },
+  // ── South (Fezzan & desert) ──
   { id: 'ghat',      name: 'Ghat',       lon: 10.18, lat: 24.96, level: 1 },
-  { id: 'sabha',     name: 'Sabha',      lon: 14.43, lat: 27.04, level: 2 },
+  { id: 'ubari',     name: 'Ubari',      lon: 12.78, lat: 26.59, level: 1 },
   { id: 'murzuq',    name: 'Murzuq',     lon: 13.92, lat: 25.92, level: 1 },
+  { id: 'sabha',     name: 'Sabha',      lon: 14.43, lat: 27.04, level: 2 },
   { id: 'waddan',    name: 'Waddan',     lon: 16.14, lat: 29.16, level: 1 },
+  { id: 'jalu',      name: 'Jalu',       lon: 21.55, lat: 29.03, level: 1 },
   { id: 'kufra',     name: 'Kufra',      lon: 23.31, lat: 24.18, level: 1 },
 ];
 const CITY_BY_ID = Object.fromEntries(CITY_DEFS.map(c => [c.id, c]));
@@ -147,18 +132,9 @@ const BORDER = [
   [9.5,26.0],[9.3,30.0],[10.3,31.8],
 ];
 // label nudges so the dense north-west cluster doesn't overlap
-const LABEL_DX = { sabratha: -16, sorman: 16, zawiya: 18, zaltan: -18, jumayl: -22, regdalin: -22, warshafana: 20, msallata: -6, tocra: -10, marj: 14, tripoli: 12 };
-const LABEL_DY = { zuwara: -12, zaltan: -2, regdalin: 2, jumayl: 12, sorman: 16, warshafana: 4, zawiya: 16, sabratha: 2, tripoli: 8 };
-const LABEL_BELOW = {
-  // NW coast cluster — alternate above/below so labels don't stack
-  regdalin: false, zuwara: false, zaltan: false, sorman: false, warshafana: false,
-  jumayl: true, sabratha: true, zawiya: true, asbia: true,
-  // NE coast cluster
-  tocra: false, bayda: false, alqubah: false, abyar: false,
-  marj: true, shahhat: true, derna: true,
-  // central
-  nofaliya: false, agheila: true,
-};
+const LABEL_DX = { zuwara: -16, sabratha: -10, zawiya: -6, tripoli: 12, khoms: -8, zliten: 12, misrata: 16, gharyan: -10, tarhuna: 10, marj: 10, bayda: -4, benghazi: -10, derna: 10 };
+const LABEL_DY = { zawiya: -2 };
+const LABEL_BELOW = { zuwara: false, zawiya: false, khoms: false, marj: false, bayda: false };
 
 function svgToPng(svg) {
   const { Resvg } = require('@resvg/resvg-js');
@@ -173,21 +149,11 @@ function svgToPng(svg) {
 //  IMAGE RENDERERS
 // ════════════════════════════════════════════════════════════════════════════
 function renderMap(state, viewerId) {
-  const G = 175;                                   // side gutter width for callout labels
-  const ox = MAP_PAD + G;                           // map area x-offset (leaves a left gutter)
-  const W = MAP_PAD * 2 + G * 2 + MAP_W;
+  const W = MAP_W + MAP_PAD * 2;
   const H = MAP_H + MAP_PAD * 2 + 46;
-  const PX = (lon) => ox + (lon - LON_MIN) / (LON_MAX - LON_MIN) * MAP_W;
-  const PY = (lat) => projY(lat) + 40;
-  const poly = BORDER.map(([lo, la]) => `${PX(lo).toFixed(0)},${PY(la).toFixed(0)}`).join(' ');
+  const poly = BORDER.map(([lo, la]) => `${projX(lo).toFixed(0)},${(projY(la) + 40).toFixed(0)}`).join(' ');
 
-  // The two packed coastal clusters get routed out to the margins with leader lines.
-  const CALLOUT_LEFT = new Set(['nalut','alaluas','nafusa','regdalin','jumayl','zuwara','zaltan','sorman','sabratha','zawiya','asbia','warshafana','gharyan','tripoli','tarhuna','msallata']);
-  const CALLOUT_RIGHT = new Set(['benghazi','abyar','tocra','marj','bayda','shahhat','alqubah','derna']);
-
-  let mine = 0, rival = 0, neutral = 0;
-  let dots = '', inlineLabels = '';
-  const leftC = [], rightC = [];
+  let mine = 0, rival = 0, neutral = 0, nodes = '';
   for (const c of CITY_DEFS) {
     const city = state.cities[c.id];
     const owner = city.ownerId ? state.players[city.ownerId] : null;
@@ -197,47 +163,22 @@ function renderMap(state, viewerId) {
     else if (isMine) { col = COL_YOU; mine++; }
     else if (viewerId) { col = COL_RIVAL; rival++; }
     else { col = owner.color; }
-    const r = (owner ? 7 : 5.5) + city.level * 1.2;
-    const x = PX(c.lon), y = PY(c.lat);
-    dots += `<circle cx="${x.toFixed(0)}" cy="${y.toFixed(0)}" r="${r.toFixed(1)}" fill="${col}" stroke="${isMine ? '#f1c40f' : '#ffffff'}" stroke-width="${isMine ? 3 : 1.5}"/>`;
-    if (CALLOUT_LEFT.has(c.id))       leftC.push({ name: c.name, x, y });
-    else if (CALLOUT_RIGHT.has(c.id)) rightC.push({ name: c.name, x, y });
-    else {
-      const below = LABEL_BELOW[c.id] !== undefined ? LABEL_BELOW[c.id] : true;
-      const lyy = (below ? y + r + 11 : y - r - 5) + (LABEL_DY[c.id] || 0);
-      const lxx = x + (LABEL_DX[c.id] || 0);
-      inlineLabels += `<text x="${lxx.toFixed(0)}" y="${lyy.toFixed(0)}" font-size="11" fill="#f5e9c8" text-anchor="middle">${esc(c.name)}</text>`;
-    }
+    const r = (owner ? 8 : 6) + city.level * 1.6;
+    const x = projX(c.lon), y = projY(c.lat) + 40;
+    // your own cities get a gold ring so your bases are unmistakable
+    nodes += `<circle cx="${x.toFixed(0)}" cy="${y.toFixed(0)}" r="${r.toFixed(1)}" fill="${col}" stroke="${isMine ? '#f1c40f' : '#ffffff'}" stroke-width="${isMine ? 3 : 1.5}"/>`;
+    const below = LABEL_BELOW[c.id] !== undefined ? LABEL_BELOW[c.id] : true;
+    const lyy = (below ? y + r + 14 : y - r - 7) + (LABEL_DY[c.id] || 0);
+    const lxx = x + (LABEL_DX[c.id] || 0);
+    nodes += `<text x="${lxx.toFixed(0)}" y="${lyy.toFixed(0)}" font-size="14" fill="#f5e9c8" text-anchor="middle">${esc(c.name)}</text>`;
   }
-
-  // stack callout labels in a side gutter; thin line from each label to its dot
-  const calloutSvg = (arr, side) => {
-    if (!arr.length) return '';
-    arr.sort((a, b) => a.x - b.x);                 // west→east becomes top→bottom (fans the lines)
-    const n = arr.length;
-    const top = 122;
-    const bot = Math.min(H - 72, top + (n - 1) * 24);
-    const step = n > 1 ? (bot - top) / (n - 1) : 0;
-    const labelX = side === 'left' ? G - 32 : W - (G - 32);
-    const anchor = side === 'left' ? 'end' : 'start';
-    const joinX  = side === 'left' ? labelX + 6 : labelX - 6;
-    let out = '';
-    arr.forEach((d, i) => {
-      const ly = top + i * step;
-      out += `<line x1="${joinX.toFixed(0)}" y1="${ly.toFixed(0)}" x2="${d.x.toFixed(0)}" y2="${d.y.toFixed(0)}" stroke="#5b6b7a" stroke-width="1"/>`;
-      out += `<circle cx="${d.x.toFixed(0)}" cy="${d.y.toFixed(0)}" r="1.6" fill="#5b6b7a"/>`;
-      out += `<text x="${labelX.toFixed(0)}" y="${(ly + 4).toFixed(0)}" font-size="12" fill="#f5e9c8" text-anchor="${anchor}">${esc(d.name)}</text>`;
-    });
-    return out;
-  };
-  const callouts = calloutSvg(leftC, 'left') + calloutSvg(rightC, 'right');
 
   const title = viewerId ? 'Diyar — Your Realm' : 'Diyar — Map of Libya';
   let legend = `<text x="${MAP_PAD}" y="30" font-size="20" fill="#f1c40f">${title}</text>`;
   let lx = MAP_PAD; const ly = H - 14;
   const swatch = (color, label) => {
-    const s = `<rect x="${lx}" y="${ly - 11}" width="13" height="13" rx="2" fill="${color}"/><text x="${lx + 18}" y="${ly}" font-size="13" fill="#cbd3da">${esc(label)}</text>`;
-    lx += 40 + label.length * 7.5; return s;
+    const sw = `<rect x="${lx}" y="${ly - 11}" width="13" height="13" rx="2" fill="${color}"/><text x="${lx + 18}" y="${ly}" font-size="13" fill="#cbd3da">${esc(label)}</text>`;
+    lx += 40 + label.length * 7.5; return sw;
   };
   if (viewerId) {
     legend += swatch(COL_YOU, `Your cities (${mine})`);
@@ -254,9 +195,7 @@ function renderMap(state, viewerId) {
     <rect width="${W}" height="${H}" fill="#10243a"/>
     ${legend}
     <polygon points="${poly}" fill="#cbb074" stroke="#8a6d3b" stroke-width="3"/>
-    ${callouts}
-    ${dots}
-    ${inlineLabels}
+    ${nodes}
   </svg>`;
   return new AttachmentBuilder(svgToPng(svg), { name: 'diyar-map.png' });
 }
@@ -331,6 +270,11 @@ function getState(db, guildId, saveData) {
       };
       dirty = true;
     }
+  }
+  // prune retired cities (removed from CITY_DEFS) that no one owns — keeps map and raids in sync
+  const valid = new Set(CITY_DEFS.map(c => c.id));
+  for (const id of Object.keys(data.__diyar.cities)) {
+    if (!valid.has(id) && !data.__diyar.cities[id].ownerId) { delete data.__diyar.cities[id]; dirty = true; }
   }
   if (dirty && saveData) saveData(guildId);
   return data.__diyar;
@@ -765,10 +709,21 @@ function targetSelect(state, userId) {
     return { embeds: [new EmbedBuilder().setColor(COLOR.grey).setTitle('⚔ Attack')
       .setDescription('No reachable targets right now — rivals must be near your strength, and neutral militias are always fair game when any remain.')], components: [backRow()] };
   }
-  const menu = new StringSelectMenuBuilder().setCustomId('dy:atk_target').setPlaceholder('Choose a city to raid…').addOptions(opts.slice(0, 25));
+  // Discord caps each dropdown at 25 options and we have more cities than that,
+  // so spread targets across multiple dropdowns — otherwise the overflow vanishes from raids.
+  const rows = [];
+  for (let i = 0; i < opts.length && rows.length < 4; i += 25) {
+    const chunk = opts.slice(i, i + 25);
+    rows.push(new ActionRowBuilder().addComponents(
+      new StringSelectMenuBuilder()
+        .setCustomId(i === 0 ? 'dy:atk_target' : `dy:atk_target:${i}`)
+        .setPlaceholder(`Raid a city  (${chunk[0].label} … ${chunk[chunk.length - 1].label})`)
+        .addOptions(chunk)));
+  }
+  rows.push(backRow());
   return { embeds: [new EmbedBuilder().setColor(COLOR.red).setTitle('⚔ Choose your target')
     .setDescription('Pick a city to raid. Neutral militias are always fair game; rivals must be near your strength.')],
-    components: [new ActionRowBuilder().addComponents(menu), backRow()] };
+    components: rows };
 }
 
 function sendAmount(state, userId, cityId) {
@@ -1149,7 +1104,7 @@ function initDiyar({ client, db, saveData, awardLP }) {
       getState: () => stateOf, ensurePlayer, resolveAttack, recruit, upgrade, reinforce, collectIncome,
       spawnBoss, strikeBoss, resolveBossDefeat, resolveBossExpire, playerStrength, ensureBossSched,
       pendingIncome, renderMap, renderBoss, renderBattle, pickTimes, reseedIfLanded,
-      claimTribute, buyWeapon, armouryView, profileView, resetSeason,
+      claimTribute, buyWeapon, armouryView, profileView, resetSeason, targetSelect, reinforceSelect,
     },
   };
 }
