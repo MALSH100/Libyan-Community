@@ -20,7 +20,7 @@ const path = require('path');
 // ─── Tuning ───────────────────────────────────────────────────────────────────
 const STARTER_ARMY        = 40;
 const TROOP_COST          = 3;                    // Dinar per troop
-const SHIELD_MS           = 10 * 3600 * 1000;     // immunity after you're raided
+const SHIELD_MS           = 0;                     // truce disabled (no starting truce, no post-raid shield)
 const ATTACK_COOLDOWN_MS  = 2  * 3600 * 1000;     // between your own attacks
 const LOOT_PCT            = 0.20;                  // share of a defender's Dinar stolen on a win (transfer, not minted)
 const CAPTURE_RATIO       = 1.4;                   // must out-power a PLAYER city this much to seize it
@@ -28,19 +28,21 @@ const MATCH_BAND          = 3.0;                   // can't punch down: target s
 const NPC_LOOT_PER_LEVEL  = 25;                    // PvE loot from neutral militias (minted, small)
 const INCOME_PER_LEVEL_HR = 4;                     // Dinar/hour per city level
 const INCOME_CAP_HRS      = 12;                    // accrual caps at 12h, so you must collect
-const UPG_MAX             = 5;
-const UPG_BASE            = { mil: 120, for: 100, eco: 90 };    // cost = base × (level+1)
+const UPG_MAX             = 10;
+const UPG_BASE            = { mil: 240, for: 200, eco: 180 };   // cost = base × (level+1)
 const TRIBUTE_BASE        = 40;                    // daily login reward (capped mint, async-friendly)
 const TRIBUTE_PER_CITY    = 12;
 const TRIBUTE_MAX         = 120;
 const ARMOURY_BASE        = 120;                   // Dinar per weapon tier bought (cost = base × (tier+1))
 const ARMOURY_MAX_TIER    = 3;                     // shop caps here; tiers 4–5 only from boss kills
+// cost to forge the NEXT tier from `tier`; doubles once you're past tier 2
+const armouryCost = (tier) => ARMOURY_BASE * (tier + 1) * (tier >= 2 ? 2 : 1);
 
 // ─── Boss ───────────────────────────────────────────────────────────────────
 const BOSS_DURATION_MS    = 6 * 3600 * 1000;      // time to defeat before it pillages
-const BOSS_STRIKE_CD_MS   = 30 * 60 * 1000;       // per-player strike cooldown
-const BOSS_BASE_HP        = 2500;
-const BOSS_HP_PER_PLAYER  = 450;
+const BOSS_STRIKE_CD_MS   = 5 * 1000;             // per-player strike cooldown (5s)
+const BOSS_BASE_HP        = 500;
+const BOSS_HP_PER_PLAYER  = 0;                     // flat HP (raise this to scale with player count)
 const BOSS_SPAWNS_PER_DAY = 2;
 const BOSS_WIN_START      = 11;                    // Libya-time window for spawns
 const BOSS_WIN_END        = 23;
@@ -55,26 +57,57 @@ const BOSS_DEFS = [
 
 // ─── Cities (real Libyan locations; lon/lat drive the map projection) ──────────
 const CITY_DEFS = [
-  { id: 'tripoli',  name: 'Tripoli',  lon: 13.19, lat: 32.89, level: 3 },
-  { id: 'zawiya',   name: 'Zawiya',   lon: 12.73, lat: 32.76, level: 1 },
-  { id: 'sabratha', name: 'Sabratha', lon: 12.49, lat: 32.79, level: 1 },
-  { id: 'zliten',   name: 'Zliten',   lon: 14.57, lat: 32.47, level: 2 },
-  { id: 'misrata',  name: 'Misrata',  lon: 15.09, lat: 32.38, level: 3 },
-  { id: 'sirte',    name: 'Sirte',    lon: 16.59, lat: 31.20, level: 2 },
-  { id: 'ajdabiya', name: 'Ajdabiya', lon: 20.22, lat: 30.76, level: 2 },
-  { id: 'benghazi', name: 'Benghazi', lon: 20.07, lat: 32.12, level: 3 },
-  { id: 'bayda',    name: 'Bayda',    lon: 21.75, lat: 32.76, level: 1 },
-  { id: 'derna',    name: 'Derna',    lon: 22.64, lat: 32.77, level: 1 },
-  { id: 'tobruk',   name: 'Tobruk',   lon: 23.96, lat: 32.08, level: 2 },
-  { id: 'sabha',    name: 'Sabha',    lon: 14.43, lat: 27.04, level: 2 },
-  { id: 'murzuq',   name: 'Murzuq',   lon: 13.92, lat: 25.92, level: 1 },
-  { id: 'ghat',     name: 'Ghat',     lon: 10.18, lat: 24.96, level: 1 },
-  { id: 'kufra',    name: 'Kufra',    lon: 23.31, lat: 24.18, level: 1 },
+  // ── Northwest coast & Nafusa (Tripolitania) ──
+  { id: 'nalut',     name: 'Nalut',      lon: 10.98, lat: 31.87, level: 1 },
+  { id: 'alaluas',   name: 'Alalus',     lon: 11.55, lat: 31.88, level: 1 },
+  { id: 'regdalin',  name: 'Regdalin',   lon: 11.90, lat: 32.85, level: 1 },
+  { id: 'jumayl',    name: 'Jumayl',     lon: 12.06, lat: 32.88, level: 1 },
+  { id: 'zuwara',    name: 'Zuwara',     lon: 12.08, lat: 32.93, level: 1 },
+  { id: 'zaltan',    name: 'Zaltan',     lon: 12.30, lat: 32.83, level: 1 },
+  { id: 'nafusa',    name: 'Nafusa Mts', lon: 12.40, lat: 31.85, level: 1 },
+  { id: 'sabratha',  name: 'Sabratha',   lon: 12.49, lat: 32.79, level: 1 },
+  { id: 'sorman',    name: 'Sorman',     lon: 12.57, lat: 32.74, level: 1 },
+  { id: 'zawiya',    name: 'Zawiya',     lon: 12.73, lat: 32.76, level: 1 },
+  { id: 'asbia',     name: "Asbi'a",     lon: 12.86, lat: 32.04, level: 1 },
+  { id: 'warshafana',name: 'Warshafana', lon: 12.99, lat: 32.58, level: 1 },
+  { id: 'gharyan',   name: 'Gharyan',    lon: 13.02, lat: 32.17, level: 2 },
+  { id: 'tripoli',   name: 'Tripoli',    lon: 13.19, lat: 32.89, level: 3 },
+  { id: 'tarhuna',   name: 'Tarhuna',    lon: 13.63, lat: 32.44, level: 2 },
+  { id: 'baniwalid', name: 'Bani Walid', lon: 13.99, lat: 31.76, level: 2 },
+  { id: 'msallata',  name: 'Msallata',   lon: 14.00, lat: 32.61, level: 1 },
+  { id: 'khoms',     name: 'Khoms',      lon: 14.26, lat: 32.65, level: 2 },
+  { id: 'zliten',    name: 'Zliten',     lon: 14.57, lat: 32.47, level: 2 },
+  { id: 'tawergha',  name: 'Tawergha',   lon: 15.06, lat: 32.05, level: 1 },
+  { id: 'misrata',   name: 'Misrata',    lon: 15.09, lat: 32.38, level: 3 },
+  // ── Central coast (Sirte basin) ──
+  { id: 'sirte',     name: 'Sirte',      lon: 16.59, lat: 31.20, level: 2 },
+  { id: 'nofaliya',  name: 'Nofaliya',   lon: 17.97, lat: 30.78, level: 1 },
+  { id: 'agheila',   name: 'El Agheila', lon: 19.21, lat: 30.25, level: 1 },
+  { id: 'ajdabiya',  name: 'Ajdabiya',   lon: 20.22, lat: 30.76, level: 2 },
+  // ── Northeast (Cyrenaica) ──
+  { id: 'benghazi',  name: 'Benghazi',   lon: 20.07, lat: 32.12, level: 3 },
+  { id: 'abyar',     name: 'Al Abyar',   lon: 20.59, lat: 32.18, level: 1 },
+  { id: 'tocra',     name: 'Tocra',      lon: 20.58, lat: 32.53, level: 1 },
+  { id: 'marj',      name: 'Marj',       lon: 20.88, lat: 32.50, level: 1 },
+  { id: 'bayda',     name: 'Bayda',      lon: 21.75, lat: 32.76, level: 1 },
+  { id: 'shahhat',   name: 'Shahhat',    lon: 21.86, lat: 32.82, level: 1 },
+  { id: 'alqubah',   name: 'Al Qubah',   lon: 22.24, lat: 32.73, level: 1 },
+  { id: 'derna',     name: 'Derna',      lon: 22.64, lat: 32.77, level: 1 },
+  { id: 'tobruk',    name: 'Tobruk',     lon: 23.96, lat: 32.08, level: 2 },
+  // ── South (Fezzan & interior) ──
+  { id: 'ubari',     name: 'Ubari',      lon: 12.78, lat: 26.59, level: 1 },
+  { id: 'ghat',      name: 'Ghat',       lon: 10.18, lat: 24.96, level: 1 },
+  { id: 'sabha',     name: 'Sabha',      lon: 14.43, lat: 27.04, level: 2 },
+  { id: 'murzuq',    name: 'Murzuq',     lon: 13.92, lat: 25.92, level: 1 },
+  { id: 'waddan',    name: 'Waddan',     lon: 16.14, lat: 29.16, level: 1 },
+  { id: 'kufra',     name: 'Kufra',      lon: 23.31, lat: 24.18, level: 1 },
 ];
 const CITY_BY_ID = Object.fromEntries(CITY_DEFS.map(c => [c.id, c]));
 
 const PALETTE = ['#e74c3c','#3498db','#2ecc71','#9b59b6','#e67e22','#1abc9c','#f5b041','#e84393','#00cec9','#fab1a0','#6c5ce7','#fdcb6e'];
 const NEUTRAL = '#7f8c8d';
+const COL_YOU   = '#3498db';   // your own cities on your private map (blue)
+const COL_RIVAL = '#e74c3c';   // rival cities on your private map (red)
 const COLOR   = { gold: 0xf1c40f, green: 0x2ecc71, red: 0xe74c3c, blue: 0x3498db, grey: 0x95a5a6 };
 const FONT    = path.join(__dirname, 'fonts', 'DejaVuSans.ttf');
 
@@ -87,7 +120,7 @@ const esc   = (s) => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replac
 
 // ─── projection for the map ─────────────────────────────────────────────────
 const LON_MIN = 9, LON_MAX = 25, LAT_MIN = 18.8, LAT_MAX = 33.7;
-const MAP_W = 760, MAP_H = 700, MAP_PAD = 20;
+const MAP_W = 1080, MAP_H = 1000, MAP_PAD = 24;
 const projX = (lon) => MAP_PAD + (lon - LON_MIN) / (LON_MAX - LON_MIN) * MAP_W;
 const projY = (lat) => MAP_PAD + (LAT_MAX - lat) / (LAT_MAX - LAT_MIN) * MAP_H;
 const BORDER = [
@@ -98,52 +131,77 @@ const BORDER = [
   [9.5,26.0],[9.3,30.0],[10.3,31.8],
 ];
 // label nudges so the dense north-west cluster doesn't overlap
-const LABEL_DX = { sabratha: -4, zawiya: 0, tripoli: 6, zliten: -2 };
-const LABEL_BELOW = { sabratha: false, zawiya: true, tripoli: false };
+const LABEL_DX = { sabratha: -16, sorman: 16, zawiya: 18, zaltan: -18, jumayl: -22, regdalin: -22, warshafana: 20, msallata: -6, tocra: -10, marj: 14, tripoli: 12 };
+const LABEL_DY = { zuwara: -12, zaltan: -2, regdalin: 2, jumayl: 12, sorman: 16, warshafana: 4, zawiya: 16, sabratha: 2, tripoli: 8 };
+const LABEL_BELOW = {
+  // NW coast cluster — alternate above/below so labels don't stack
+  regdalin: false, zuwara: false, zaltan: false, sorman: false, warshafana: false,
+  jumayl: true, sabratha: true, zawiya: true, asbia: true,
+  // NE coast cluster
+  tocra: false, bayda: false, alqubah: false, abyar: false,
+  marj: true, shahhat: true, derna: true,
+  // central
+  nofaliya: false, agheila: true,
+};
 
 function svgToPng(svg) {
   const { Resvg } = require('@resvg/resvg-js');
-  return new Resvg(svg, { font: { loadSystemFonts: false, fontFiles: [FONT], defaultFontFamily: 'DejaVu Sans' } }).render().asPng();
+  const fs = require('fs');
+  // Always allow system fonts so text renders even if the bundled font isn't deployed;
+  // prefer the bundled DejaVu when it IS present, for consistent looks.
+  const font = { loadSystemFonts: true, defaultFontFamily: 'DejaVu Sans' };
+  try { if (fs.existsSync(FONT)) font.fontFiles = [FONT]; } catch {}
+  return new Resvg(svg, { font }).render().asPng();
 }
 
 // ════════════════════════════════════════════════════════════════════════════
 //  IMAGE RENDERERS
 // ════════════════════════════════════════════════════════════════════════════
-function renderMap(state) {
+function renderMap(state, viewerId) {
   const W = MAP_W + MAP_PAD * 2;
   const H = MAP_H + MAP_PAD * 2 + 46;
   const poly = BORDER.map(([lo, la]) => `${projX(lo).toFixed(0)},${(projY(la) + 40).toFixed(0)}`).join(' ');
 
+  let mine = 0, rival = 0, neutral = 0;
   let nodes = '';
   for (const c of CITY_DEFS) {
     const city = state.cities[c.id];
     const owner = city.ownerId ? state.players[city.ownerId] : null;
-    const col = owner ? owner.color : NEUTRAL;
-    const r = (owner ? 9 : 7) + city.level * 1.5;
+    const isMine = !!viewerId && city.ownerId === viewerId;
+    let col;
+    if (!owner) { col = NEUTRAL; neutral++; }
+    else if (isMine) { col = COL_YOU; mine++; }
+    else if (viewerId) { col = COL_RIVAL; rival++; }
+    else { col = owner.color; }
+    const r = (owner ? 7 : 5.5) + city.level * 1.2;
     const x = projX(c.lon), y = projY(c.lat) + 40;
-    nodes += `<circle cx="${x.toFixed(0)}" cy="${y.toFixed(0)}" r="${r.toFixed(1)}" fill="${col}" stroke="#ffffff" stroke-width="2"/>`;
+    // your own cities get a gold ring so your bases are unmistakable
+    nodes += `<circle cx="${x.toFixed(0)}" cy="${y.toFixed(0)}" r="${r.toFixed(1)}" fill="${col}" stroke="${isMine ? '#f1c40f' : '#ffffff'}" stroke-width="${isMine ? 3 : 1.5}"/>`;
     const below = LABEL_BELOW[c.id] !== undefined ? LABEL_BELOW[c.id] : true;
-    const ly = below ? y + r + 13 : y - r - 6;
-    const lx = x + (LABEL_DX[c.id] || 0);
-    nodes += `<text x="${lx.toFixed(0)}" y="${ly.toFixed(0)}" font-size="13" fill="#f5e9c8" text-anchor="middle">${esc(c.name)}</text>`;
+    const lyy = (below ? y + r + 11 : y - r - 5) + (LABEL_DY[c.id] || 0);
+    const lxx = x + (LABEL_DX[c.id] || 0);
+    nodes += `<text x="${lxx.toFixed(0)}" y="${lyy.toFixed(0)}" font-size="11" fill="#f5e9c8" text-anchor="middle">${esc(c.name)}</text>`;
   }
 
-  // legend: owners (with city counts) + neutral
-  const owners = Object.entries(state.players)
-    .map(([id, p]) => ({ id, p, n: p.cities.length }))
-    .filter(o => o.n > 0)
-    .sort((a, b) => b.n - a.n);
-  let legend = `<text x="${MAP_PAD}" y="30" font-size="20" fill="#f1c40f">Diyar — Map of Libya</text>`;
-  let lx = MAP_PAD, ly = H - 14;
-  legend += `<rect x="${lx}" y="${ly - 11}" width="13" height="13" rx="2" fill="${NEUTRAL}"/><text x="${lx + 18}" y="${ly}" font-size="13" fill="#cbd3da">Neutral</text>`;
-  lx += 100;
-  for (const o of owners.slice(0, 8)) {
-    const label = `${o.p.name} (${o.n})`;
-    legend += `<rect x="${lx}" y="${ly - 11}" width="13" height="13" rx="2" fill="${o.p.color}"/><text x="${lx + 18}" y="${ly}" font-size="13" fill="#cbd3da">${esc(label)}</text>`;
-    lx += 40 + label.length * 7.5;
+  const title = viewerId ? 'Diyar — Your Realm' : 'Diyar — Map of Libya';
+  let legend = `<text x="${MAP_PAD}" y="30" font-size="20" fill="#f1c40f">${title}</text>`;
+  let lx = MAP_PAD; const ly = H - 14;
+  const swatch = (color, label) => {
+    const s = `<rect x="${lx}" y="${ly - 11}" width="13" height="13" rx="2" fill="${color}"/><text x="${lx + 18}" y="${ly}" font-size="13" fill="#cbd3da">${esc(label)}</text>`;
+    lx += 40 + label.length * 7.5; return s;
+  };
+  if (viewerId) {
+    legend += swatch(COL_YOU, `Your cities (${mine})`);
+    legend += swatch(COL_RIVAL, `Rivals (${rival})`);
+    legend += swatch(NEUTRAL, `Neutral (${neutral})`);
+  } else {
+    legend += swatch(NEUTRAL, 'Neutral');
+    const owners = Object.entries(state.players).map(([id, p]) => ({ id, p, n: p.cities.length }))
+      .filter(o => o.n > 0).sort((a, b) => b.n - a.n);
+    for (const o of owners.slice(0, 7)) legend += swatch(o.p.color, `${o.p.name} (${o.n})`);
   }
 
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" font-family="DejaVu Sans">
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" font-family="DejaVu Sans, sans-serif">
     <rect width="${W}" height="${H}" fill="#10243a"/>
     ${legend}
     <polygon points="${poly}" fill="#cbb074" stroke="#8a6d3b" stroke-width="3"/>
@@ -168,7 +226,7 @@ function renderBoss(boss) {
       <path d="M-24,-44 Q0,-70 24,-44 L20,-32 Q0,-44 -20,-32 Z" fill="#7d2b1d"/>
       <circle cx="-8" cy="-36" r="3" fill="#1a1a1a"/><circle cx="8" cy="-36" r="3" fill="#1a1a1a"/>
     </g>`;
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" font-family="DejaVu Sans">
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" font-family="DejaVu Sans, sans-serif">
     <rect width="${W}" height="${H}" fill="#2a1410"/>
     <rect width="${W}" height="${H}" fill="url(#g)" opacity="0.0"/>
     <text x="${W/2}" y="34" font-size="22" fill="#f1c40f" text-anchor="middle">${esc(boss.name)}</text>
@@ -191,7 +249,7 @@ function renderBattle(r) {
     lines.forEach((l, i) => { t += `<text x="${x}" y="${122 + i*22}" font-size="14" fill="#dfe6ec" text-anchor="middle">${esc(l)}</text>`; });
     return t;
   };
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" font-family="DejaVu Sans">
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" font-family="DejaVu Sans, sans-serif">
     <rect width="${W}" height="${H}" fill="#161b22"/>
     <rect x="0" y="0" width="${W}" height="46" fill="${bcol}"/>
     <text x="${W/2}" y="32" font-size="24" fill="#0b0e12" text-anchor="middle">${banner}</text>
@@ -208,16 +266,22 @@ function renderBattle(r) {
 // ════════════════════════════════════════════════════════════════════════════
 function getState(db, guildId, saveData) {
   const data = db[guildId] || (db[guildId] = {});
+  let dirty = false;
   if (!data.__diyar) {
     data.__diyar = { players: {}, cities: {}, boss: null, bossSched: null, channelId: null };
-    for (const c of CITY_DEFS) {
+    dirty = true;
+  }
+  // seed (first run) or backfill (new cities added later) any CITY_DEFS not yet in state
+  for (const c of CITY_DEFS) {
+    if (!data.__diyar.cities[c.id]) {
       data.__diyar.cities[c.id] = {
         id: c.id, name: c.name, lon: c.lon, lat: c.lat, level: c.level,
         ownerId: null, npc: true, garrison: 20 + c.level * 18, lastIncomeAt: Date.now(),
       };
+      dirty = true;
     }
-    if (saveData) saveData(guildId);
   }
+  if (dirty && saveData) saveData(guildId);
   return data.__diyar;
 }
 
@@ -338,7 +402,7 @@ function claimTribute(state, db, guildId, saveData, userId) {
 function buyWeapon(state, db, guildId, saveData, userId) {
   const p = state.players[userId]; if (!p) return { error: 'Not found.' };
   if (p.weaponTier >= ARMOURY_MAX_TIER) return { error: `The armoury forges up to tier ${ARMOURY_MAX_TIER}. Higher tiers are won by defeating bosses.` };
-  const cost = ARMOURY_BASE * (p.weaponTier + 1);
+  const cost = armouryCost(p.weaponTier);
   if (!spendDinar(db, guildId, userId, cost, saveData)) return { error: `Not enough Dinar (need ${fmt(cost)}).` };
   p.weaponTier++;
   saveData(guildId);
@@ -554,7 +618,7 @@ function dashboard(state, db, guildId, userId) {
   const income = cities.reduce((s, c) => s + pendingIncome(state, c), 0);
   const garr = cities.reduce((s, c) => s + c.garrison, 0);
   const dinar = getDinar(db, guildId, userId);
-  const shield = p.shieldUntil > Date.now() ? `🛡 Truce: ${msLeft(p.shieldUntil)}` : '🛡 No truce';
+  const shield = p.shieldUntil > Date.now() ? `  •  🛡 Truce: ${msLeft(p.shieldUntil)}` : '';
   const boss = state.boss ? `\n\n👹 **${state.boss.name}** is loose — open **Attack → Boss** or use the strike button in the war room!` : '';
   const embed = new EmbedBuilder().setColor(COLOR.gold)
     .setTitle(`⚔ Diyar — ${p.name}`)
@@ -562,8 +626,8 @@ function dashboard(state, db, guildId, userId) {
       `**${cities.length}** cit${cities.length === 1 ? 'y' : 'ies'} • **${fmt(dinar)}** Dinar\n` +
       `🪖 Army: **${fmt(p.army)}**  •  🏰 Garrisons: **${fmt(garr)}**\n` +
       `🗡 Weapon tier **${p.weaponTier}**  •  Military **${p.upg.mil}** / Walls **${p.upg.for}** / Economy **${p.upg.eco}**\n` +
-      `💰 Uncollected income: **${fmt(income)}**  •  ${shield}` + boss)
-    .setFooter({ text: 'Raids steal Dinar from rivals • capture cities to grow • beware the truce timer' });
+      `💰 Uncollected income: **${fmt(income)}**${shield}` + boss)
+    .setFooter({ text: 'Raids steal Dinar from rivals • capture cities to grow' });
   const row2 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('dy:upgrade').setLabel('⬆ Upgrades').setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId('dy:armoury').setLabel('🗡 Armoury').setStyle(ButtonStyle.Secondary),
@@ -619,7 +683,7 @@ function armouryView(state, db, guildId, userId) {
   const p = state.players[userId];
   const dinar = getDinar(db, guildId, userId);
   const atShopMax = p.weaponTier >= ARMOURY_MAX_TIER;
-  const cost = ARMOURY_BASE * (p.weaponTier + 1);
+  const cost = armouryCost(p.weaponTier);
   const bonus = (t) => `+${Math.round(t * 15)}% attack power`;
   const embed = new EmbedBuilder().setColor(COLOR.gold).setTitle('🗡 Armoury')
     .setDescription(
@@ -652,11 +716,11 @@ function targetSelect(state, userId) {
   }
   if (!opts.length) {
     return { embeds: [new EmbedBuilder().setColor(COLOR.grey).setTitle('⚔ Attack')
-      .setDescription('No fair targets right now (rivals may be under truce). Try again later.')], components: [backRow()] };
+      .setDescription('No reachable targets right now — rivals must be near your strength, and neutral militias are always fair game when any remain.')], components: [backRow()] };
   }
   const menu = new StringSelectMenuBuilder().setCustomId('dy:atk_target').setPlaceholder('Choose a city to raid…').addOptions(opts.slice(0, 25));
   return { embeds: [new EmbedBuilder().setColor(COLOR.red).setTitle('⚔ Choose your target')
-    .setDescription('Pick a city to raid. Neutral militias are always fair game; rivals must be near your strength and not under truce.')],
+    .setDescription('Pick a city to raid. Neutral militias are always fair game; rivals must be near your strength.')],
     components: [new ActionRowBuilder().addComponents(menu), backRow()] };
 }
 
@@ -845,7 +909,7 @@ function initDiyar({ client, db, saveData, awardLP }) {
           const tribLine = trib > 0 ? `\n\n🎁 **Daily tribute:** +${fmt(trib)} Dinar collected.` : '';
           if (isNew) {
             return interaction.reply(eph({ embeds: [new EmbedBuilder().setColor(COLOR.green).setTitle('🏴 Welcome to Diyar!')
-              .setDescription(`You've been granted **${startCity.name}** and an army of **${STARTER_ARMY}**. You start under a **truce** so no one can raid you yet.\n\nGrow your realm: recruit, upgrade, then raid neutral militias to expand. Open the dashboard below.${tribLine}`)],
+              .setDescription(`You've been granted **${startCity.name}** and an army of **${STARTER_ARMY}** troops.\n\nGrow your realm: recruit, upgrade, then raid neutral militias and rivals to expand. Open the dashboard below.${tribLine}`)],
               components: dashboard(state, db, gid, interaction.user.id).components, files: [] }));
           }
           return interaction.reply(eph({ ...(trib > 0 ? { content: `🎁 Daily tribute: +${fmt(trib)} Dinar collected.` } : {}), ...dashboard(state, db, gid, interaction.user.id) }));
@@ -937,7 +1001,7 @@ function initDiyar({ client, db, saveData, awardLP }) {
 
       if (action === 'map') {
         await interaction.deferUpdate();
-        return interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLOR.gold).setTitle('🗺 Map of Libya').setImage('attachment://diyar-map.png')], components: [backRow()], files: [renderMap(state)] });
+        return interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLOR.gold).setTitle('🗺 Your Realm — Map of Libya').setImage('attachment://diyar-map.png')], components: [backRow()], files: [renderMap(state, uid)] });
       }
       if (action === 'collect') {
         const got = collectIncome(state, db, gid, saveData, uid);
