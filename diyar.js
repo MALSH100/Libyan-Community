@@ -109,7 +109,22 @@ const NEUTRAL = '#7f8c8d';
 const COL_YOU   = '#3498db';   // your own cities on your private map (blue)
 const COL_RIVAL = '#e74c3c';   // rival cities on your private map (red)
 const COLOR   = { gold: 0xf1c40f, green: 0x2ecc71, red: 0xe74c3c, blue: 0x3498db, grey: 0x95a5a6 };
-const FONT    = path.join(__dirname, 'fonts', 'DejaVuSans.ttf');
+// Look for the font in the likely spots: repo root (where it currently lives),
+// a fonts/ subfolder, and the working directory. First match wins.
+const FONT_CANDIDATES = [
+  path.join(__dirname, 'DejaVuSans.ttf'),
+  path.join(__dirname, 'fonts', 'DejaVuSans.ttf'),
+  path.join(process.cwd(), 'DejaVuSans.ttf'),
+  path.join(process.cwd(), 'fonts', 'DejaVuSans.ttf'),
+];
+let _fontFile = undefined, _fontWarned = false;
+function resolveFont() {
+  if (_fontFile !== undefined) return _fontFile;
+  const fs = require('fs');
+  for (const p of FONT_CANDIDATES) { try { if (fs.existsSync(p)) { _fontFile = p; return p; } } catch {} }
+  _fontFile = null;
+  return null;
+}
 
 // ─── tiny utils ───────────────────────────────────────────────────────────────
 const rnd   = (a, b) => a + Math.random() * (b - a);
@@ -146,11 +161,10 @@ const LABEL_BELOW = {
 
 function svgToPng(svg) {
   const { Resvg } = require('@resvg/resvg-js');
-  const fs = require('fs');
-  // Always allow system fonts so text renders even if the bundled font isn't deployed;
-  // prefer the bundled DejaVu when it IS present, for consistent looks.
+  const file = resolveFont();
   const font = { loadSystemFonts: true, defaultFontFamily: 'DejaVu Sans' };
-  try { if (fs.existsSync(FONT)) font.fontFiles = [FONT]; } catch {}
+  if (file) font.fontFiles = [file];
+  else if (!_fontWarned) { _fontWarned = true; console.warn('⚠️ Diyar: DejaVuSans.ttf not found (looked in repo root, ./fonts, and cwd) — image text may not render. Commit DejaVuSans.ttf to the repo root.'); }
   return new Resvg(svg, { font }).render().asPng();
 }
 
