@@ -504,11 +504,24 @@ function initGacha({ client, db, saveData }) {
   }
   function cmdOptOut(interaction, s) {
     const uid = interaction.user.id;
-    if (!s.pool[uid]) return interaction.reply(eph('You\'re not opted in.'));
-    dissolveMember(s, uid);
-    recomputeRarities(db, interaction.guild.id);
-    saveData(interaction.guild.id);
-    return interaction.reply({ content: `👋 **${interaction.user.username}** opted out of the collection game. They've been removed from the pool, and every claim and wishlist of them has been dissolved.` });
+    if (!s.pool[uid]) return interaction.reply(eph("You're not in the collection game, so there's nothing to opt out of."));
+    const dinar = dinarOf(s, uid);
+    const penalty = Math.floor(dinar * 0.75);
+    const owned = collectionOf(s, uid).length;
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('gacha_optout_confirm').setLabel('Yes, opt me out').setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId('gacha_optout_cancel').setLabel('Cancel').setStyle(ButtonStyle.Secondary));
+    return interaction.reply({
+      flags: 64,
+      content:
+        `⚠️ **Are you sure you want to opt out?**\n\n` +
+        `This is permanent and costly:\n` +
+        `• You'll lose **75% of your Dinar** — that's **${fmt(penalty)}** of your **${fmt(dinar)}** (you'd keep **${fmt(dinar - penalty)}**).\n` +
+        `• Your entire collection of **${owned}** card${owned === 1 ? '' : 's'} will be released back into the pool for others to claim.\n` +
+        `• You'll be removed as a claimable card, and every claim and wishlist involving you will be cleared.\n\n` +
+        `If you opt back in later, you'll be starting again from scratch.`,
+      components: [row],
+    });
   }
 
   // ── /gacha-wish + /gacha-wishlist ──────────────────────────────────────────
@@ -932,6 +945,31 @@ function initGacha({ client, db, saveData }) {
       saveData(interaction.guild.id);
       await interaction.update({ components: [] }).catch(() => {});
       return interaction.followUp({ content: `💵 <@${uid}> grabbed **${fmt(amount)} Dinar**!` }).catch(() => {});
+    }
+
+    if (action === 'gacha_optout_cancel') {
+      return interaction.update({ content: "✅ Cancelled — you're still in the collection game.", components: [] }).catch(() => {});
+    }
+
+    if (action === 'gacha_optout_confirm') {
+      const uid = interaction.user.id;
+      if (!s.pool[uid]) return interaction.update({ content: "You're already opted out.", components: [] }).catch(() => {});
+      const penalty = Math.floor(dinarOf(s, uid) * 0.75);
+      if (penalty > 0) addDinar(s, uid, -penalty);
+      const released = collectionOf(s, uid);
+      for (const cid of released) delete s.owners[cid];   // their collection returns to the pool
+      dissolveMember(s, uid);                              // remove them as a card + clear claims/wishlists of them
+      recomputeRarities(db, interaction.guild.id);
+      saveData(interaction.guild.id);
+      await interaction.update({
+        content:
+          `👋 You've opted out of the collection game.\n\n` +
+          `• Lost **${fmt(penalty)} Dinar** (you kept **${fmt(dinarOf(s, uid))}**).\n` +
+          `• Released **${released.length}** card${released.length === 1 ? '' : 's'} back into the pool.\n` +
+          `• Removed you as a card and cleared all claims and wishlists involving you.`,
+        components: [],
+      }).catch(() => {});
+      return;
     }
 
     if (action === 'gacha_trade_ok' || action === 'gacha_trade_no') {
