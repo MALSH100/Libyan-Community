@@ -7,7 +7,7 @@
 // game never breaks if the API is unreachable.
 
 const {
-  SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle,
+  SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, AttachmentBuilder,
 } = require('discord.js');
 const { getDinar, spendDinar, awardDinar } = require('./gacha');
 
@@ -42,6 +42,44 @@ function cardFromCode(code) {
     red:   suit === 'H' || suit === 'D',
     image: cardImage(code),
   };
+}
+
+// ─── Reveal image: both cards merged into ONE side-by-side picture ─────────────
+// Discord can't size an embed image by pixels, and its multi-image "gallery" is
+// auto-sized (and crops tall cards on mobile). So we render BOTH cards into a
+// single smaller landscape PNG (via the resvg renderer the bot already ships) and
+// attach that — fully visible on mobile, side-by-side, at a size we control.
+// ~30% smaller than the native 226×314 card art. Falls back to text-only if the
+// card images can't be fetched.
+const REVEAL_CARD_W = 160, REVEAL_CARD_H = 222, REVEAL_GAP = 18, REVEAL_PAD = 8;
+const cardB64Cache  = new Map();   // card code → base64 png, fetched once each
+
+async function getCardB64(card) {
+  if (cardB64Cache.has(card.code)) return cardB64Cache.get(card.code);
+  try {
+    const res = await fetch(card.image, { signal: AbortSignal.timeout(6000) });
+    if (!res.ok) return null;
+    const b64 = Buffer.from(await res.arrayBuffer()).toString('base64');
+    cardB64Cache.set(card.code, b64);
+    return b64;
+  } catch { return null; }
+}
+
+async function buildRevealAttachment(c1, c2) {
+  try {
+    const [b1, b2] = await Promise.all([getCardB64(c1), getCardB64(c2)]);
+    if (!b1 || !b2) return null;                       // → caller falls back to text-only
+    const W = REVEAL_PAD * 2 + REVEAL_CARD_W * 2 + REVEAL_GAP;
+    const H = REVEAL_PAD * 2 + REVEAL_CARD_H;
+    const svg =
+      `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}">` +
+      `<image x="${REVEAL_PAD}" y="${REVEAL_PAD}" width="${REVEAL_CARD_W}" height="${REVEAL_CARD_H}" href="data:image/png;base64,${b1}"/>` +
+      `<image x="${REVEAL_PAD + REVEAL_CARD_W + REVEAL_GAP}" y="${REVEAL_PAD}" width="${REVEAL_CARD_W}" height="${REVEAL_CARD_H}" href="data:image/png;base64,${b2}"/>` +
+      `</svg>`;
+    const { Resvg } = require('@resvg/resvg-js');
+    const png = new Resvg(svg, { background: 'rgba(0,0,0,0)' }).render().asPng();
+    return new AttachmentBuilder(png, { name: 'bc-reveal.png' });
+  } catch { return null; }
 }
 
 function localShuffledDeck() {
@@ -225,28 +263,28 @@ function initBattleCards({ client, db, saveData, awardLP }) {
   function roundPrompt(g) {
     const lockP1 = g.choices[g.p1] ? '✅' : '⏳';
     const lockP2 = g.choices[g.p2] ? '✅' : '⏳';
+    const howTo = g.round === 1
+      ? `📖 **How to play:** You each hold **5 cards**. Every round you both secretly tap **Choose your card** and pick one — the **higher** card wins the point (**A** is high, **2** is low; a tie scores nothing). First to **${g.target}** wins.` +
+        (g.bet > 0 ? ` 💰 Winner takes the pot.` : '') + `\n\n`
+      : '';
     const embed = new EmbedBuilder().setColor(COLOR.gold)
       .setTitle('🎴 Battle Cards')
       .setDescription(
+        `${howTo}` +
         `${scoreboard(g)}\n\n` +
         `${lockP1} ${g.p1Name}　•　${g.p2Name} ${lockP2}\n\n` +
         `Both players: tap **Choose your card** to secretly pick from your hand.`);
-    return { embeds: [embed], components: [chooseButton(g)] };
+    return { embeds: [embed], components: [chooseButton(g)], attachments: [] };
   }
 
-  // Reveal both cards side-by-side (two embeds sharing a URL render as a gallery),
-  // then either prompt the next round or declare the winner.
-  function revealMessage(g, c1, c2, resultText, over) {
-    const gallery = [
-      new EmbedBuilder().setColor(over ? COLOR.green : COLOR.gold)
-        .setTitle('🎴 Battle Cards — Reveal')
-        .setURL('https://deckofcardsapi.com')
-        .setDescription(
-          `**${g.p1Name}** played **${c1.label}**　vs　**${g.p2Name}** played **${c2.label}**\n\n` +
-          `${resultText}\n\n${scoreboard(g)}`)
-        .setImage(c1.image),
-      new EmbedBuilder().setURL('https://deckofcardsapi.com').setImage(c2.image),
-    ];
+  // Reveal both cards. Thumbnails (small, top-right) render fully on mobile without
+  // tapping; each embed is labelled with whose card it is.
+  async function revealMessage(g, c1, c2, resultText, over) {
+    const attach = await buildRevealAttachment(c1, c2);
+    const embed = new EmbedBuilder().setColor(over ? COLOR.green : COLOR.gold)
+      .setTitle('🎴 Battle Cards — Reveal');
+    if (attach) embed.setImage('attachment://bc-reveal.png');
+
     let components;
     if (over) {
       let ending;
@@ -268,15 +306,21 @@ function initBattleCards({ client, db, saveData, awardLP }) {
       } else if (g.lpCapped) {
         ending += `\n🏅 *Daily Battle Cards LP cap reached — the win still counts on the leaderboard.*`;
       }
-      gallery[0].setDescription(
+      embed.setDescription(
         `**${g.p1Name}** played **${c1.label}**　vs　**${g.p2Name}** played **${c2.label}**\n\n` +
         `${resultText}\n\n${ending}`);
       components = [new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId(`bc:${g.id}:rematch`).setLabel('🔁 Rematch').setStyle(ButtonStyle.Success))];
     } else {
+      embed.setDescription(
+        `**${g.p1Name}** played **${c1.label}**　vs　**${g.p2Name}** played **${c2.label}**\n\n` +
+        `${resultText}\n\n${scoreboard(g)}`);
       components = [chooseButton(g, `🎴 Round ${g.round} — Choose your card`)];
     }
-    return { embeds: gallery, components };
+    // attachments:[] clears any previous round's image before adding this one
+    const payload = { embeds: [embed], components, attachments: [] };
+    if (attach) payload.files = [attach];
+    return payload;
   }
 
   // ── Round resolution ──
@@ -316,7 +360,7 @@ function initBattleCards({ client, db, saveData, awardLP }) {
       g.choices = { [g.p1]: null, [g.p2]: null };
       armTimer(g, IDLE_TIMEOUT_MS, () => abandonGame(g.id));
     }
-    await editPublic(g, revealMessage(g, c1, c2, resultText, over));
+    await editPublic(g, await revealMessage(g, c1, c2, resultText, over));
     clearPickMessages(g);   // reveal just posted — clear both "Locked in" private messages so they don't pile up
   }
 
