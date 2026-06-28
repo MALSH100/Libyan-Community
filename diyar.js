@@ -289,19 +289,19 @@ function ensurePlayer(state, userId, name, saveData, guildId) {
     .filter(c => c.npc && !c.ownerId)
     .sort((a, b) => a.level - b.level);
   const start = free[0] || CITY_DEFS.map(c => state.cities[c.id]).filter(c => !c.ownerId)[0];
-  if (!start) return { player: null, isNew: false, full: true };
+  // if every city is held, the newcomer still joins — landless — and must raid to seize one.
 
   const color = PALETTE[Object.keys(state.players).length % PALETTE.length];
   p = {
-    name, color, cities: [start.id], army: STARTER_ARMY, weaponTier: 0,
+    name, color, cities: start ? [start.id] : [], army: STARTER_ARMY, weaponTier: 0,
     upg: { mil: 0, for: 0, eco: 0 }, shieldUntil: Date.now() + SHIELD_MS, lastAttackAt: 0,
     lastStrikeAt: 0, joinedAt: Date.now(), lastTributeDay: '',
     stats: { raidsWon: 0, raidsLost: 0, defended: 0, captured: 0, lost: 0, bossKills: 0, bossDmg: 0 },
   };
-  start.ownerId = userId; start.npc = false; start.garrison = 25; start.lastIncomeAt = Date.now();
+  if (start) { start.ownerId = userId; start.npc = false; start.garrison = 25; start.lastIncomeAt = Date.now(); }
   state.players[userId] = p;
   if (saveData) saveData(guildId);
-  return { player: p, isNew: true, startCity: start };
+  return { player: p, isNew: true, startCity: start || null, landless: !start };
 }
 
 // reseed a knocked-out player (no cities) with a fresh starter next time they open the game
@@ -921,11 +921,16 @@ function initDiyar({ client, db, saveData, awardLP }) {
         if (interaction.commandName === 'diyar') {
           const state = stateOf(gid);
           const name = interaction.member?.displayName || interaction.user.username;
-          const { player, isNew, full, startCity } = ensurePlayer(state, interaction.user.id, name, saveData, gid);
-          if (full) return interaction.reply(eph({ content: '🗺 The map is fully conquered right now — wait for a city to free up, then try again.' }));
+          const { player, isNew, landless, startCity } = ensurePlayer(state, interaction.user.id, name, saveData, gid);
           const trib = claimTribute(state, db, gid, saveData, interaction.user.id);
           const tribLine = trib > 0 ? `\n\n🎁 **Daily tribute:** +${fmt(trib)} Dinar collected.` : '';
           if (isNew) {
+            if (landless) {
+              announce(gid, { content: `🏴 **${name}** has entered the war for Diyar — but every city is held! They march in **landless**, hungry for conquest.` });
+              return interaction.reply(eph({ embeds: [new EmbedBuilder().setColor(COLOR.green).setTitle('🏴 Welcome to Diyar!')
+                .setDescription(`Every city in Libya is already held, so you begin **landless** — with an army of **${STARTER_ARMY}** troops and nothing to lose. Open **⚔ Attack**, raid an owned city and **seize it** to plant your first banner. Recruit more troops, then strike the weakest holder you can reach. Until you hold a city, no one can touch you.${tribLine}`)],
+                components: dashboard(state, db, gid, interaction.user.id).components, files: [] }));
+            }
             announce(gid, { content: `🏴 **${name}** has entered the war for Diyar, raising their banner over **${startCity.name}**!` });
             return interaction.reply(eph({ embeds: [new EmbedBuilder().setColor(COLOR.green).setTitle('🏴 Welcome to Diyar!')
               .setDescription(`You've been granted **${startCity.name}** and an army of **${STARTER_ARMY}** troops.\n\nGrow your realm: recruit, upgrade, then raid neutral militias and rivals to expand. Open the dashboard below.${tribLine}`)],
