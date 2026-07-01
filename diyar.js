@@ -93,7 +93,38 @@ const CITY_DEFS = [
 ];
 const CITY_BY_ID = Object.fromEntries(CITY_DEFS.map(c => [c.id, c]));
 
-const PALETTE = ['#e6194b','#4363d8','#3cb44b','#ffe119','#f032e6','#42d4f4','#f58231','#911eb4','#bfef45','#ff80c0','#ffffff','#00c2a8'];
+// procedurally spread player colours around the hue wheel (golden angle) with alternating
+// brightness — used only as overflow past the curated set below
+function hslToHex(h, s, l) {
+  s /= 100; l /= 100;
+  const k = n => (n + h / 30) % 12;
+  const a = s * Math.min(l, 1 - l);
+  const f = n => l - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
+  const hx = x => Math.round(x * 255).toString(16).padStart(2, '0');
+  return '#' + hx(f(0)) + hx(f(8)) + hx(f(4));
+}
+// hand-picked, maximally-distinct colours for a dark map (ordered most-distinct first);
+// only one colour per hue family, so no "two blues / two greens" and no light-vs-dark pairs
+const BASE_COLORS = [
+  '#ff4136', // red
+  '#0074ff', // blue
+  '#2ecc40', // green
+  '#ffdc00', // yellow
+  '#ff5fd2', // magenta
+  '#ff851b', // orange
+  '#01d5d5', // cyan
+  '#b967ff', // purple
+  '#ffffff', // white
+  '#a8e000', // lime
+  '#8f7fff', // periwinkle
+  '#ff9fb0', // light pink
+  '#c9a26b', // tan
+  '#5fd9a0', // seafoam
+];
+function playerColor(i) {
+  if (i < BASE_COLORS.length) return BASE_COLORS[i];
+  return hslToHex((i * 137.508) % 360, 82, [60, 72, 50][i % 3]);   // overflow past 14 players
+}
 const NEUTRAL = '#7f8c8d';
 const COL_YOU   = '#3498db';   // your own cities on your private map (blue)
 const COL_RIVAL = '#e74c3c';   // rival cities on your private map (red)
@@ -292,7 +323,7 @@ function getState(db, guildId, saveData) {
   }
   // give every player a distinct colour from the palette (by join order) so the map stays readable
   Object.keys(data.__diyar.players).forEach((id, i) => {
-    const want = PALETTE[i % PALETTE.length];
+    const want = playerColor(i);
     if (data.__diyar.players[id].color !== want) { data.__diyar.players[id].color = want; dirty = true; }
   });
   if (dirty && saveData) saveData(guildId);
@@ -310,7 +341,7 @@ function ensurePlayer(state, userId, name, saveData, guildId) {
   const start = free[0] || CITY_DEFS.map(c => state.cities[c.id]).filter(c => !c.ownerId)[0];
   // if every city is held, the newcomer still joins — landless — and must raid to seize one.
 
-  const color = PALETTE[Object.keys(state.players).length % PALETTE.length];
+  const color = playerColor(Object.keys(state.players).length);
   p = {
     name, color, cities: start ? [start.id] : [], army: STARTER_ARMY, weaponTier: 0,
     upg: { mil: 0, for: 0, eco: 0 }, shieldUntil: Date.now() + SHIELD_MS, lastAttackAt: 0,
@@ -547,13 +578,16 @@ function raidLiveEmbed(state, raid, secsLeft) {
   const city = state.cities[raid.cityId];
   const atkP = effectiveAttack(state.players[raid.attackerId] || { weaponTier: 0, upg: { mil: 0 } }, raid.send);
   const defP = effectiveDefence(state, city, raid.reinforced ? REINFORCE_MULT : 1);
-  const sum = Math.max(1, atkP + defP);
-  const dur = RAID_WINDOW_MS / 1000;
-  const f = clamp((dur - secsLeft) / dur, 0, 1);                 // 0 at start → 1 at the end
-  // live attrition: each side wears the other down over the window (weaker side fades faster)
-  const atkNow = Math.max(0, Math.round(atkP * (1 - (defP / sum) * f * 0.85)));
-  const defNow = Math.max(0, Math.round(defP * (1 - (atkP / sum) * f * 0.85)));
-  const mx = Math.max(atkP, defP, 1);                            // scale bars to the starting max so shrinkage shows
+  // progress anchored to when the message appeared; reaches 1 at 85% of the window so the bars
+  // visibly finish a few seconds BEFORE the result is announced (never mid-drain at the reveal)
+  const elapsed = raid.animStart ? (Date.now() - raid.animStart) : 0;
+  const f = clamp(elapsed / (RAID_WINDOW_MS * 0.85), 0, 1);
+  // asymmetric attrition: each side wears the other down by the enemy's strength, so the stronger
+  // side keeps a longer bar. Early drain is gentle, so the first frame the viewer sees looks full.
+  const DRAIN = 0.55;
+  const atkNow = Math.max(0, Math.round(atkP - defP * f * DRAIN));
+  const defNow = Math.max(0, Math.round(defP - atkP * f * DRAIN));
+  const mx = Math.max(atkP, defP, 1);
   const status = raid.reinforced
     ? `🛡️ **Reinforced!** The garrison rallies. ⏳ **${secsLeft}s** left…`
     : `⏳ **${secsLeft}s** left — defender, hit **🛡 Send Reinforcements** to rally your garrison!`;
@@ -996,7 +1030,9 @@ function initDiyar({ client, db, saveData, awardLP }) {
     let msg = null;
     try {
       const ch = await client.channels.fetch(raid.channelId);
-      const secs = Math.max(0, Math.round((raid.endsAt - Date.now()) / 1000));
+      raid.animStart = Date.now();                     // anchor the animation to when the message actually appears
+      raid.endsAt = raid.animStart + RAID_WINDOW_MS;   // re-anchor the countdown too, so it starts at a full 30s
+      const secs = Math.round(RAID_WINDOW_MS / 1000);
       msg = await ch.send({ content: `<@${raid.defenderId}>`, embeds: [raidLiveEmbed(state, raid, secs)], components: [reinforceRow(raidId)] });
       raid.messageId = msg.id; saveData(guildId);
     } catch (e) { console.error('[diyar raid post]', e.message); }
