@@ -1,1256 +1,1080 @@
-// diyar.js — "Diyar" (ديار): a Libyan-themed, single-player-vs-everyone strategy
-// game for Discord, inspired by Travian / Tribal Wars (async raiding) with a shared
-// world-boss model. Players rule real Libyan cities on a rendered map, recruit troops
-// and upgrade defenses with Dinar, raid rivals and neutral militias for loot/territory,
-// and team up against nobody — every player is on their own. Boss threats appear at
-// random times for solo damage races.
+// ─── Qa'ima (قائمة) — Server Collection Game with Dinar Economy ───────────────
+// A Mudae-inspired collection game, customised for the Libyan server.
 //
-// Visuals are rendered locally with @resvg/resvg-js (no external API). Economy plugs
-// into the existing Dinar system: upgrades/troops are a Dinar SINK, raids TRANSFER
-// Dinar between players (no minting), and only modest capped city income + boss prizes
-// mint new Dinar — so the game is, on balance, a sink.
+//  • Members OPT IN to become claimable cards (their Discord name + avatar).
+//  • /gacha-roll drops a random opted-in member as a card after a 5-second
+//    warning. Anyone can Claim it (free-snipe) within 60 seconds — race to click.
+//  • If the rolled member is ALREADY owned, a 💵 Claim Dinar button appears
+//    instead — first to click pockets some Dinar.
+//  • /gacha-wish pings a member that someone wants them (and nudges them to opt
+//    in). When a wishlisted member is rolled, their wishers get pinged.
+//  • Rarity (Common→Mythic) is LIVE — ranked from each member's activity score
+//    (LP, Pokémon, Ya Rayt, POTD) against the rest of the pool, so it shifts as
+//    the server grows. Rarer cards are worth more Dinar and appear less often.
+//  • Earn Dinar: /gacha-daily, releasing members, Dinar drops, and (via the
+//    exported awardDinar) clan wars, Ya Rayt, POTD, and Pokémon.
+//
+// COOLDOWNS: roll is PER-USER, once every 2 hours; claim is once per day per
+// person; a dropped card expires after 60 seconds.
+//
+// Every command is prefixed `gacha-` so typing "gacha" in Discord lists them all.
+//
+// Wiring in index.js:
+//   1. const { getGachaCommands, initGacha, awardDinar } = require('./gacha');
+//   2. add ...getGachaCommands() to the command-registration array
+//   3. call initGacha({ client, db, saveData }); near your other init functions
+//   4. award Dinar from other systems: awardDinar(db, guildId, userId, amount, saveData)
 
 const {
-  SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle,
-  AttachmentBuilder, StringSelectMenuBuilder, PermissionFlagsBits,
+  SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits,
+  ActionRowBuilder, ButtonBuilder, ButtonStyle, AttachmentBuilder,
 } = require('discord.js');
-const { getDinar, spendDinar, awardDinar } = require('./gacha');
 const path = require('path');
 
-// ─── Tuning ───────────────────────────────────────────────────────────────────
-const STARTER_ARMY        = 40;
-const TROOP_COST          = 1.5;                    // Dinar per troop
-const SHIELD_MS           = 0;                     // truce disabled (no starting truce, no post-raid shield)
-const ATTACK_COOLDOWN_MS  = 30 * 60 * 1000;     // between your own attacks
-const RAID_WINDOW_MS      = 30 * 1000;          // PvP raids run live for 30s so the defender can rally
-const REINFORCE_MULT      = 2.0;                // defence boost if the defender reinforces in time (bonus, never a penalty)
-const LOOT_PCT            = 0.20;                  // share of a defender's Dinar stolen on a win (transfer, not minted)
-const CAPTURE_RATIO       = 1.4;                   // must out-power a PLAYER city this much to seize it
-const MATCH_BAND          = 3.0;                   // can't punch down: target strength must be ≥ yours / band
-const LOOT_BY_LEVEL       = [0, 50, 80, 120];       // minted raid loot by city level (defender loses nothing)
-const INCOME_PER_LEVEL_HR = 20;                    // Dinar/hour per city level (20/40/60)
-const INCOME_CAP_HRS      = 12;                    // accrual caps at 12h, so you must collect
-const UPG_MAX             = 10;
-const UPG_BASE            = { mil: 240, for: 200, eco: 180 };   // cost = base × (level+1)
-const TRIBUTE_BASE        = 40;                    // daily login reward (capped mint, async-friendly)
-const TRIBUTE_PER_CITY    = 12;
-const TRIBUTE_MAX         = 120;
-const ARMOURY_BASE        = 360;                   // Dinar per weapon tier bought (cost = base × (tier+1))
-const ARMOURY_MAX_TIER    = 3;                     // shop caps here; tiers 4–5 only from boss kills
-// cost to forge the NEXT tier from `tier`; doubles once you're past tier 2
-const armouryCost = (tier) => ARMOURY_BASE * (tier + 1) * (tier >= 2 ? 2 : 1);
-const upgCost = (track, lvl) => UPG_BASE[track] * (lvl + 1) * (lvl >= 3 ? 2 : 1);   // steeper past level 3
+// ─── Tuning ──────────────────────────────────────────────────────────────────
+const TIERS       = ['Common', 'Rare', 'Epic', 'Legendary', 'Mythic'];
+const TIER_EMOJI  = { Common: '⚪', Rare: '🔵', Epic: '🟣', Legendary: '🟡', Mythic: '🔴' };
+const TIER_VALUE  = { Common: 100, Rare: 500, Epic: 1500, Legendary: 5000, Mythic: 15000 };
+const TIER_WEIGHT = { Common: 100, Rare: 40, Epic: 15, Legendary: 5, Mythic: 1 };   // roll odds
+const TIER_COLOR  = { Common: 0x95A5A6, Rare: 0x3498DB, Epic: 0x9B59B6, Legendary: 0xF1C40F, Mythic: 0xE74C3C };
 
-// ─── Boss ───────────────────────────────────────────────────────────────────
-const BOSS_DURATION_MS    = 6 * 3600 * 1000;      // time to defeat before it pillages
-const BOSS_STRIKE_CD_MS   = 30 * 1000;            // per-player strike cooldown (30s)
-const BOSS_HP             = 10000;                 // flat boss HP
-const BOSS_HP_PER_PLAYER  = 0;                     // flat HP (raise this to scale with player count)
-const BOSS_SPAWNS_PER_DAY = 2;
-const BOSS_WIN_START      = 11;                    // Libya-time window for spawns
-const BOSS_WIN_END        = 23;
-const LIBYA_OFFSET_MS     = 2 * 3600 * 1000;       // UTC+2, no DST
-const TICK_MS             = 60 * 1000;
-const BOSS_DEFS = [
-  { name: 'The Sandstorm Warlord', tag: 'A raider-king rides the dunes' },
-  { name: 'The Sirte Corsairs',    tag: 'Sea-raiders strike the coast' },
-  { name: 'The Fezzan Brigands',   tag: 'Desert bandits seize the south' },
-  { name: 'The Iron Caravan',      tag: 'A mercenary host marches north' },
-];
+const ROLL_COOLDOWN_MS   = 3 * 60 * 60 * 1000;   // PER-USER: one roll every 3 hours
+const CLAIM_COOLDOWN_MS  = 3 * 60 * 60 * 1000;   // per-user: one claim every 3 hours
+const ROLL_DROP_DELAY_MS = 5 * 1000;             // warning before the card reveals
+const ROLL_EXPIRY_MS     = 60 * 1000;            // claim window
+const RARITY_RECALC_MS   = 6 * 60 * 60 * 1000;
+const TRADE_TTL_MS       = 5 * 60 * 1000;
+const DAILY_BASE         = 50;
+const DINAR_DROP_MIN     = 25;
+const DINAR_DROP_MAX     = 125;
 
-// ─── Cities (real Libyan locations; lon/lat drive the map projection) ──────────
-const CITY_DEFS = [
-  // ── Northwest & Nafusa (Tripolitania) ──
-  { id: 'nalut',     name: 'Nalut',      lon: 10.98, lat: 31.87, level: 1 },
-  { id: 'zuwara',    name: 'Zuwara',     lon: 12.08, lat: 32.93, level: 1 },
-  { id: 'sabratha',  name: 'Sabratha',   lon: 12.49, lat: 32.79, level: 1 },
-  { id: 'zawiya',    name: 'Zawiya',     lon: 12.73, lat: 32.76, level: 2 },
-  { id: 'gharyan',   name: 'Gharyan',    lon: 13.02, lat: 32.17, level: 2 },
-  { id: 'tripoli',   name: 'Tripoli',    lon: 13.19, lat: 32.89, level: 3 },
-  { id: 'tarhuna',   name: 'Tarhuna',    lon: 13.63, lat: 32.44, level: 1 },
-  { id: 'baniwalid', name: 'Bani Walid', lon: 13.99, lat: 31.76, level: 1 },
-  { id: 'khoms',     name: 'Khoms',      lon: 14.26, lat: 32.65, level: 1 },
-  { id: 'zliten',    name: 'Zliten',     lon: 14.57, lat: 32.47, level: 2 },
-  { id: 'misrata',   name: 'Misrata',    lon: 15.09, lat: 32.38, level: 3 },
-  // ── Central coast ──
-  { id: 'sirte',     name: 'Sirte',      lon: 16.59, lat: 31.20, level: 2 },
-  // ── Northeast (Cyrenaica) ──
-  { id: 'benghazi',  name: 'Benghazi',   lon: 20.07, lat: 32.12, level: 3 },
-  { id: 'ajdabiya',  name: 'Ajdabiya',   lon: 20.22, lat: 30.76, level: 2 },
-  { id: 'marj',      name: 'Marj',       lon: 20.88, lat: 32.50, level: 1 },
-  { id: 'bayda',     name: 'Bayda',      lon: 21.75, lat: 32.76, level: 2 },
-  { id: 'derna',     name: 'Derna',      lon: 22.64, lat: 32.77, level: 2 },
-  { id: 'tobruk',    name: 'Tobruk',     lon: 23.96, lat: 32.08, level: 2 },
-  // ── South (Fezzan & desert) ──
-  { id: 'ghat',      name: 'Ghat',       lon: 10.18, lat: 24.96, level: 1 },
-  { id: 'ubari',     name: 'Ubari',      lon: 12.78, lat: 26.59, level: 1 },
-  { id: 'murzuq',    name: 'Murzuq',     lon: 13.92, lat: 25.92, level: 1 },
-  { id: 'sabha',     name: 'Sabha',      lon: 14.43, lat: 27.04, level: 2 },
-  { id: 'waddan',    name: 'Waddan',     lon: 16.14, lat: 29.16, level: 1 },
-  { id: 'jalu',      name: 'Jalu',       lon: 21.55, lat: 29.03, level: 1 },
-  { id: 'kufra',     name: 'Kufra',      lon: 23.31, lat: 24.18, level: 1 },
-];
-const CITY_BY_ID = Object.fromEntries(CITY_DEFS.map(c => [c.id, c]));
+// ─── /dinar-flip (coin toss) ───────────────────────────────────────────────
+const FLIP_MIN_BET    = 1;
+const FLIP_MAX_BET    = 500;                 // max stake per flip
+const FLIP_WIN_CHANCE = 0.45;                // < 0.5 = house edge. 0.45 + 2x payout ≈ 10% edge
+const FLIP_CD_MS      = 2 * 60 * 60 * 1000;  // one flip every 2 hours per user
+const COIN_DIR        = path.join(__dirname, 'assets');
+const coinFile = (name) => new AttachmentBuilder(path.join(COIN_DIR, name), { name });
+const RELEASE_REFUND     = 0.5;
 
-const PALETTE = ['#e74c3c','#3498db','#2ecc71','#9b59b6','#e67e22','#1abc9c','#f5b041','#e84393','#00cec9','#fab1a0','#6c5ce7','#fdcb6e'];
-const NEUTRAL = '#7f8c8d';
-const COL_YOU   = '#3498db';   // your own cities on your private map (blue)
-const COL_RIVAL = '#e74c3c';   // rival cities on your private map (red)
-const COLOR   = { gold: 0xf1c40f, green: 0x2ecc71, red: 0xe74c3c, blue: 0x3498db, grey: 0x95a5a6 };
-// Look for the font in the likely spots: repo root (where it currently lives),
-// a fonts/ subfolder, and the working directory. First match wins.
-const FONT_CANDIDATES = [
-  path.join(__dirname, 'DejaVuSans.ttf'),
-  path.join(__dirname, 'fonts', 'DejaVuSans.ttf'),
-  path.join(process.cwd(), 'DejaVuSans.ttf'),
-  path.join(process.cwd(), 'fonts', 'DejaVuSans.ttf'),
-];
-let _fontFile = undefined, _fontWarned = false;
-function resolveFont() {
-  if (_fontFile !== undefined) return _fontFile;
-  const fs = require('fs');
-  for (const p of FONT_CANDIDATES) { try { if (fs.existsSync(p)) { _fontFile = p; return p; } } catch {} }
-  _fontFile = null;
-  return null;
+// ─── Raid system ─────────────────────────────────────────────────────────────
+const RAID_COST_PCT   = { Common: 0.10, Rare: 0.10, Epic: 0.10, Legendary: 0.10, Mythic: 0.10 };
+const RAID_DEFEND_MS  = 10 * 60 * 60 * 1000;      // owner has 10h to defend
+const RAID_DEFEND_REWARD = 50;                    // defender gets a flat 50, capped at the fee paid
+const RAID_USER_CD_MS = 24 * 60 * 60 * 1000;      // one raid initiated per user per day
+const RAID_CARD_CD_MS = 2 * 24 * 60 * 60 * 1000;  // a card can't be re-raided for 2 days
+const RAID_MAX_ACTIVE = 3;                        // max simultaneous raids one raider can run
+const RAID_SWEEP_MS   = 15 * 60 * 1000;           // how often pending raids are checked
+const RAID_EMOJI      = '❌';
+
+function defaults() {
+  return {
+    enabled:        true,
+    channels:       [],     // allowed channel IDs; [] = anywhere
+    rollChannels:   [],     // channels where /gacha-roll may be used; [] = no extra restriction
+    tradingEnabled: true,
+    lastRarityCalc: 0,
+    pool:        {},   // userId -> { rarity, score, value, rarityOverride, valueOverride }
+    owners:      {},   // claimedUserId -> ownerId
+    wishlists:   {},   // userId -> [wishedUserId, ...]
+    dinar:       {},   // userId -> balance
+    earnCaps:    {},   // userId -> { date, war, battle } daily Dinar earned per capped source
+    flipStats:   {},   // userId -> { wins, losses, won, lost } coin-flip record
+    cooldowns:   {},   // userId -> { roll, claim, daily }
+    stats:       {},   // userId -> { rolls, claims }
+    trades:      {},   // tradeId -> { from, to, give, receive, ts }
+    raidsEnabled:   true,
+    raids:       {},   // raidId -> { raider, owner, cardId, fee, comp, rarity, messageId, channelId, createdAt, expiresAt }
+    raidUserCd:  {},   // raiderId -> last raid-initiation ts
+    raidCardCd:  {},   // cardId -> last raid-attempt ts
+  };
 }
 
-// ─── tiny utils ───────────────────────────────────────────────────────────────
-const rnd   = (a, b) => a + Math.random() * (b - a);
-const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
-const eph   = (extra) => ({ flags: 64, ...extra });
-const fmt   = (n) => Math.round(n).toLocaleString('en-US');
-const esc   = (s) => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+// ─── State helpers ───────────────────────────────────────────────────────────
+function getState(db, guildId) {
+  if (!db[guildId]) db[guildId] = {};
+  if (!db[guildId].__gacha) db[guildId].__gacha = defaults();
+  const s = db[guildId].__gacha;
+  const d = defaults();
+  for (const k of Object.keys(d)) if (s[k] === undefined) s[k] = d[k];
+  return s;
+}
+const dinarOf = (s, uid) => s.dinar[uid] || 0;
+function addDinar(s, uid, n) { s.dinar[uid] = Math.max(0, (s.dinar[uid] || 0) + n); }
+const collectionOf = (s, ownerId) => Object.keys(s.owners).filter(cid => s.owners[cid] === ownerId);
+const eph = (content) => ({ content, flags: 64 });
+const fmt = (n) => n.toLocaleString('en-US');
+const fmtDur = (ms) => { const h = Math.floor(ms / 3600000), m = Math.ceil((ms % 3600000) / 60000); return h > 0 ? `${h}h ${m}m` : `${m}m`; };
 
-// ─── projection for the map ─────────────────────────────────────────────────
-const LON_MIN = 9, LON_MAX = 25, LAT_MIN = 18.8, LAT_MAX = 33.7;
-const MAP_W = 1080, MAP_H = 1000, MAP_PAD = 24;
-const projX = (lon) => MAP_PAD + (lon - LON_MIN) / (LON_MAX - LON_MIN) * MAP_W;
-const projY = (lat) => MAP_PAD + (LAT_MAX - lat) / (LAT_MAX - LAT_MIN) * MAP_H;
-const BORDER = [
-  [11.0,33.1],[12.7,32.9],[13.2,32.9],[14.6,32.5],[15.2,32.4],
-  [16.6,31.2],[18.5,30.3],[19.8,30.4],[20.1,32.1],[21.0,32.9],
-  [22.6,32.9],[24.0,32.1],[25.0,31.6],[25.0,22.0],[25.0,20.0],
-  [24.0,19.5],[15.0,23.0],[14.0,23.0],[11.5,23.5],[10.0,24.5],
-  [9.5,26.0],[9.3,30.0],[10.3,31.8],
-];
-// label nudges so the dense north-west cluster doesn't overlap
-const LABEL_DX = { zuwara: -16, sabratha: -10, zawiya: -6, tripoli: 12, khoms: -8, zliten: 12, misrata: 16, gharyan: -10, tarhuna: 10, marj: 10, bayda: -4, benghazi: -10, derna: 10 };
-const LABEL_DY = { zawiya: -2 };
-const LABEL_BELOW = { zuwara: false, zawiya: false, khoms: false, marj: false, bayda: false };
+// Exported so other systems (clan wars, Ya Rayt, POTD, Pokémon) can pay out Dinar.
+// Per-user daily Dinar caps for farmable PvP sources (anti-abuse). Sources not
+// listed here are uncapped. Tunable — lower these if farming continues.
+const DINAR_DAILY_CAPS = { war: 300, battle: 300 };
 
-function svgToPng(svg) {
-  const { Resvg } = require('@resvg/resvg-js');
-  const file = resolveFont();
-  const font = { loadSystemFonts: true, defaultFontFamily: 'DejaVu Sans' };
-  if (file) font.fontFiles = [file];
-  else if (!_fontWarned) { _fontWarned = true; console.warn('⚠️ Diyar: DejaVuSans.ttf not found (looked in repo root, ./fonts, and cwd) — image text may not render. Commit DejaVuSans.ttf to the repo root.'); }
-  return new Resvg(svg, { font }).render().asPng();
+// Returns the amount actually credited (0 if that source's daily cap is already hit).
+function awardDinar(db, guildId, userId, amount, saveData, source) {
+  if (!guildId || !userId || !amount) return 0;
+  const s = getState(db, guildId);
+
+  let award = amount;
+  if (source && DINAR_DAILY_CAPS[source] != null) {
+    if (!s.earnCaps) s.earnCaps = {};
+    const today = new Date().toISOString().slice(0, 10);
+    let cap = s.earnCaps[userId];
+    if (!cap || cap.date !== today) cap = s.earnCaps[userId] = { date: today };
+    const used = cap[source] || 0;
+    award = Math.max(0, Math.min(amount, DINAR_DAILY_CAPS[source] - used));
+    cap[source] = used + award;
+  }
+
+  if (award > 0) addDinar(s, userId, award);
+  if (typeof saveData === 'function') saveData(guildId);
+  return award;
 }
 
-// ════════════════════════════════════════════════════════════════════════════
-//  IMAGE RENDERERS
-// ════════════════════════════════════════════════════════════════════════════
-function renderMap(state, viewerId) {
-  const W = MAP_W + MAP_PAD * 2;
-  const poly = BORDER.map(([lo, la]) => `${projX(lo).toFixed(0)},${(projY(la) + 40).toFixed(0)}`).join(' ');
+// True if the user has reached today's daily Dinar cap for a capped source ('war'/'battle').
+// Lets callers post a clear "you've hit your daily limit" notice so players aren't confused.
+function isAtDinarCap(db, guildId, source, userId) {
+  const cap = DINAR_DAILY_CAPS[source];
+  if (cap == null) return false;
+  const e = db?.[guildId]?.__gacha?.earnCaps?.[userId];
+  if (!e || e.date !== new Date().toISOString().slice(0, 10)) return false;
+  return (e[source] || 0) >= cap;
+}
+const dinarDailyCap = (source) => DINAR_DAILY_CAPS[source];
 
-  let mine = 0, rival = 0, neutral = 0, nodes = '';
-  for (const c of CITY_DEFS) {
-    const city = state.cities[c.id];
-    const owner = city.ownerId ? state.players[city.ownerId] : null;
-    const isMine = !!viewerId && city.ownerId === viewerId;
-    let col;
-    if (!owner) { col = NEUTRAL; neutral++; }
-    else if (isMine) { col = COL_YOU; mine++; }
-    else if (viewerId) { col = COL_RIVAL; rival++; }
-    else { col = owner.color; }
-    const r = (owner ? 8 : 6) + city.level * 1.6;
-    const x = projX(c.lon), y = projY(c.lat) + 40;
-    // your own cities get a gold ring so your bases are unmistakable
-    nodes += `<circle cx="${x.toFixed(0)}" cy="${y.toFixed(0)}" r="${r.toFixed(1)}" fill="${col}" stroke="${isMine ? '#f1c40f' : '#ffffff'}" stroke-width="${isMine ? 3 : 1.5}"/>`;
-    const below = LABEL_BELOW[c.id] !== undefined ? LABEL_BELOW[c.id] : true;
-    const lyy = (below ? y + r + 14 : y - r - 7) + (LABEL_DY[c.id] || 0);
-    const lxx = x + (LABEL_DX[c.id] || 0);
-    nodes += `<text x="${lxx.toFixed(0)}" y="${lyy.toFixed(0)}" font-size="14" fill="#f5e9c8" text-anchor="middle">${esc(c.name)}</text>`;
-  }
+// External Dinar helpers for other games (e.g. Battle Cards wagers). Uncapped — these
+// move money for escrow/payouts/refunds, which are not farmable earnings.
+function getDinar(db, guildId, userId) {
+  return (db && db[guildId] && db[guildId].__gacha && db[guildId].__gacha.dinar && db[guildId].__gacha.dinar[userId]) || 0;
+}
+function spendDinar(db, guildId, userId, amount, saveData) {
+  if (!(amount > 0)) return true;
+  const s = getState(db, guildId);
+  if ((s.dinar[userId] || 0) < amount) return false;
+  addDinar(s, userId, -amount);
+  if (typeof saveData === 'function') saveData(guildId);
+  return true;
+}
 
-  // legend — wraps onto stacked rows so many owners never run off the edge
-  const items = [];
-  if (viewerId) {
-    items.push([COL_YOU, `Your cities (${mine})`], [COL_RIVAL, `Rivals (${rival})`], [NEUTRAL, `Neutral (${neutral})`]);
-  } else {
-    items.push([NEUTRAL, 'Neutral']);
-    const owners = Object.entries(state.players).map(([id, p]) => ({ p, n: p.cities.length }))
-      .filter(o => o.n > 0).sort((a, b) => b.n - a.n);
-    for (const o of owners.slice(0, 20)) items.push([o.p.color, `${o.p.name} (${o.n})`]);
-  }
-  const wOf = (label) => 34 + String(label).length * 7.8;
-  const maxRowW = MAP_W - 8;
-  const rows = [[]]; let rowW = 0;
-  for (const it of items) {
-    const w = wOf(it[1]);
-    if (rowW + w > maxRowW && rows[rows.length - 1].length) { rows.push([]); rowW = 0; }
-    rows[rows.length - 1].push(it); rowW += w;
-  }
-  const rowH = 24;
-  const legendTopY = MAP_PAD + 40 + MAP_H + 30;
-  const H = legendTopY + (rows.length - 1) * rowH + 16;
-  let legend = `<text x="${MAP_PAD}" y="30" font-size="20" fill="#f1c40f">${viewerId ? 'Diyar — Your Realm' : 'Diyar — Map of Libya'}</text>`;
-  rows.forEach((row, ri) => {
-    let lx = MAP_PAD; const ly = legendTopY + ri * rowH;
-    for (const [color, label] of row) {
-      legend += `<rect x="${lx}" y="${ly - 11}" width="13" height="13" rx="2" fill="${color}"/><text x="${lx + 18}" y="${ly}" font-size="13" fill="#cbd3da">${esc(label)}</text>`;
-      lx += wOf(label);
-    }
+// ─── Rarity from existing stats ──────────────────────────────────────────────
+function activityScore(db, guildId, uid) {
+  const g = db[guildId] || {};
+  const lpTotal     = g.__lp?.[uid]?.total || 0;            // already aggregates war/pokemon/yarayt LP
+  const poke        = g.__pokemon?.[uid] || {};
+  const pokeCaught  = poke.pokemon?.length || 0;
+  const battleWins  = poke.battleWins || 0;
+  const yr          = g.__yarayt?.users?.[uid] || {};
+  const yrReactions = (yr.relatable || 0) + (yr.funny || 0) + (yr.wholesome || 0) + (yr.bold || 0);
+  const potdWins    = g.__potd?.hallOfFame?.[uid]?.wins || 0;
+  return lpTotal + pokeCaught * 3 + battleWins * 5 + yrReactions * 2 + potdWins * 25;
+}
+
+function recomputeRarities(db, guildId) {
+  const s = getState(db, guildId);
+  const ids = Object.keys(s.pool);
+  const scored = ids.map(id => ({ id, score: activityScore(db, guildId, id) }))
+                    .sort((a, b) => a.score - b.score);   // ascending
+  const n = scored.length;
+  scored.forEach((e, i) => {
+    const entry = s.pool[e.id];
+    entry.score = e.score;
+    const pct = n <= 1 ? 1 : i / (n - 1);                 // 0 (lowest) .. 1 (highest)
+    let tier;
+    if (entry.rarityOverride && TIERS.includes(entry.rarityOverride)) tier = entry.rarityOverride;
+    else if (pct >= 0.99) tier = 'Mythic';
+    else if (pct >= 0.95) tier = 'Legendary';
+    else if (pct >= 0.80) tier = 'Epic';
+    else if (pct >= 0.50) tier = 'Rare';
+    else                  tier = 'Common';
+    entry.rarity = tier;
+    entry.value  = entry.valueOverride != null ? entry.valueOverride : TIER_VALUE[tier];
   });
-
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" font-family="DejaVu Sans, sans-serif">
-    <rect width="${W}" height="${H}" fill="#10243a"/>
-    <polygon points="${poly}" fill="#cbb074" stroke="#8a6d3b" stroke-width="3"/>
-    ${nodes}
-    ${legend}
-  </svg>`;
-  return new AttachmentBuilder(svgToPng(svg), { name: 'diyar-map.png' });
+  s.lastRarityCalc = Date.now();
 }
 
-function renderBoss(boss) {
-  const W = 600, H = 300;
-  const pct = clamp(boss.hp / boss.hpMax, 0, 1);
-  const barW = W - 80;
-  const minsLeft = Math.max(0, Math.round((boss.endsAt - Date.now()) / 60000));
-  // a simple desert-raider figure (stylised, no external art), sized to sit below the title
-  const figure = `
-    <g transform="translate(${W/2},158)">
-      <ellipse cx="0" cy="74" rx="58" ry="13" fill="#00000033"/>
-      <rect x="-2.5" y="-80" width="5" height="62" fill="#9a7b4f"/>
-      <path d="M-2.5,-80 l-18,24 l20,-5 Z" fill="#d7d7d7"/>
-      <path d="M-40,66 L-26,-16 Q0,-42 26,-16 L40,66 Z" fill="#3b2f23"/>
-      <circle cx="0" cy="-34" r="22" fill="#caa472"/>
-      <path d="M-24,-44 Q0,-70 24,-44 L20,-32 Q0,-44 -20,-32 Z" fill="#7d2b1d"/>
-      <circle cx="-8" cy="-36" r="3" fill="#1a1a1a"/><circle cx="8" cy="-36" r="3" fill="#1a1a1a"/>
-    </g>`;
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" font-family="DejaVu Sans, sans-serif">
-    <rect width="${W}" height="${H}" fill="#2a1410"/>
-    <rect width="${W}" height="${H}" fill="url(#g)" opacity="0.0"/>
-    <text x="${W/2}" y="34" font-size="22" fill="#f1c40f" text-anchor="middle">${esc(boss.name)}</text>
-    <text x="${W/2}" y="56" font-size="13" fill="#e8c9a0" text-anchor="middle">${esc(boss.tag)} — strike before it pillages!</text>
-    ${figure}
-    <rect x="40" y="${H-52}" width="${barW}" height="22" rx="11" fill="#3a3a3a"/>
-    <rect x="40" y="${H-52}" width="${(barW*pct).toFixed(0)}" height="22" rx="11" fill="${pct>0.5?'#2ecc71':pct>0.25?'#f39c12':'#e74c3c'}"/>
-    <text x="${W/2}" y="${H-36}" font-size="13" fill="#ffffff" text-anchor="middle">${fmt(Math.max(0,boss.hp))} / ${fmt(boss.hpMax)} HP   •   ${minsLeft} min left</text>
-  </svg>`;
-  return new AttachmentBuilder(svgToPng(svg), { name: 'diyar-boss.png' });
+function ensureFreshRarities(db, guildId, force = false) {
+  const s = getState(db, guildId);
+  if (force || !s.lastRarityCalc || Date.now() - s.lastRarityCalc > RARITY_RECALC_MS) recomputeRarities(db, guildId);
 }
 
-function renderBattle(r) {
-  const W = 600, H = 220;
-  const win = r.win;
-  const banner = win ? 'VICTORY' : 'DEFEAT';
-  const bcol = win ? '#2ecc71' : '#e74c3c';
-  const line = (x, title, lines, col) => {
-    let t = `<text x="${x}" y="96" font-size="17" fill="${col}" text-anchor="middle">${esc(title)}</text>`;
-    lines.forEach((l, i) => { t += `<text x="${x}" y="${122 + i*22}" font-size="14" fill="#dfe6ec" text-anchor="middle">${esc(l)}</text>`; });
-    return t;
-  };
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" font-family="DejaVu Sans, sans-serif">
-    <rect width="${W}" height="${H}" fill="#161b22"/>
-    <rect x="0" y="0" width="${W}" height="46" fill="${bcol}"/>
-    <text x="${W/2}" y="32" font-size="24" fill="#0b0e12" text-anchor="middle">${banner}</text>
-    <text x="${W/2}" y="70" font-size="14" fill="#9aa6b2" text-anchor="middle">Raid on ${esc(r.cityName)}</text>
-    ${line(W*0.27, r.attackerName, ['Sent ' + fmt(r.send), 'Lost ' + fmt(r.cas), 'Returned ' + fmt(r.survivors)], '#f1c40f')}
-    <text x="${W/2}" y="120" font-size="22" fill="#5b6770" text-anchor="middle">VS</text>
-    ${line(W*0.73, r.cityName + (r.defenderName ? ' ('+r.defenderName+')' : ' (Militia)'), ['Defence ' + fmt(r.defShown), r.captured ? 'CAPTURED!' : (r.win ? 'Raided' : 'Held'), r.stolen ? 'Looted ' + fmt(r.stolen) + ' Dinar' : 'No loot'], '#e8c9a0')}
-  </svg>`;
-  return new AttachmentBuilder(svgToPng(svg), { name: 'diyar-battle.png' });
+// Weighted roll — rarer members appear less often
+function weightedRoll(s) {
+  const ids = Object.keys(s.pool);
+  if (!ids.length) return null;
+  const weights = ids.map(id => TIER_WEIGHT[s.pool[id].rarity] || 50);
+  const total = weights.reduce((a, b) => a + b, 0);
+  let r = Math.random() * total;
+  for (let i = 0; i < ids.length; i++) { r -= weights[i]; if (r <= 0) return ids[i]; }
+  return ids[ids.length - 1];
 }
 
-// ════════════════════════════════════════════════════════════════════════════
-//  STATE
-// ════════════════════════════════════════════════════════════════════════════
-function getState(db, guildId, saveData) {
-  const data = db[guildId] || (db[guildId] = {});
-  let dirty = false;
-  if (!data.__diyar) {
-    data.__diyar = { players: {}, cities: {}, boss: null, bossSched: null, channelId: null };
-    dirty = true;
-  }
-  // seed (first run) or backfill (new cities added later) any CITY_DEFS not yet in state
-  for (const c of CITY_DEFS) {
-    if (!data.__diyar.cities[c.id]) {
-      data.__diyar.cities[c.id] = {
-        id: c.id, name: c.name, lon: c.lon, lat: c.lat, level: c.level,
-        ownerId: null, npc: true, garrison: 20 + c.level * 18, lastIncomeAt: Date.now(),
-      };
-      dirty = true;
-    }
-  }
-  // prune retired cities (removed from CITY_DEFS) that no one owns — keeps map and raids in sync
-  const valid = new Set(CITY_DEFS.map(c => c.id));
-  for (const id of Object.keys(data.__diyar.cities)) {
-    if (!valid.has(id) && !data.__diyar.cities[id].ownerId) { delete data.__diyar.cities[id]; dirty = true; }
-  }
-  if (dirty && saveData) saveData(guildId);
-  return data.__diyar;
+// Remove a member as a CHARACTER everywhere (opt-out / force-remove)
+function dissolveMember(s, uid) {
+  delete s.pool[uid];
+  for (const cid of Object.keys(s.owners)) if (cid === uid) delete s.owners[cid];
+  for (const wid of Object.keys(s.wishlists)) s.wishlists[wid] = (s.wishlists[wid] || []).filter(x => x !== uid);
 }
 
-function ensurePlayer(state, userId, name, saveData, guildId) {
-  let p = state.players[userId];
-  if (p) { p.name = name || p.name; return { player: p, isNew: false }; }
-  // assign a humble unowned city (prefer low level)
-  const free = CITY_DEFS
-    .map(c => state.cities[c.id])
-    .filter(c => c.npc && !c.ownerId)
-    .sort((a, b) => a.level - b.level);
-  const start = free[0] || CITY_DEFS.map(c => state.cities[c.id]).filter(c => !c.ownerId)[0];
-  // if every city is held, the newcomer still joins — landless — and must raid to seize one.
+const channelAllowed = (s, channelId) => !s.channels.length || s.channels.includes(channelId);
+const rollChannelAllowed = (s, channelId) => !s.rollChannels?.length || s.rollChannels.includes(channelId);
 
-  const color = PALETTE[Object.keys(state.players).length % PALETTE.length];
-  p = {
-    name, color, cities: start ? [start.id] : [], army: STARTER_ARMY, weaponTier: 0,
-    upg: { mil: 0, for: 0, eco: 0 }, shieldUntil: Date.now() + SHIELD_MS, lastAttackAt: 0,
-    lastStrikeAt: 0, joinedAt: Date.now(), lastTributeDay: '',
-    stats: { raidsWon: 0, raidsLost: 0, defended: 0, captured: 0, lost: 0, bossKills: 0, bossDmg: 0 },
-  };
-  if (start) { start.ownerId = userId; start.npc = false; start.garrison = 25; start.lastIncomeAt = Date.now(); }
-  state.players[userId] = p;
-  if (saveData) saveData(guildId);
-  return { player: p, isNew: true, startCity: start || null, landless: !start };
+function cardEmbed(member, entry, ownerId) {
+  const name = member?.displayName || 'User';
+  const roles = member?.roles?.cache
+    ? [...member.roles.cache.values()].filter(r => r.name !== '@everyone').sort((a, b) => b.position - a.position).slice(0, 4).map(r => r.name)
+    : [];
+  const embed = new EmbedBuilder()
+    .setColor(TIER_COLOR[entry.rarity])
+    .setTitle(`${TIER_EMOJI[entry.rarity]} ${name}`)
+    .setDescription(`**${entry.rarity}** — 💰 **${fmt(entry.value)} Dinar**`)
+    .addFields({ name: 'Roles', value: roles.length ? roles.join(', ') : '—' });
+  if (member?.displayAvatarURL) embed.setImage(member.displayAvatarURL({ extension: 'png', size: 512 }));
+  embed.setFooter({ text: ownerId ? '💵 Already owned — grab the Dinar Drop!' : '🎴 First to Claim wins them!' });
+  return embed;
 }
 
-// reseed a knocked-out player (no cities) with a fresh starter next time they open the game
-function reseedIfLanded(state, userId) {
-  const p = state.players[userId];
-  if (!p || p.cities.length > 0) return null;
-  const free = CITY_DEFS.map(c => state.cities[c.id]).filter(c => !c.ownerId).sort((a,b)=>a.level-b.level);
-  const start = free[0];
-  if (!start) return null;
-  start.ownerId = userId; start.npc = false; start.garrison = 25; start.lastIncomeAt = Date.now();
-  p.cities.push(start.id); p.shieldUntil = Date.now() + SHIELD_MS;
-  return start;
-}
-
-const ownedCities = (state, userId) => state.players[userId]?.cities.map(id => state.cities[id]).filter(Boolean) || [];
-
-function playerStrength(state, p) {
-  if (!p) return 0;
-  const garr = ownedCities(state, findId(state, p)).reduce((s, c) => s + c.garrison, 0);
-  const upg = p.upg.mil + p.upg.for + p.upg.eco;
-  return p.army + garr + p.cities.length * 25 + upg * 12 + p.weaponTier * 15;
-}
-const findId = (state, p) => Object.keys(state.players).find(id => state.players[id] === p);
-
-function pendingIncome(state, city) {
-  if (!city.ownerId) return 0;
-  const owner = state.players[city.ownerId];
-  const rate = INCOME_PER_LEVEL_HR * city.level * (1 + (owner ? owner.upg.eco * 0.12 : 0)); // per hour
-  const hrs = clamp((Date.now() - city.lastIncomeAt) / 3600000, 0, INCOME_CAP_HRS);
-  return Math.floor(rate * hrs);
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-//  ACTIONS  (pure-ish; mutate state, return a result)
-// ════════════════════════════════════════════════════════════════════════════
-function recruit(state, db, guildId, saveData, userId, n) {
-  const p = state.players[userId];
-  const cost = Math.round(n * TROOP_COST);
-  if (getDinar(db, guildId, userId) < cost) return { ok: false, cost };
-  spendDinar(db, guildId, userId, cost, saveData);
-  p.army += n;
-  saveData(guildId);
-  return { ok: true, cost, army: p.army };
-}
-
-function upgrade(state, db, guildId, saveData, userId, track) {
-  const p = state.players[userId];
-  const lvl = p.upg[track];
-  if (lvl >= UPG_MAX) return { ok: false, maxed: true };
-  const cost = upgCost(track, lvl);
-  if (getDinar(db, guildId, userId) < cost) return { ok: false, cost };
-  spendDinar(db, guildId, userId, cost, saveData);
-  p.upg[track]++;
-  saveData(guildId);
-  return { ok: true, cost, level: p.upg[track] };
-}
-
-function reinforce(state, saveData, guildId, userId, cityId, amt) {
-  const p = state.players[userId];
-  const city = state.cities[cityId];
-  if (!city || city.ownerId !== userId) return { ok: false };
-  amt = Math.min(amt, p.army);
-  if (amt < 1) return { ok: false, noTroops: true };
-  p.army -= amt; city.garrison += amt;
-  saveData(guildId);
-  return { ok: true, moved: amt, garrison: city.garrison };
-}
-
-function collectIncome(state, db, guildId, saveData, userId) {
-  let total = 0;
-  for (const city of ownedCities(state, userId)) {
-    total += pendingIncome(state, city);
-    city.lastIncomeAt = Date.now();
-  }
-  if (total > 0) awardDinar(db, guildId, userId, total, saveData);   // modest, capped mint
-  saveData(guildId);
-  return total;
-}
-
-// daily login reward — small capped mint; favours async / weaker players keeping pace
-function claimTribute(state, db, guildId, saveData, userId) {
-  const p = state.players[userId]; if (!p) return 0;
-  const today = libyaDay(Date.now()).dateStr;
-  if (p.lastTributeDay === today) return 0;
-  const amount = Math.min(TRIBUTE_BASE + ownedCities(state, userId).length * TRIBUTE_PER_CITY, TRIBUTE_MAX);
-  p.lastTributeDay = today;
-  awardDinar(db, guildId, userId, amount, saveData);
-  saveData(guildId);
-  return amount;
-}
-
-// buy a weapon tier with Dinar (a Dinar sink); shop caps below the boss-only top tiers
-function buyWeapon(state, db, guildId, saveData, userId) {
-  const p = state.players[userId]; if (!p) return { error: 'Not found.' };
-  if (p.weaponTier >= ARMOURY_MAX_TIER) return { error: `The armoury forges up to tier ${ARMOURY_MAX_TIER}. Higher tiers are won by defeating bosses.` };
-  const cost = armouryCost(p.weaponTier);
-  if (!spendDinar(db, guildId, userId, cost, saveData)) return { error: `Not enough Dinar (need ${fmt(cost)}).` };
-  p.weaponTier++;
-  saveData(guildId);
-  return { ok: true, cost, tier: p.weaponTier };
-}
-
-// returns {error} or a full battle result for rendering
-// the real defensive strength of a city (garrison + walls + city-size bonus) — shown everywhere so
-// the dropdown, the confirm and the result all agree instead of the old raw-garrison number
-function effectiveDefence(state, city, reinforceMult) {
-  const owner = city.ownerId ? state.players[city.ownerId] : null;
-  const dMultBase = 1 + (owner ? owner.upg.for * 0.15 : 0) + city.level * 0.1;
-  const lastStand = (owner && owner.cities.length === 1) ? 1.5 : 1.0;
-  return Math.round((city.garrison * dMultBase * lastStand + city.level * 8) * (reinforceMult || 1));
-}
-// the real attack strength of a force (troops + weapon tier + military upgrades)
-function effectiveAttack(attacker, send) {
-  return Math.round(send * (1 + attacker.weaponTier * 0.15 + attacker.upg.mil * 0.12));
-}
-
-// validate a raid and lock the committed troops; returns {error} or {pending}
-function startRaid(state, db, guildId, saveData, attackerId, cityId, sendPct) {
-  const attacker = state.players[attackerId];
-  const city = state.cities[cityId];
-  if (!attacker || !city) return { error: 'Not found.' };
-  if (city.ownerId === attackerId) return { error: 'You already rule that city.' };
-  const now = Date.now();
-  if (now - attacker.lastAttackAt < ATTACK_COOLDOWN_MS)
-    return { error: `Your army is regrouping. Ready in ${msLeft(attacker.lastAttackAt + ATTACK_COOLDOWN_MS)}.` };
-  if (state.pendingRaids && Object.values(state.pendingRaids).some(p => p.cityId === cityId))
-    return { error: 'That city is already under attack — wait for the current raid to finish.' };
-
-  const owner = city.ownerId ? state.players[city.ownerId] : null;
-  if (owner) {
-    if (owner.shieldUntil > now) return { error: `${owner.name} is under truce for ${msLeft(owner.shieldUntil)}.` };
-    if (playerStrength(state, owner) * MATCH_BAND < playerStrength(state, attacker))
-      return { error: `${owner.name} is far weaker than you — no honour in that raid. Pick someone your size (neutral militias are always fair game).` };
-  }
-
-  const send = Math.floor(attacker.army * sendPct);
-  if (send < 1) return { error: 'You have no troops to send. Recruit an army first.' };
-  attacker.army -= send;         // lock the committed troops for the duration of the raid
-  attacker.lastAttackAt = now;   // cooldown starts at commit
-  if (saveData) saveData(guildId);
-  return { pending: {
-    attackerId, attackerName: attacker.name, cityId, cityName: city.name,
-    defenderId: city.ownerId, defenderName: owner ? owner.name : null, send, startedAt: now,
-  } };
-}
-
-// resolve a locked raid (optionally boosted by a defender reinforcement) and apply loot/capture/casualties
-function resolveRaid(state, db, guildId, saveData, pending, reinforceMult) {
-  const attacker = state.players[pending.attackerId];
-  const city = state.cities[pending.cityId];
-  const send = pending.send;
-  if (!attacker) return null;
-  if (!city) { attacker.army += send; return null; }   // city vanished — refund troops
-  const now = Date.now();
-  const owner = city.ownerId ? state.players[city.ownerId] : null;
-  const rMult = reinforceMult || 1;
-
-  const aMult = 1 + attacker.weaponTier * 0.15 + attacker.upg.mil * 0.12;
-  const aPow = send * aMult * rnd(0.85, 1.15);
-  const dMultBase = 1 + (owner ? owner.upg.for * 0.15 : 0) + city.level * 0.1;
-  const lastStand = (owner && owner.cities.length === 1) ? 1.5 : 1.0;
-  const dPow = (city.garrison * dMultBase * lastStand + city.level * 8) * rMult * rnd(0.85, 1.15);
-  const win = aPow > dPow;
-
-  const result = {
-    attackerId: pending.attackerId, attackerName: pending.attackerName, cityId: city.id, cityName: city.name,
-    defenderId: city.ownerId, defenderName: owner ? owner.name : (pending.defenderName || null),
-    send, win, reinforced: rMult > 1,
-    defShown: effectiveDefence(state, city, rMult), atkShown: effectiveAttack(attacker, send),
-    cas: 0, survivors: 0, stolen: 0, captured: false,
-  };
-
-  if (win) {
-    const cas = Math.round(send * clamp(dPow / aPow, 0, 1) * 0.4);
-    let survivors = send - cas;
-    const stolen = LOOT_BY_LEVEL[city.level] || LOOT_BY_LEVEL[1];   // minted; defender loses nothing
-    awardDinar(db, guildId, pending.attackerId, stolen, saveData);
-    result.stolen = stolen;
-    if (owner) { owner.cities = owner.cities.filter(id => id !== city.id); owner.stats.lost++; }
-    city.ownerId = pending.attackerId; city.npc = false;
-    attacker.cities.push(city.id);
-    const g = Math.round(survivors * 0.35);
-    city.garrison = g; survivors -= g; city.lastIncomeAt = now;
-    attacker.stats.captured++; result.captured = true;
-    attacker.army += survivors;
-    attacker.stats.raidsWon++;
-    result.cas = cas; result.survivors = survivors;
-  } else {
-    const cas = Math.round(send * clamp(aPow / dPow, 0, 1) * 0.6);
-    const survivors = send - cas;
-    city.garrison = Math.max(0, city.garrison - Math.round(city.garrison * clamp(aPow / dPow, 0, 1) * 0.4));
-    attacker.army += survivors;
-    attacker.stats.raidsLost++;
-    if (owner) owner.stats.defended++;
-    result.cas = cas; result.survivors = survivors;
-  }
-  if (owner) owner.shieldUntil = now + SHIELD_MS;
-  if (saveData) saveData(guildId);
-  return result;
-}
-
-// instant raid (neutral militias, and the compatibility path used by tests)
-function resolveAttack(state, db, guildId, saveData, attackerId, cityId, sendPct) {
-  const r = startRaid(state, db, guildId, saveData, attackerId, cityId, sendPct);
-  if (r.error) return r;
-  return resolveRaid(state, db, guildId, saveData, r.pending, 1);
-}
-
-const raidBar = (val, max) => { const n = Math.max(0, Math.min(12, Math.round(val / (max || 1) * 12))); return '🟥'.repeat(n) + '⬛'.repeat(12 - n); };
-
-// the live 30s countdown embed shown in the war room while a PvP raid plays out
-function raidLiveEmbed(state, raid, secsLeft) {
-  const city = state.cities[raid.cityId];
-  const atk = effectiveAttack(state.players[raid.attackerId] || { weaponTier: 0, upg: { mil: 0 } }, raid.send);
-  const def = effectiveDefence(state, city, raid.reinforced ? REINFORCE_MULT : 1);
-  const mx = Math.max(atk, def, 1);
-  const desc =
-    `**${raid.attackerName}** storms **${city.name}**${raid.defenderName ? ` — held by **${raid.defenderName}**` : ''}!\n\n` +
-    `⚔ Attackers\n\`${raidBar(atk, mx)}\` **${fmt(atk)}**\n\n` +
-    `🛡 Defenders\n\`${raidBar(def, mx)}\` **${fmt(def)}**${raid.reinforced ? '  🛡️ *reinforced!*' : ''}\n\n` +
-    (raid.reinforced
-      ? `🛡️ Reinforcements have arrived — the walls hold far stronger! Bracing for the outcome…`
-      : `⏳ **${secsLeft}s** — defender, hit **Send Reinforcements** to rally your garrison!`);
-  return new EmbedBuilder().setColor(raid.reinforced ? COLOR.blue : COLOR.red).setTitle(`⚔ Battle for ${city.name}`).setDescription(desc);
-}
-
-// the final text result (replaces the old still image)
-function raidResultEmbed(r) {
-  const title = r.win ? (r.captured ? `🏴 ${r.cityName} has fallen!` : `⚔ ${r.cityName} — Raided`) : `🛡 ${r.cityName} — Defended`;
-  const outcome = r.win
-    ? `**Victory!** ${r.captured ? `**${r.attackerName}** plants their banner over **${r.cityName}**. ` : ''}Looted **${fmt(r.stolen)} Dinar**.\nLost **${fmt(r.cas)}** troops • **${fmt(r.survivors)}** marched home.`
-    : `**Repelled!** ${r.defenderName || 'The militia'} held the walls${r.reinforced ? ' with reinforcements' : ''}.\n**${r.attackerName}** lost **${fmt(r.cas)}** troops • **${fmt(r.survivors)}** limped home.`;
-  const desc =
-    `⚔ **${r.attackerName}** — **${fmt(r.send)}** troops • power **${fmt(r.atkShown)}**\n` +
-    `🛡 **${r.defenderName || 'Militia'}** — defence power **${fmt(r.defShown)}**${r.reinforced ? ' 🛡️' : ''}\n\n${outcome}`;
-  return new EmbedBuilder().setColor(r.win ? COLOR.green : COLOR.red).setTitle(title).setDescription(desc);
-}
-
-function reinforceRow(raidId) {
-  return new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(`dy:reinf:${raidId}`).setLabel('🛡 Send Reinforcements').setStyle(ButtonStyle.Success));
-}
-
-// ─── Boss ─────────────────────────────────────────────────────────────────
-function spawnBoss(state, saveData, guildId) {
-  if (state.boss) return null;
-  const def = BOSS_DEFS[Math.floor(Math.random() * BOSS_DEFS.length)];
-  const hpMax = BOSS_HP;
-  const owned = CITY_DEFS.map(c => state.cities[c.id]).filter(c => c.ownerId);
-  const target = owned.length ? owned[Math.floor(Math.random() * owned.length)] : null;
-  state.boss = {
-    name: def.name, tag: def.tag, hpMax, hp: hpMax, spawnedAt: Date.now(), endsAt: Date.now() + BOSS_DURATION_MS,
-    damage: {}, targetCityId: target ? target.id : null, channelId: state.channelId, messageId: null,
-  };
-  if (saveData) saveData(guildId);
-  return state.boss;
-}
-
-function strikeBoss(state, saveData, guildId, userId) {
-  const b = state.boss;
-  if (!b) return { error: 'No threat is active right now.' };
-  if (b.hp <= 0) return { error: 'The enemy is already falling — the spoils are being tallied.' };
-  const p = state.players[userId];
-  if (!p) return { error: 'Join the game first with /diyar.' };
-  const now = Date.now();
-  if (now - p.lastStrikeAt < BOSS_STRIKE_CD_MS) return { error: `You're rallying troops. Strike again in ${msLeft(p.lastStrikeAt + BOSS_STRIKE_CD_MS)}.` };
-  const dmg = Math.round((p.army * (1 + p.upg.mil * 0.1 + p.weaponTier * 0.15) + 50) * rnd(0.8, 1.2));
-  b.hp -= dmg;
-  b.damage[userId] = (b.damage[userId] || 0) + dmg;
-  p.lastStrikeAt = now;
-  p.stats.bossDmg += dmg;
-  const killed = b.hp <= 0;
-  if (saveData) saveData(guildId);
-  return { dmg, killed, hpLeft: Math.max(0, b.hp), total: b.damage[userId] };
-}
-
-function resolveBossDefeat(state, db, guildId, saveData) {
-  const b = state.boss; if (!b) return null;
-  const ranked = Object.entries(b.damage).sort((a, b2) => b2[1] - a[1]);
-  const rewards = [];
-  ranked.forEach(([uid, dmg], i) => {
-    const p = state.players[uid]; if (!p) return;
-    let dinar = 0, lp = 0, weapon = false;
-    if (i === 0)      { dinar = 250; lp = 30; weapon = p.weaponTier < 5; p.stats.bossKills++; }
-    else if (i === 1) { dinar = 150; lp = 18; }
-    else if (i === 2) { dinar = 90; lp = 12; }
-    else              { dinar = 40; lp = 5; }
-    if (weapon) p.weaponTier++;
-    awardDinar(db, guildId, uid, dinar, saveData);
-    rewards.push({ uid, name: p.name, dmg, dinar, lp, weapon });
-  });
-  state.boss = null;
-  if (saveData) saveData(guildId);
-  return { rewards };
-}
-
-function resolveBossExpire(state, db, guildId, saveData) {
-  const b = state.boss; if (!b) return null;
-  const city = b.targetCityId ? state.cities[b.targetCityId] : null;
-  let razed = null;
-  if (city && city.ownerId) {
-    const owner = state.players[city.ownerId];
-    const looted = Math.min(Math.round(getDinar(db, guildId, city.ownerId) * 0.1), getDinar(db, guildId, city.ownerId));
-    if (looted > 0) spendDinar(db, guildId, city.ownerId, looted, saveData);
-    const before = city.garrison;
-    city.garrison = Math.round(city.garrison * 0.3);
-    razed = { city: city.name, owner: owner ? owner.name : null, looted, garrisonLost: before - city.garrison };
-  }
-  state.boss = null;
-  if (saveData) saveData(guildId);
-  return { razed, name: b.name };
-}
-
-// ─── Boss scheduler (persistent, survives redeploys — same model as spawns) ──
-function libyaDay(nowMs) {
-  const lib = new Date(nowMs + LIBYA_OFFSET_MS);
-  const startOfDayUTC = Date.UTC(lib.getUTCFullYear(), lib.getUTCMonth(), lib.getUTCDate()) - LIBYA_OFFSET_MS;
-  const dateStr = `${lib.getUTCFullYear()}-${String(lib.getUTCMonth() + 1).padStart(2,'0')}-${String(lib.getUTCDate()).padStart(2,'0')}`;
-  return { dateStr, startOfDayUTC };
-}
-function pickTimes(startMs, endMs, count, minGapMs) {
-  const win = endMs - startMs; if (win <= 0 || count <= 0) return [];
-  let gap = minGapMs; if (win - (count - 1) * gap < 0) gap = Math.floor(win / count);
-  const free = Math.max(0, win - (count - 1) * gap);
-  const offs = Array.from({ length: count }, () => Math.random() * free).sort((a, b) => a - b);
-  return offs.map((o, i) => Math.round(startMs + o + i * gap));
-}
-function ensureBossSched(state, saveData, guildId, nowMs) {
-  const { dateStr, startOfDayUTC } = libyaDay(nowMs);
-  if (!state.bossSched || state.bossSched.date !== dateStr) {
-    const ws = startOfDayUTC + BOSS_WIN_START * 3600000;
-    const we = startOfDayUTC + BOSS_WIN_END * 3600000;
-    const eff = Math.max(ws, nowMs);
-    const spawns = (we - eff > 5 * 60000) ? pickTimes(eff, we, BOSS_SPAWNS_PER_DAY, 150 * 60000).map(at => ({ at, fired: false })) : [];
-    state.bossSched = { date: dateStr, spawns };
-    if (saveData) saveData(guildId);
-  }
-  return state.bossSched;
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-//  UI
-// ════════════════════════════════════════════════════════════════════════════
-function msLeft(ts) {
-  const ms = Math.max(0, ts - Date.now());
-  const totalMin = Math.round(ms / 60000);
-  const h = Math.floor(totalMin / 60), m = totalMin % 60;
-  return h > 0 ? `${h}h ${m}m` : `${m}m`;
-}
-
-function navButtons() {
-  return new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('dy:map').setLabel('🗺 Map').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId('dy:city').setLabel('🏰 My Cities').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('dy:attack').setLabel('⚔ Attack').setStyle(ButtonStyle.Danger),
-    new ButtonBuilder().setCustomId('dy:army').setLabel('🪖 Army').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('dy:collect').setLabel('💰 Collect').setStyle(ButtonStyle.Success),
-  );
-}
-const backRow = () => new ActionRowBuilder().addComponents(
-  new ButtonBuilder().setCustomId('dy:home').setLabel('🏠 Back').setStyle(ButtonStyle.Secondary));
-
-function dashboard(state, db, guildId, userId) {
-  const p = state.players[userId];
-  const cities = ownedCities(state, userId);
-  const income = cities.reduce((s, c) => s + pendingIncome(state, c), 0);
-  const garr = cities.reduce((s, c) => s + c.garrison, 0);
-  const dinar = getDinar(db, guildId, userId);
-  const shield = p.shieldUntil > Date.now() ? `  •  🛡 Truce: ${msLeft(p.shieldUntil)}` : '';
-  const boss = state.boss ? `\n\n👹 **${state.boss.name}** is loose — open **Attack → Boss** or use the strike button in the war room!` : '';
-  const embed = new EmbedBuilder().setColor(COLOR.gold)
-    .setTitle(`⚔ Diyar — ${p.name}`)
-    .setDescription(
-      `**${cities.length}** cit${cities.length === 1 ? 'y' : 'ies'} • **${fmt(dinar)}** Dinar\n` +
-      `🪖 Army: **${fmt(p.army)}**  •  🏰 Garrisons: **${fmt(garr)}**\n` +
-      `🗡 Weapon tier **${p.weaponTier}**  •  Military **${p.upg.mil}** / Walls **${p.upg.for}** / Economy **${p.upg.eco}**\n` +
-      `💰 Uncollected income: **${fmt(income)}**${shield}` + boss)
-    .setFooter({ text: 'Raids steal Dinar from rivals • capture cities to grow' });
-  const row2 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('dy:upgrade').setLabel('⬆ Upgrades').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId('dy:armoury').setLabel('🗡 Armoury').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('dy:reinforce').setLabel('🛡 Reinforce').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('dy:leaderboard').setLabel('🏆 Ranks').setStyle(ButtonStyle.Secondary),
-  );
-  const row3 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('dy:profile').setLabel('📜 Profile').setStyle(ButtonStyle.Secondary),
-    ...(state.boss ? [new ButtonBuilder().setCustomId('dy:boss').setLabel('👹 Boss').setStyle(ButtonStyle.Danger)] : []),
-  );
-  return { embeds: [embed], components: [navButtons(), row2, row3] };
-}
-
-function cityView(state, db, guildId, userId) {
-  const cities = ownedCities(state, userId);
-  const lines = cities.map(c => `**${c.name}** — Lv ${c.level} • 🛡 ${fmt(c.garrison)} garrison • 💰 ${fmt(pendingIncome(state, c))} ready`);
-  const embed = new EmbedBuilder().setColor(COLOR.blue)
-    .setTitle('🏰 My Cities')
-    .setDescription(lines.join('\n') || 'You hold no cities right now — reopen the game to be resettled.')
-    .setFooter({ text: 'Reinforce moves army troops into a city to defend it' });
-  return { embeds: [embed], components: [backRow()] };
-}
-
-function armyView(state, db, guildId, userId) {
-  const p = state.players[userId];
-  const dinar = getDinar(db, guildId, userId);
-  const embed = new EmbedBuilder().setColor(COLOR.gold)
-    .setTitle('🪖 Recruit Army')
-    .setDescription(`Army: **${fmt(p.army)}**  •  Dinar: **${fmt(dinar)}**\nEach troop costs **${TROOP_COST} Dinar**.`);
-  const mk = (n) => new ButtonBuilder().setCustomId(`dy:recruit:${n}`).setLabel(`+${n} (${Math.round(n * TROOP_COST)}💰)`).setStyle(ButtonStyle.Success).setDisabled(dinar < Math.round(n * TROOP_COST));
-  return { embeds: [embed], components: [new ActionRowBuilder().addComponents(mk(10), mk(50), mk(100), mk(250)), backRow()] };
-}
-
-function upgradeView(state, db, guildId, userId) {
-  const p = state.players[userId];
-  const dinar = getDinar(db, guildId, userId);
-  const row = (track, label, desc) => {
-    const lvl = p.upg[track];
-    const cost = upgCost(track, lvl);
-    const maxed = lvl >= UPG_MAX;
-    return { field: `${label} — Lv ${lvl}/${UPG_MAX}\n${desc}${maxed ? ' • *maxed*' : ` • next: **${cost}💰**`}`,
-      btn: new ButtonBuilder().setCustomId(`dy:upg:${track}`).setLabel(`${label} ${maxed ? 'MAX' : '→ ' + (lvl + 1)}`).setStyle(ButtonStyle.Primary).setDisabled(maxed || dinar < cost) };
-  };
-  const mil = row('mil', '⚔ Military', 'Stronger attacks');
-  const fr  = row('for', '🛡 Walls', 'Tougher defense');
-  const eco = row('eco', '💰 Economy', 'More income, less loot stolen');
-  const embed = new EmbedBuilder().setColor(COLOR.blue).setTitle('⬆ Upgrades')
-    .setDescription(`Dinar: **${fmt(dinar)}**\n\n${mil.field}\n\n${fr.field}\n\n${eco.field}`);
-  return { embeds: [embed], components: [new ActionRowBuilder().addComponents(mil.btn, fr.btn, eco.btn), backRow()] };
-}
-
-function armouryView(state, db, guildId, userId) {
-  const p = state.players[userId];
-  const dinar = getDinar(db, guildId, userId);
-  const atShopMax = p.weaponTier >= ARMOURY_MAX_TIER;
-  const cost = armouryCost(p.weaponTier);
-  const bonus = (t) => `+${Math.round(t * 15)}% attack power`;
-  const embed = new EmbedBuilder().setColor(COLOR.gold).setTitle('🗡 Armoury')
-    .setDescription(
-      `Dinar: **${fmt(dinar)}**\n\n` +
-      `Current weapon: **tier ${p.weaponTier}** (${bonus(p.weaponTier)})\n\n` +
-      (atShopMax
-        ? `The smiths have done all they can — **tiers ${ARMOURY_MAX_TIER + 1}–5** are forged only from the spoils of slain bosses.`
-        : `Forge **tier ${p.weaponTier + 1}** (${bonus(p.weaponTier + 1)}) for **${fmt(cost)}💰**.`))
-    .setFooter({ text: 'Better weapons raise both raid power and boss damage' });
-  const buy = new ButtonBuilder().setCustomId('dy:buyweapon')
-    .setLabel(atShopMax ? `Maxed (tier ${ARMOURY_MAX_TIER})` : `Forge tier ${p.weaponTier + 1} (${fmt(cost)}💰)`)
-    .setStyle(ButtonStyle.Success).setDisabled(atShopMax || dinar < cost);
-  return { embeds: [embed], components: [new ActionRowBuilder().addComponents(buy), backRow()] };
-}
-
-function targetSelect(state, userId) {
-  const me = state.players[userId];
-  const myStr = playerStrength(state, me);
-  const opts = [];
-  for (const c of CITY_DEFS) {
-    const city = state.cities[c.id];
-    if (city.ownerId === userId) continue;
-    if (state.pendingRaids && Object.values(state.pendingRaids).some(p => p.cityId === c.id)) continue;   // already under attack
-    const owner = city.ownerId ? state.players[city.ownerId] : null;
-    let note;
-    if (!owner) note = `Militia • Lv ${city.level} • 🛡${fmt(effectiveDefence(state, city))} def`;
-    else if (owner.shieldUntil > Date.now()) continue;                       // shielded → hide
-    else if (playerStrength(state, owner) * MATCH_BAND < myStr) continue;     // too weak → hide
-    else note = `${owner.name} • Lv ${city.level} • 🛡${fmt(effectiveDefence(state, city))} def`;
-    opts.push({ label: city.name, description: note, value: c.id });
-  }
-  if (!opts.length) {
-    return { embeds: [new EmbedBuilder().setColor(COLOR.grey).setTitle('⚔ Attack')
-      .setDescription('No reachable targets right now — rivals must be near your strength, and neutral militias are always fair game when any remain.')], components: [backRow()] };
-  }
-  // Discord caps each dropdown at 25 options and we have more cities than that,
-  // so spread targets across multiple dropdowns — otherwise the overflow vanishes from raids.
-  const rows = [];
-  for (let i = 0; i < opts.length && rows.length < 4; i += 25) {
-    const chunk = opts.slice(i, i + 25);
-    rows.push(new ActionRowBuilder().addComponents(
-      new StringSelectMenuBuilder()
-        .setCustomId(i === 0 ? 'dy:atk_target' : `dy:atk_target:${i}`)
-        .setPlaceholder(`Raid a city  (${chunk[0].label} … ${chunk[chunk.length - 1].label})`)
-        .addOptions(chunk)));
-  }
-  rows.push(backRow());
-  return { embeds: [new EmbedBuilder().setColor(COLOR.red).setTitle('⚔ Choose your target')
-    .setDescription('Pick a city to raid. Neutral militias are always fair game; rivals must be near your strength.')],
-    components: rows };
-}
-
-function sendAmount(state, userId, cityId) {
-  const p = state.players[userId];
-  const city = state.cities[cityId];
-  const half = Math.floor(p.army * 0.5);
-  const embed = new EmbedBuilder().setColor(COLOR.red).setTitle(`⚔ Raid ${city.name}?`)
-    .setDescription(`Your army: **${fmt(p.army)}**\nDefenders: 🛡 **${fmt(city.garrison)}** (Lv ${city.level})\n\nHow many troops do you commit?`);
-  return { embeds: [embed], components: [new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(`dy:atk:${cityId}:50`).setLabel(`Send Half (${fmt(half)})`).setStyle(ButtonStyle.Danger).setDisabled(half < 1),
-    new ButtonBuilder().setCustomId(`dy:atk:${cityId}:100`).setLabel(`Send All (${fmt(p.army)})`).setStyle(ButtonStyle.Danger).setDisabled(p.army < 1),
-  ), backRow()] };
-}
-
-function reinforceSelect(state, userId) {
-  const p = state.players[userId];
-  if (p.army < 1) return { embeds: [new EmbedBuilder().setColor(COLOR.grey).setTitle('🛡 Reinforce').setDescription('No troops in reserve to station. Recruit an army first.')], components: [backRow()] };
-  const cities = ownedCities(state, userId);
-  if (!cities.length) return { embeds: [new EmbedBuilder().setColor(COLOR.grey).setTitle('🛡 Reinforce').setDescription('You hold no cities.')], components: [backRow()] };
-  const menu = new StringSelectMenuBuilder().setCustomId('dy:rf_pick').setPlaceholder('Choose a city to reinforce…')
-    .addOptions(cities.slice(0, 25).map(c => ({ label: c.name, description: `Lv ${c.level} • 🛡${fmt(c.garrison)} now`, value: c.id })));
-  return { embeds: [new EmbedBuilder().setColor(COLOR.blue).setTitle('🛡 Reinforce your cities')
-    .setDescription(`You have **${fmt(p.army)}** troops in reserve to divvy up. Pick a city, choose how many to send there, then come back and split the rest across your other cities.`)],
-    components: [new ActionRowBuilder().addComponents(menu), backRow()] };
-}
-
-function reinforceAmount(state, userId, cityId) {
-  const p = state.players[userId];
-  const city = state.cities[cityId];
-  if (!city || city.ownerId !== userId) return reinforceSelect(state, userId);
-  const amtRow = new ActionRowBuilder().addComponents(
-    ...[10, 50, 100].map(n => new ButtonBuilder().setCustomId(`dy:rf_do:${cityId}:${n}`).setLabel(`+${n}`).setStyle(ButtonStyle.Success).setDisabled(p.army < n)),
-    new ButtonBuilder().setCustomId(`dy:rf_do:${cityId}:all`).setLabel(`All (${fmt(p.army)})`).setStyle(ButtonStyle.Success).setDisabled(p.army < 1));
-  const navRow = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('dy:reinforce').setLabel('↩ Another city').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('dy:home').setLabel('🏠 Done').setStyle(ButtonStyle.Secondary));
-  const note = p.army < 1 ? '\n\n*No troops left in reserve — recruit more or send your army elsewhere.*' : '';
-  return { embeds: [new EmbedBuilder().setColor(COLOR.blue).setTitle(`🛡 Reinforce ${esc(city.name)}`)
-    .setDescription(`**${esc(city.name)}** — Lv ${city.level} • garrison **🛡${fmt(city.garrison)}**\nReserve army: **${fmt(p.army)}** troops.\n\nChoose how many to station here.${note}`)],
-    components: [amtRow, navRow] };
-}
-
-function leaderboard(state) {
-  const rows = Object.entries(state.players)
-    .map(([id, p]) => ({ p, str: playerStrength(state, p), c: p.cities.length }))
-    .sort((a, b) => b.c - a.c || b.str - a.str).slice(0, 12);
-  const medals = ['🥇', '🥈', '🥉'];
-  const lines = rows.map((r, i) => `${medals[i] || `**${i + 1}.**`} ${esc(r.p.name)} — **${r.c}** cities • ${fmt(r.str)} power • ${r.p.stats.captured}⚔ / ${r.p.stats.defended}🛡`);
-  return { embeds: [new EmbedBuilder().setColor(COLOR.gold).setTitle('🏆 Diyar — Conquerors').setDescription(lines.join('\n') || 'No rulers yet.')], components: [backRow()] };
-}
-
-function bossView(state) {
-  const b = state.boss;
-  if (!b) return { embeds: [new EmbedBuilder().setColor(COLOR.grey).setTitle('👹 Boss').setDescription('No threat is active. They strike at random times — watch the war room.')], components: [backRow()] };
-  const ranked = Object.entries(b.damage).sort((a, c) => c[1] - a[1]).slice(0, 5)
-    .map(([uid, d], i) => `**${i + 1}.** ${esc(state.players[uid]?.name || 'Unknown')} — ${fmt(d)}`);
-  const embed = new EmbedBuilder().setColor(COLOR.red).setTitle(`👹 ${b.name}`)
-    .setDescription(`HP **${fmt(Math.max(0, b.hp))} / ${fmt(b.hpMax)}** • ⏳ ${msLeft(b.endsAt)} left\n\n**Top damage**\n${ranked.join('\n') || '— no strikes yet —'}`);
-  return { embeds: [embed], components: [new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('dy:strike').setLabel('⚔ Strike!').setStyle(ButtonStyle.Danger)), backRow()] };
-}
-
-function profileView(state, db, guildId, userId) {
-  const p = state.players[userId];
-  const s = p.stats;
-  const cities = ownedCities(state, userId);
-  const str = playerStrength(state, p);
-  const ranked = Object.entries(state.players)
-    .map(([id, pp]) => ({ id, c: pp.cities.length, str: playerStrength(state, pp) }))
-    .sort((a, b) => b.c - a.c || b.str - a.str);
-  const rank = ranked.findIndex(r => r.id === userId) + 1;
-  const fights = s.raidsWon + s.raidsLost;
-  const winRate = fights ? Math.round(s.raidsWon / fights * 100) : 0;
-  const embed = new EmbedBuilder().setColor(COLOR.gold).setTitle(`📜 ${p.name} — War Record`)
-    .setDescription(
-      `Rank **#${rank}** of ${ranked.length}  •  **${fmt(str)}** power\n` +
-      `🏰 Cities **${cities.length}**  •  🪖 Army **${fmt(p.army)}**  •  🗡 Weapon tier **${p.weaponTier}**\n\n` +
-      `**Raids:** ${s.raidsWon}W / ${s.raidsLost}L  (${winRate}% win rate)\n` +
-      `**Cities captured:** ${s.captured}  •  **lost:** ${s.lost}\n` +
-      `**Successful defences:** ${s.defended}\n` +
-      `**Boss kills:** ${s.bossKills}  •  **total boss damage:** ${fmt(s.bossDmg)}`)
-    .setFooter({ text: `Ruling since ${new Date(p.joinedAt).toISOString().slice(0, 10)}` });
-  return { embeds: [embed], components: [backRow()] };
-}
-
-// wipe a season: clears players/boss/schedule, reseeds the map; keeps the home channel.
-// Player Dinar balances live in the shared economy and are intentionally NOT touched.
-function resetSeason(state, saveData, guildId) {
-  const keepChannel = state.channelId;
-  state.players = {};
-  state.boss = null;
-  state.bossSched = null;
-  state.channelId = keepChannel;
-  for (const c of CITY_DEFS) {
-    state.cities[c.id] = {
-      id: c.id, name: c.name, lon: c.lon, lat: c.lat, level: c.level,
-      ownerId: null, npc: true, garrison: 20 + c.level * 18, lastIncomeAt: Date.now(),
-    };
-  }
-  if (saveData) saveData(guildId);
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-//  COMMANDS + WIRING
-// ════════════════════════════════════════════════════════════════════════════
-function getDiyarCommands() {
+// ─── Command definitions (all prefixed gacha-) ───────────────────────────────
+function getGachaCommands() {
   return [
-    new SlashCommandBuilder().setName('diyar').setDescription('Open your Diyar dashboard (Libyan conquest game) — join instantly').toJSON(),
-    new SlashCommandBuilder().setName('diyar-map').setDescription('Post the current map of Libya to the channel').toJSON(),
-    new SlashCommandBuilder().setName('diyar-leaderboard').setDescription('See the top conquerors').toJSON(),
-    new SlashCommandBuilder().setName('diyar-set-channel').setDescription('(Admin) Lock Diyar to this channel — dashboards, raids and boss events all live here')
-      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild).toJSON(),
-    new SlashCommandBuilder().setName('diyar-reset').setDescription('(Admin) Wipe all progress and start a fresh season (player Dinar is kept)')
-      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild).toJSON(),
-  ];
+    new SlashCommandBuilder().setName('gacha-roll').setDescription('Roll a random opted-in member as a card').setDMPermission(false),
+    new SlashCommandBuilder().setName('gacha-optin').setDescription('Become a claimable card in the collection game').setDMPermission(false),
+    new SlashCommandBuilder().setName('gacha-optout').setDescription('Leave the game — removes you and dissolves all claims/wishlists of you').setDMPermission(false),
+    new SlashCommandBuilder().setName('gacha-wish').setDescription('Add a member to your wishlist (pings them)').setDMPermission(false)
+      .addUserOption(o => o.setName('user').setDescription('The member you want').setRequired(true)),
+    new SlashCommandBuilder().setName('gacha-wishlist').setDescription('View or clear your wishlist').setDMPermission(false)
+      .addStringOption(o => o.setName('action').setDescription('view or remove').setRequired(false)
+        .addChoices({ name: 'view', value: 'view' }, { name: 'remove', value: 'remove' }))
+      .addUserOption(o => o.setName('user').setDescription('Member to remove').setRequired(false)),
+    new SlashCommandBuilder().setName('gacha-daily').setDescription('Claim your daily Dinar').setDMPermission(false),
+    new SlashCommandBuilder().setName('dinar').setDescription('Check a Dinar balance').setDMPermission(false)
+      .addUserOption(o => o.setName('user').setDescription('Whose balance (default: you)').setRequired(false)),
+    new SlashCommandBuilder().setName('dinar-set').setDescription('Set a member\'s Dinar balance exactly (admin only)')
+      .setDMPermission(false).setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+      .addUserOption(o => o.setName('user').setDescription('The member').setRequired(true))
+      .addIntegerOption(o => o.setName('amount').setDescription('New balance (e.g. 0 to reset)').setRequired(true).setMinValue(0)),
+    new SlashCommandBuilder().setName('dinar-flip').setDescription('Bet Dinar on a Libyan coin toss — heads or tails!').setDMPermission(false)
+      .addIntegerOption(o => o.setName('amount').setDescription(`How much to bet (${FLIP_MIN_BET}–${FLIP_MAX_BET} Dinar)`).setRequired(true).setMinValue(FLIP_MIN_BET).setMaxValue(FLIP_MAX_BET))
+      .addStringOption(o => o.setName('side').setDescription('Your call').setRequired(true)
+        .addChoices({ name: 'Heads', value: 'heads' }, { name: 'Tails', value: 'tails' })),
+    new SlashCommandBuilder().setName('dinar-richest').setDescription('Top 10 richest members by Dinar').setDMPermission(false),
+    new SlashCommandBuilder().setName('dinar-flip-leaderboard').setDescription('Top 10 coin-flip winners (with win/loss %)').setDMPermission(false),
+    new SlashCommandBuilder().setName('gacha-collection').setDescription('View a collection').setDMPermission(false)
+      .addUserOption(o => o.setName('user').setDescription('Whose collection (default: you)').setRequired(false)),
+    new SlashCommandBuilder().setName('gacha-rarest').setDescription('Show the top 15 rarest cards in the server').setDMPermission(false),
+    new SlashCommandBuilder().setName('gacha-release').setDescription('Release a member you own for Dinar').setDMPermission(false)
+      .addUserOption(o => o.setName('user').setDescription('The member to release').setRequired(true)),
+    new SlashCommandBuilder().setName('gacha-trade').setDescription('Propose a trade with another collector').setDMPermission(false)
+      .addUserOption(o => o.setName('with').setDescription('The collector to trade with').setRequired(true))
+      .addUserOption(o => o.setName('give').setDescription('A member YOU own to give').setRequired(true))
+      .addUserOption(o => o.setName('receive').setDescription('A member THEY own to receive').setRequired(true)),
+    new SlashCommandBuilder().setName('gacha-raid').setDescription('Attempt to acquire a card from another collector (they have 10h to defend)').setDMPermission(false)
+      .addUserOption(o => o.setName('owner').setDescription('The current owner of the card').setRequired(true))
+      .addUserOption(o => o.setName('card').setDescription('The member-card you want to acquire').setRequired(true)),
+    new SlashCommandBuilder().setName('gacha-leaderboard').setDescription('Top collectors in the server').setDMPermission(false),
+    new SlashCommandBuilder().setName('gacha-list').setDescription('See who is opted in to the collection game (private)').setDMPermission(false),
+
+    // ── Admin ──────────────────────────────────────────────────────────────
+    new SlashCommandBuilder().setName('gacha-admin').setDescription('Gacha admin controls (admin only)')
+      .setDMPermission(false).setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+      .addSubcommand(sc => sc.setName('toggle').setDescription('Enable or disable the whole game')
+        .addStringOption(o => o.setName('state').setDescription('on/off').setRequired(true).addChoices({ name: 'on', value: 'on' }, { name: 'off', value: 'off' })))
+      .addSubcommand(sc => sc.setName('trading').setDescription('Enable or disable trading')
+        .addStringOption(o => o.setName('state').setDescription('on/off').setRequired(true).addChoices({ name: 'on', value: 'on' }, { name: 'off', value: 'off' })))
+      .addSubcommand(sc => sc.setName('raids').setDescription('Enable or disable the raid system')
+        .addStringOption(o => o.setName('state').setDescription('on/off').setRequired(true).addChoices({ name: 'on', value: 'on' }, { name: 'off', value: 'off' })))
+      .addSubcommand(sc => sc.setName('channel').setDescription('Restrict which channels the game works in')
+        .addStringOption(o => o.setName('action').setDescription('add/remove/clear').setRequired(true).addChoices({ name: 'add', value: 'add' }, { name: 'remove', value: 'remove' }, { name: 'clear (allow all)', value: 'clear' }))
+        .addChannelOption(o => o.setName('channel').setDescription('Channel (for add/remove)').setRequired(false)))
+      .addSubcommand(sc => sc.setName('rollchannel').setDescription('Restrict which channels /gacha-roll works in (keeps rolls public)')
+        .addStringOption(o => o.setName('action').setDescription('add/remove/clear').setRequired(true).addChoices({ name: 'add', value: 'add' }, { name: 'remove', value: 'remove' }, { name: 'clear (allow all)', value: 'clear' }))
+        .addChannelOption(o => o.setName('channel').setDescription('Channel (for add/remove)').setRequired(false)))
+      .addSubcommand(sc => sc.setName('optin').setDescription('Force a member into the game (make them claimable)')
+        .addUserOption(o => o.setName('user').setDescription('The member').setRequired(true)))
+      .addSubcommand(sc => sc.setName('resetroll').setDescription('Reset roll & claim cooldowns for a member, or everyone if none given')
+        .addUserOption(o => o.setName('user').setDescription('The member (leave empty for everyone)').setRequired(false)))
+      .addSubcommand(sc => sc.setName('resetraid').setDescription('Reset raid cooldowns + clear all card protections (for testing)')
+        .addUserOption(o => o.setName('user').setDescription('The member (leave empty for everyone)').setRequired(false)))
+      .addSubcommand(sc => sc.setName('override').setDescription('Override a member\'s rarity and/or Dinar value')
+        .addUserOption(o => o.setName('user').setDescription('The member').setRequired(true))
+        .addStringOption(o => o.setName('rarity').setDescription('Force a rarity (or clear)').setRequired(false).addChoices(...TIERS.map(t => ({ name: t, value: t })), { name: 'clear override', value: 'clear' }))
+        .addIntegerOption(o => o.setName('value').setDescription('Force a Dinar value (-1 to clear)').setRequired(false)))
+      .addSubcommand(sc => sc.setName('release').setDescription('Force-release a member from whoever owns them')
+        .addUserOption(o => o.setName('user').setDescription('The claimed member').setRequired(true)))
+      .addSubcommand(sc => sc.setName('forceremove').setDescription('Remove a member from the game entirely')
+        .addUserOption(o => o.setName('user').setDescription('The member').setRequired(true)))
+      .addSubcommand(sc => sc.setName('recompute').setDescription('Recalculate all rarities now')),
+  ].map(c => c.toJSON());
 }
 
-function initDiyar({ client, db, saveData, awardLP }) {
-  const stateOf = (guildId) => getState(db, guildId, saveData);
+// ─── Init ────────────────────────────────────────────────────────────────────
+function initGacha({ client, db, saveData }) {
+  const CMDS = new Set([
+    'gacha-roll', 'gacha-optin', 'gacha-optout', 'gacha-wish', 'gacha-wishlist', 'gacha-daily',
+    'dinar', 'dinar-set', 'gacha-collection', 'gacha-rarest', 'gacha-release', 'gacha-trade', 'gacha-leaderboard', 'gacha-list', 'gacha-admin', 'gacha-raid', 'dinar-flip', 'dinar-richest', 'dinar-flip-leaderboard',
+  ]);
+  // Currency commands are exempt from the kill-switch and channel gate, since
+  // Dinar is shared across the other games.
+  const EXEMPT = new Set(['gacha-admin', 'dinar', 'dinar-set']);
 
-  // ----- boss scheduler tick -----
-  async function postBoss(guildId) {
-    const state = stateOf(guildId);
-    const b = state.boss; if (!b || !state.channelId) return;
-    try {
-      const ch = await client.channels.fetch(state.channelId);
-      const embed = new EmbedBuilder().setColor(COLOR.red).setTitle(`👹 ${b.name} appears!`)
-        .setDescription(`${b.tag}. Everyone can **strike** it — most damage wins the best loot. If it isn't slain in **${Math.round(BOSS_DURATION_MS/3600000)}h**, it pillages a city!`)
-        .setImage('attachment://diyar-boss.png');
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('dy:strike').setLabel('⚔ Strike!').setStyle(ButtonStyle.Danger),
-        new ButtonBuilder().setCustomId('dy:bossdmg').setLabel('📊 Damage').setStyle(ButtonStyle.Secondary));
-      const msg = await ch.send({ embeds: [embed], components: [row], files: [renderBoss(b)] });
-      b.messageId = msg.id; b.channelId = ch.id; saveData(guildId);
-    } catch (e) { console.error('[diyar boss post]', e.message); }
-  }
-  async function announce(guildId, payload) {
-    const state = stateOf(guildId); if (!state.channelId) return;
-    try { const ch = await client.channels.fetch(state.channelId); await ch.send(payload); } catch (e) { console.error('[diyar announce]', e.message); }
-  }
+  // Transient live-roll state, keyed by message ID (kept in memory, NOT in db,
+  // so it never bloats Mongo). Multiple cards can be live at once now that rolls
+  // are per-user. { guildId, memberId, type, claimed, dinarClaimed, expiresAt }
+  const liveRolls = {};
 
-  const raidTimers = {};   // in-memory countdown intervals (not persisted)
-  async function launchRaid(guildId, raidId) {
-    const state = stateOf(guildId);
-    const raid = state.pendingRaids && state.pendingRaids[raidId];
-    if (!raid || !raid.channelId) return;
-    let msg = null;
-    try {
-      const ch = await client.channels.fetch(raid.channelId);
-      const secs = Math.max(0, Math.round((raid.endsAt - Date.now()) / 1000));
-      msg = await ch.send({ content: `<@${raid.defenderId}>`, embeds: [raidLiveEmbed(state, raid, secs)], components: [reinforceRow(raidId)] });
-      raid.messageId = msg.id; saveData(guildId);
-    } catch (e) { console.error('[diyar raid post]', e.message); }
-    if (raidTimers[raidId]) clearInterval(raidTimers[raidId]);
-    raidTimers[raidId] = setInterval(async () => {
-      const st = stateOf(guildId); const rd = st.pendingRaids && st.pendingRaids[raidId];
-      if (!rd) { clearInterval(raidTimers[raidId]); delete raidTimers[raidId]; return; }
-      const secs = Math.max(0, Math.round((rd.endsAt - Date.now()) / 1000));
-      if (secs <= 0) { clearInterval(raidTimers[raidId]); delete raidTimers[raidId]; await finishRaid(guildId, raidId); return; }
-      try { if (msg) await msg.edit({ embeds: [raidLiveEmbed(st, rd, secs)], components: [reinforceRow(raidId)] }); } catch { /* ignore */ }
-    }, 6000);
-  }
-  async function finishRaid(guildId, raidId) {
-    const state = stateOf(guildId);
-    const raid = state.pendingRaids && state.pendingRaids[raidId];
-    if (!raid) return;
-    delete state.pendingRaids[raidId];
-    if (raidTimers[raidId]) { clearInterval(raidTimers[raidId]); delete raidTimers[raidId]; }
-    const result = resolveRaid(state, db, guildId, saveData, raid, raid.reinforced ? REINFORCE_MULT : 1);
-    saveData(guildId);
-    if (!result) return;
-    try {
-      const ch = await client.channels.fetch(raid.channelId);
-      const m = raid.messageId ? await ch.messages.fetch(raid.messageId).catch(() => null) : null;
-      if (m) await m.edit({ content: '', embeds: [raidResultEmbed(result)], components: [] });
-      else await ch.send({ embeds: [raidResultEmbed(result)] });
-    } catch (e) { console.error('[diyar raid finish]', e.message); }
-  }
-  async function refreshBossMessage(guildId) {
-    const state = stateOf(guildId); const b = state.boss;
-    if (!b || !b.channelId || !b.messageId) return;
-    try {
-      const ch = await client.channels.fetch(b.channelId);
-      const msg = await ch.messages.fetch(b.messageId);
-      const embed = EmbedBuilder.from(msg.embeds[0]).setImage('attachment://diyar-boss.png');
-      await msg.edit({ embeds: [embed], files: [renderBoss(b)] });
-    } catch { /* message gone */ }
-  }
-
-  async function tick() {
+  // Periodic rarity recompute + cleanup of abandoned trade offers across guilds
+  setInterval(() => {
     const now = Date.now();
-    for (const guild of client.guilds.cache.values()) {
-      const state = db[guild.id] && db[guild.id].__diyar;
-      if (!state) continue;
-      // expire an unbeaten boss
-      if (state.boss && now > state.boss.endsAt) {
-        const res = resolveBossExpire(state, db, guild.id, saveData);
-        if (res && res.razed) {
-          await announce(guild.id, { embeds: [new EmbedBuilder().setColor(COLOR.red).setTitle(`👹 ${res.name} escaped!`)
-            .setDescription(`No one slew it in time. It pillaged **${res.razed.city}**${res.razed.owner ? ` (${res.razed.owner})` : ''} — 🛡 −${fmt(res.razed.garrisonLost)} garrison${res.razed.looted ? `, 💰 −${fmt(res.razed.looted)} Dinar` : ''}.`)] });
-        }
+    for (const gid of Object.keys(db)) {
+      const g = db[gid]?.__gacha;
+      if (!g) continue;
+      // Sweep abandoned trades (nobody accepted/declined) so they don't pile up
+      // in the saved DB forever.
+      if (g.trades) for (const tid of Object.keys(g.trades)) {
+        if (now - (g.trades[tid].ts || 0) > TRADE_TTL_MS) delete g.trades[tid];
       }
-      // spawn due bosses (only if a war room is set)
-      if (state.channelId) {
-        const sched = ensureBossSched(state, saveData, guild.id, now);
-        const due = sched.spawns.find(s => !s.fired && s.at <= now);
-        if (due) {
-          due.fired = true; saveData(guild.id);
-          if (!state.boss) { spawnBoss(state, saveData, guild.id); await postBoss(guild.id); }
-        }
-      }
-      // resolve any live raid whose window elapsed but whose timer was lost (e.g. a redeploy)
-      for (const rid of Object.keys(state.pendingRaids || {})) {
-        if (now > state.pendingRaids[rid].endsAt && !raidTimers[rid]) await finishRaid(guild.id, rid);
+      if (Object.keys(g.pool || {}).length) {
+        try { recomputeRarities(db, gid); } catch (e) { console.error('[gacha] recompute:', e.message); }
       }
     }
-  }
+    saveData();
+  }, RARITY_RECALC_MS).unref();
 
-  setTimeout(() => { tick().catch(e => console.error('[diyar tick]', e.message)); setInterval(() => tick().catch(e => console.error('[diyar tick]', e.message)), TICK_MS); }, 4000);
+  // Resolve pending raids: defended (owner reacted ❌) or expired (transfers to raider).
+  // Polls each raid's message — restart-robust, no reliance on cached reaction events.
+  setInterval(async () => {
+    for (const gid of Object.keys(db)) {
+      const s = db[gid]?.__gacha;
+      if (!s?.raids || !Object.keys(s.raids).length) continue;
+      for (const [raidId, r] of Object.entries(s.raids)) {
+        let message = null;
+        try {
+          const ch = await client.channels.fetch(r.channelId);
+          message = await ch.messages.fetch(r.messageId);
+        } catch { /* channel/message gone — fall through to expiry handling */ }
 
-  // ----- interaction handling -----
+        let defended = false;
+        if (message) {
+          const rx = message.reactions.cache.find(x => x.emoji.name === RAID_EMOJI);
+          if (rx) { try { const users = await rx.users.fetch(); defended = users.has(r.owner); } catch {} }
+        }
+
+        if (defended)                        await resolveRaid(s, gid, raidId, 'defended', message);
+        else if (Date.now() >= r.expiresAt)  await resolveRaid(s, gid, raidId, 'success', message);
+        else if (message)                    await enforceRaidReactions(message, r.owner);  // still pending: strip stray reactions
+      }
+    }
+  }, RAID_SWEEP_MS).unref();
+
+  // Real-time lockdown for raid messages while they're still cached: remove any
+  // reaction that isn't the targeted owner's ❌. The 15-min sweep is the backstop
+  // for messages that have aged out of cache (no partials configured on the client).
+  client.on('messageReactionAdd', async (reaction, user) => {
+    try {
+      if (user.bot) return;   // keep the bot's own ❌ pre-react
+      const gid = reaction.message.guildId || reaction.message.guild?.id;
+      if (!gid) return;
+      const s = db[gid]?.__gacha;
+      if (!s?.raids) return;
+      const entry = Object.entries(s.raids).find(([, r]) => r.messageId === reaction.message.id);
+      if (!entry) return;
+      const [raidId, raid] = entry;
+      // The targeted owner's ❌ defends the card — resolve it immediately.
+      if (reaction.emoji.name === RAID_EMOJI && user.id === raid.owner) {
+        await resolveRaid(s, gid, raidId, 'defended', reaction.message);
+        return;
+      }
+      // Anything else (other emoji, or ❌ from someone who isn't the owner) is stripped.
+      await reaction.users.remove(user.id).catch(() => {});
+    } catch { /* ignore */ }
+  });
+
   client.on('interactionCreate', async (interaction) => {
     try {
-      // slash commands
-      if (interaction.isChatInputCommand()) {
-        const gid = interaction.guild?.id;
-        if (!gid) return;
+      if (interaction.isButton() && interaction.customId.startsWith('gacha_')) return handleButton(interaction);
+      if (!interaction.isChatInputCommand() || !CMDS.has(interaction.commandName)) return;
+      if (!interaction.guild) return interaction.reply(eph('This game only works in a server.')).catch(() => {});
 
-        // Single-channel lock: once a home channel is set, all Diyar play happens there.
-        if (['diyar', 'diyar-map', 'diyar-leaderboard'].includes(interaction.commandName)) {
-          const homeId = stateOf(gid).channelId;
-          if (homeId && interaction.channelId !== homeId) {
-            return interaction.reply(eph({ content: `🏰 Diyar is played in <#${homeId}> — head there to open your dashboard, raid rivals, and join the boss fights.` }));
-          }
-        }
-
-        if (interaction.commandName === 'diyar') {
-          const state = stateOf(gid);
-          const name = interaction.member?.displayName || interaction.user.username;
-          const { player, isNew, landless, startCity } = ensurePlayer(state, interaction.user.id, name, saveData, gid);
-          const trib = claimTribute(state, db, gid, saveData, interaction.user.id);
-          const tribLine = trib > 0 ? `\n\n🎁 **Daily tribute:** +${fmt(trib)} Dinar collected.` : '';
-          if (isNew) {
-            if (landless) {
-              announce(gid, { content: `🏴 **${name}** has entered the war for Diyar — but every city is held! They march in **landless**, hungry for conquest.` });
-              return interaction.reply(eph({ embeds: [new EmbedBuilder().setColor(COLOR.green).setTitle('🏴 Welcome to Diyar!')
-                .setDescription(`Every city in Libya is already held, so you begin **landless** — with an army of **${STARTER_ARMY}** troops and nothing to lose. Open **⚔ Attack**, raid an owned city and **seize it** to plant your first banner. Recruit more troops, then strike the weakest holder you can reach. Until you hold a city, no one can touch you.${tribLine}`)],
-                components: dashboard(state, db, gid, interaction.user.id).components, files: [] }));
-            }
-            announce(gid, { content: `🏴 **${name}** has entered the war for Diyar, raising their banner over **${startCity.name}**!` });
-            return interaction.reply(eph({ embeds: [new EmbedBuilder().setColor(COLOR.green).setTitle('🏴 Welcome to Diyar!')
-              .setDescription(`You've been granted **${startCity.name}** and an army of **${STARTER_ARMY}** troops.\n\nGrow your realm: recruit, upgrade, then raid neutral militias and rivals to expand. Open the dashboard below.${tribLine}`)],
-              components: dashboard(state, db, gid, interaction.user.id).components, files: [] }));
-          }
-          return interaction.reply(eph({ ...(trib > 0 ? { content: `🎁 Daily tribute: +${fmt(trib)} Dinar collected.` } : {}), ...dashboard(state, db, gid, interaction.user.id) }));
-        }
-        if (interaction.commandName === 'diyar-map') {
-          const state = stateOf(gid);
-          if (!Object.keys(state.players).length) return interaction.reply(eph({ content: 'No one has joined Diyar yet. Use `/diyar` to start!' }));
-          await interaction.deferReply();
-          return interaction.editReply({ files: [renderMap(state)] });
-        }
-        if (interaction.commandName === 'diyar-leaderboard') {
-          const state = stateOf(gid);
-          return interaction.reply({ embeds: leaderboard(state).embeds, components: [] });   // public: no interactive buttons
-        }
-        if (interaction.commandName === 'diyar-set-channel') {
-          const state = stateOf(gid);
-          state.channelId = interaction.channelId; saveData(gid);
-          return interaction.reply(eph({ content: `✅ This channel is now the **home of Diyar**. Dashboards, raids, and boss threats all live here — and the game is locked to this channel.` }));
-        }
-        if (interaction.commandName === 'diyar-reset') {
-          if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild))
-            return interaction.reply(eph({ content: 'You need the **Manage Server** permission to reset Diyar.' }));
-          const row = new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId('dy:reset_confirm').setLabel('Wipe & start new season').setStyle(ButtonStyle.Danger),
-            new ButtonBuilder().setCustomId('dy:reset_cancel').setLabel('Cancel').setStyle(ButtonStyle.Secondary));
-          return interaction.reply(eph({ content: '⚠️ This wipes **all Diyar progress** — every player, city and ranking — and reseeds the map with fresh militias. Player **Dinar balances are not affected**. This cannot be undone.', components: [row] }));
-        }
-        return;
+      const s = getState(db, interaction.guild.id);
+      if (!s.enabled && !EXEMPT.has(interaction.commandName)) return interaction.reply(eph('🚫 The collection game is currently disabled.')).catch(() => {});
+      if (!EXEMPT.has(interaction.commandName) && !channelAllowed(s, interaction.channelId)) {
+        return interaction.reply(eph(`🚫 The game can only be used in: ${s.channels.map(c => `<#${c}>`).join(', ')}`)).catch(() => {});
       }
 
-      const isBtn = interaction.isButton?.();
-      const isSel = interaction.isStringSelectMenu?.();
-      if (!isBtn && !isSel) return;
-      if (!interaction.customId.startsWith('dy:')) return;
-
-      const gid = interaction.guild?.id;
-      if (!gid) return;
-      const state = stateOf(gid);
-      const uid = interaction.user.id;
-      const parts = interaction.customId.split(':');           // dy:action[:arg[:arg2]]
-      const action = parts[1];
-
-      // strike/damage come from the PUBLIC war-room message — they don't need a dashboard
-      if (action === 'strike') {
-        const r = strikeBoss(state, saveData, gid, uid);
-        if (r.error) return interaction.reply(eph({ content: r.error }));
-        await interaction.reply(eph({ content: `⚔ You hit **${state.boss ? state.boss.name : 'the enemy'}** for **${fmt(r.dmg)}**! (your total: ${fmt(r.total)})` }));
-        if (r.killed) {
-          const bm = state.boss ? { channelId: state.boss.channelId, messageId: state.boss.messageId, name: state.boss.name } : null;
-          const res = resolveBossDefeat(state, db, gid, saveData);
-          if (res) {
-            const lines = res.rewards.slice(0, 5).map((w, i) => `${['🥇','🥈','🥉'][i] || `**${i+1}.**`} ${esc(w.name)} — ${fmt(w.dmg)} dmg → +${fmt(w.dinar)}💰${w.lp ? ` +${w.lp}LP` : ''}${w.weapon ? ' 🗡 weapon up!' : ''}`);
-            for (const w of res.rewards) if (w.lp) awardLP(gid, w.uid, w.lp, 'diyar');
-            await announce(gid, { embeds: [new EmbedBuilder().setColor(COLOR.green).setTitle('🎉 The threat is vanquished!')
-              .setDescription(`The realm is safe. Spoils:\n\n${lines.join('\n')}`)] });
-          }
-          // re-edit the ORIGINAL threat message: show defeated, strip the strike/damage buttons + image
-          if (bm && bm.channelId && bm.messageId) {
-            try {
-              const ch = await client.channels.fetch(bm.channelId);
-              const msg = await ch.messages.fetch(bm.messageId);
-              await msg.edit({ embeds: [new EmbedBuilder().setColor(COLOR.green).setTitle(`💀 ${bm.name} — DEFEATED`)
-                .setDescription('The threat has been vanquished. The realm is safe.')], components: [], files: [], attachments: [] });
-            } catch (e) { console.error('[diyar boss defeat edit]', e.message); }
-          }
-        } else {
-          await refreshBossMessage(gid);
-        }
-        return;
+      switch (interaction.commandName) {
+        case 'gacha-roll':        return cmdRoll(interaction, s);
+        case 'gacha-optin':       return cmdOptIn(interaction, s);
+        case 'gacha-optout':      return cmdOptOut(interaction, s);
+        case 'gacha-wish':        return cmdWish(interaction, s);
+        case 'gacha-wishlist':    return cmdWishlist(interaction, s);
+        case 'gacha-daily':       return cmdDaily(interaction, s);
+        case 'dinar':             return cmdDinar(interaction, s);
+        case 'dinar-flip':        return cmdFlip(interaction, s);
+        case 'dinar-richest':     return cmdRichest(interaction, s);
+        case 'dinar-flip-leaderboard': return cmdFlipBoard(interaction, s);
+        case 'dinar-set':         return cmdDinarSet(interaction, s);
+        case 'gacha-collection':  return cmdCollection(interaction, s);
+        case 'gacha-rarest':      return cmdRarest(interaction, s);
+        case 'gacha-release':     return cmdRelease(interaction, s);
+        case 'gacha-trade':       return cmdTrade(interaction, s);
+        case 'gacha-raid':        return cmdRaid(interaction, s);
+        case 'gacha-leaderboard': return cmdLeaderboard(interaction, s);
+        case 'gacha-list':        return cmdList(interaction, s);
+        case 'gacha-admin':       return cmdAdmin(interaction, s);
       }
-      if (action === 'bossdmg') return interaction.reply(eph(bossView(state)));
-
-      if (action === 'reset_cancel') return interaction.update({ content: 'Reset cancelled — your realm is safe.', components: [] });
-      if (action === 'reset_confirm') {
-        if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild))
-          return interaction.reply(eph({ content: 'You need the **Manage Server** permission to do that.' }));
-        resetSeason(state, saveData, gid);
-        await interaction.update({ content: '✅ A new season of Diyar has begun — the map has been reseeded with fresh militias.', components: [] });
-        await announce(gid, { embeds: [new EmbedBuilder().setColor(COLOR.green).setTitle('🏁 A new season of Diyar begins!')
-          .setDescription('The map has been wiped and fresh militias hold every city. Run `/diyar` to claim your new starting city and begin the conquest again.')] });
-        return;
+    } catch (err) {
+      console.error('[gacha] handler error:', err.message);
+      if (interaction.isRepliable?.() && !interaction.replied && !interaction.deferred) {
+        interaction.reply(eph(`⚠️ Something went wrong: ${err.message}`)).catch(() => {});
       }
-
-      // everything else requires being registered
-      if (!state.players[uid]) return interaction.reply(eph({ content: 'Join first with `/diyar`.' }));
-      if (reseedIfLanded(state, uid)) saveData(gid);   // resettle a knocked-out player (and persist it)
-
-      const home = () => interaction.update(dashboard(state, db, gid, uid));
-
-      if (action === 'home')        return home();
-      if (action === 'city')        return interaction.update(cityView(state, db, gid, uid));
-      if (action === 'army')        return interaction.update(armyView(state, db, gid, uid));
-      if (action === 'upgrade')     return interaction.update(upgradeView(state, db, gid, uid));
-      if (action === 'armoury')     return interaction.update(armouryView(state, db, gid, uid));
-      if (action === 'reinforce')   return interaction.update(reinforceSelect(state, uid));
-      if (action === 'leaderboard') return interaction.update(leaderboard(state));
-      if (action === 'profile')     return interaction.update(profileView(state, db, gid, uid));
-      if (action === 'boss')        return interaction.update(bossView(state));
-
-      if (action === 'map') {
-        await interaction.deferUpdate();
-        return interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLOR.gold).setTitle('🗺 Your Realm — Map of Libya').setImage('attachment://diyar-map.png')], components: [backRow()], files: [renderMap(state, uid)] });
-      }
-      if (action === 'collect') {
-        const p = state.players[uid];
-        const got = collectIncome(state, db, gid, saveData, uid);
-        if (got > 0) {
-          const who = p?.name || interaction.member?.displayName || interaction.user.username;
-          await interaction.reply({ content: `💰 **${who}** collected **${fmt(got)} Dinar** from their cities.` });   // public
-          return;
-        }
-        const cities = ownedCities(state, uid);
-        let msg;
-        if (!cities.length) msg = '🪙 You hold no cities yet — capture one to start earning Dinar.';
-        else {
-          const ecoMult = 1 + p.upg.eco * 0.12;
-          const ratePerHr = cities.reduce((s, c) => s + INCOME_PER_LEVEL_HR * c.level * ecoMult, 0);
-          const capTotal = Math.floor(ratePerHr * INCOME_CAP_HRS);
-          let soonestMs = Infinity;
-          for (const c of cities) {
-            const rc = INCOME_PER_LEVEL_HR * c.level * ecoMult;
-            const pend = rc * clamp((Date.now() - c.lastIncomeAt) / 3600000, 0, INCOME_CAP_HRS);
-            const need = 1 - (pend - Math.floor(pend));
-            const ms = rc > 0 ? need / rc * 3600000 : Infinity;
-            soonestMs = Math.min(soonestMs, ms);
-          }
-          const when = Number.isFinite(soonestMs) ? msLeft(Date.now() + soonestMs) : '—';
-          msg = `🪙 Nothing to collect yet. Your **${cities.length}** cit${cities.length === 1 ? 'y' : 'ies'} earn about **${fmt(Math.round(ratePerHr))} Dinar/hour** (up to **${fmt(capTotal)}** after ${INCOME_CAP_HRS}h). Next Dinar ready in ~**${when}**.`;
-        }
-        await interaction.reply(eph({ content: msg }));
-        return;
-      }
-      if (action === 'recruit') {
-        const n = parseInt(parts[2], 10);
-        if (Number.isFinite(n) && n > 0) recruit(state, db, gid, saveData, uid, n);
-        return interaction.update(armyView(state, db, gid, uid));
-      }
-      if (action === 'upg') {
-        const r = upgrade(state, db, gid, saveData, uid, parts[2]);
-        return interaction.update(upgradeView(state, db, gid, uid));
-      }
-      if (action === 'buyweapon') {
-        buyWeapon(state, db, gid, saveData, uid);
-        return interaction.update(armouryView(state, db, gid, uid));
-      }
-      if (action === 'attack')      return interaction.update(targetSelect(state, uid));
-      if (action === 'atk_target')  return interaction.update(sendAmount(state, uid, interaction.values[0]));
-      if (action === 'rf_pick') return interaction.update(reinforceAmount(state, uid, interaction.values[0]));
-      if (action === 'rf_do') {
-        const cityId = parts[2];
-        const amt = parts[3] === 'all' ? state.players[uid].army : parseInt(parts[3], 10);
-        if (Number.isFinite(amt) && amt > 0) reinforce(state, saveData, gid, uid, cityId, amt);
-        return interaction.update(reinforceAmount(state, uid, cityId));
-      }
-      if (action === 'atk') {
-        const cityId = parts[2], pct = parts[3] === '50' ? 0.5 : 1.0;
-        const start = startRaid(state, db, gid, saveData, uid, cityId, pct);
-        if (start.error) return interaction.update({ embeds: [new EmbedBuilder().setColor(COLOR.grey).setTitle('⚔ Raid blocked').setDescription(start.error)], components: [backRow()], files: [] });
-        const pending = start.pending;
-        if (!pending.defenderId) {
-          // neutral militia — resolve instantly, announce as text
-          const result = resolveRaid(state, db, gid, saveData, pending, 1);
-          announce(gid, { embeds: [raidResultEmbed(result)] });
-          return interaction.update({ embeds: [raidResultEmbed(result)], components: [backRow()], files: [] });
-        }
-        // PvP — run a live 30s window so the defender can rally
-        const raidId = 'r' + Date.now().toString(36) + Math.floor(Math.random() * 1000);
-        state.pendingRaids = state.pendingRaids || {};
-        state.pendingRaids[raidId] = { ...pending, id: raidId, endsAt: Date.now() + RAID_WINDOW_MS, reinforced: false, channelId: state.channelId, messageId: null };
-        saveData(gid);
-        launchRaid(gid, raidId).catch(e => console.error('[diyar raid]', e.message));
-        return interaction.update({ embeds: [new EmbedBuilder().setColor(COLOR.red).setTitle('⚔ Raid launched!')
-          .setDescription(`Your army marches on **${pending.cityName}**. The defender has **${Math.round(RAID_WINDOW_MS / 1000)}s** to rally — watch the war room for the outcome.`)], components: [backRow()], files: [] });
-      }
-      if (action === 'reinf') {
-        const raidId = parts[2];
-        const raid = state.pendingRaids && state.pendingRaids[raidId];
-        if (!raid) return interaction.reply(eph({ content: 'That battle is already decided.' }));
-        if (interaction.user.id !== raid.defenderId) return interaction.reply(eph({ content: 'Only the city\'s defender can send reinforcements.' }));
-        if (Date.now() > raid.endsAt) return interaction.reply(eph({ content: '⏳ Too late — the battle is already decided!' }));
-        if (raid.reinforced) return interaction.reply(eph({ content: '🛡 Your reinforcements are already on the way!' }));
-        raid.reinforced = true; saveData(gid);
-        const secs = Math.max(0, Math.round((raid.endsAt - Date.now()) / 1000));
-        try { return await interaction.update({ embeds: [raidLiveEmbed(state, raid, secs)], components: [reinforceRow(raidId)] }); }
-        catch { return interaction.reply(eph({ content: '🛡 Reinforcements sent — your garrison rallies!' })); }
-      }
-    } catch (e) {
-      console.error('[diyar interaction]', e);
-      try { if (interaction.isRepliable() && !interaction.replied && !interaction.deferred) await interaction.reply(eph({ content: 'Something went wrong with that action.' })); } catch {}
     }
   });
 
-  return {
-    _test: {
-      getState: () => stateOf, ensurePlayer, resolveAttack, recruit, upgrade, reinforce, collectIncome,
-      spawnBoss, strikeBoss, resolveBossDefeat, resolveBossExpire, playerStrength, ensureBossSched,
-      pendingIncome, renderMap, renderBoss, renderBattle, pickTimes, reseedIfLanded,
-      claimTribute, buyWeapon, armouryView, profileView, resetSeason, targetSelect, reinforceSelect, effectiveDefence, effectiveAttack, startRaid, resolveRaid,
-    },
-  };
+  // ── /gacha-roll ────────────────────────────────────────────────────────────
+  async function cmdRoll(interaction, s) {
+    const uid = interaction.user.id;
+    ensureFreshRarities(db, interaction.guild.id);
+    if (!Object.keys(s.pool).length) return interaction.reply(eph('Nobody has opted in yet. Be the first with `/gacha-optin`!'));
+
+    // Roll-only channel restriction: keeps rolls public so they can't be sniped
+    // uncontested in private clan channels.
+    if (!rollChannelAllowed(s, interaction.channelId)) {
+      return interaction.reply(eph(`🎲 Rolling is only allowed in: ${s.rollChannels.map(c => `<#${c}>`).join(', ')}`));
+    }
+
+    // PER-USER cooldown: one roll every 2 hours
+    const cd = (s.cooldowns[uid] ||= {});
+    const wait = (cd.roll || 0) + ROLL_COOLDOWN_MS - Date.now();
+    if (wait > 0) {
+      const h = Math.floor(wait / 3600000), m = Math.ceil((wait % 3600000) / 60000);
+      return interaction.reply(eph(`⏳ You can roll again in **${h}h ${m}m**.`));
+    }
+    cd.roll = Date.now();
+    (s.stats[uid] ||= { rolls: 0, claims: 0 }).rolls++;
+
+    const rolledId = weightedRoll(s);
+    const entry = s.pool[rolledId];
+    const ownerId = s.owners[rolledId];
+    let member; try { member = await interaction.guild.members.fetch(rolledId); } catch {}
+
+    await interaction.reply('🎴 **A card is dropping in 5 seconds…**');
+    if (!s.pool[uid]) interaction.followUp(eph('💡 You\'re not opted in, so others can\'t roll *you*. Join with `/gacha-optin`!')).catch(() => {});
+    saveData(interaction.guild.id);
+
+    setTimeout(async () => {
+      try {
+        const embed = cardEmbed(member, entry, ownerId);
+        const wishers = Object.keys(s.wishlists).filter(w => (s.wishlists[w] || []).includes(rolledId) && w !== rolledId && w !== uid);
+        const name = member?.displayName || 'this member';
+        let row, content;
+        if (ownerId) {
+          row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId('gacha_dinardrop').setLabel('Claim Dinar').setStyle(ButtonStyle.Success).setEmoji('💵'));
+          content = wishers.length ? `🔔 ${wishers.map(w => `<@${w}>`).join(' ')} — **${name}** appeared (already owned)!` : undefined;
+        } else {
+          row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId(`gacha_claim:${rolledId}`).setLabel('Claim').setStyle(ButtonStyle.Success).setEmoji('🎴'));
+          content = wishers.length ? `🔔 ${wishers.map(w => `<@${w}>`).join(' ')} — one of your wished members appeared: **${name}**!` : undefined;
+        }
+        const msg = await interaction.editReply({ content, embeds: [embed], components: [row], allowedMentions: { users: wishers } });
+        liveRolls[msg.id] = { guildId: interaction.guild.id, memberId: rolledId, type: ownerId ? 'dinardrop' : 'claim', claimed: false, dinarClaimed: false, expiresAt: Date.now() + ROLL_EXPIRY_MS };
+
+        setTimeout(() => {
+          const lr = liveRolls[msg.id];
+          if (lr && !lr.claimed && !lr.dinarClaimed) {
+            delete liveRolls[msg.id];
+            embed.setFooter({ text: ownerId
+              ? '⌛ Time ran out — nobody grabbed the Dinar Drop.'
+              : '⌛ Time ran out — nobody claimed this card. They stay unclaimed.' });
+            interaction.editReply({ embeds: [embed], components: [] }).catch(() => {});
+          }
+        }, ROLL_EXPIRY_MS).unref?.();
+      } catch (e) { console.error('[gacha] reveal:', e.message); }
+    }, ROLL_DROP_DELAY_MS);
+  }
+
+  // ── opt-in / opt-out ───────────────────────────────────────────────────────
+  function cmdOptIn(interaction, s) {
+    const uid = interaction.user.id;
+    if (s.pool[uid]) return interaction.reply(eph('✅ You\'re already opted in and claimable.'));
+    s.pool[uid] = { rarity: 'Common', score: 0, value: TIER_VALUE.Common, rarityOverride: null, valueOverride: null };
+    recomputeRarities(db, interaction.guild.id);
+    saveData(interaction.guild.id);
+    return interaction.reply({ content: `🎴 **${interaction.user.username}** joined the collection game — now a **${s.pool[uid].rarity}** card worth 💰 ${fmt(s.pool[uid].value)} Dinar! Opt out anytime with \`/gacha-optout\`.` });
+  }
+  function cmdOptOut(interaction, s) {
+    const uid = interaction.user.id;
+    if (!s.pool[uid]) return interaction.reply(eph("You're not in the collection game, so there's nothing to opt out of."));
+    const dinar = dinarOf(s, uid);
+    const penalty = Math.floor(dinar * 0.75);
+    const owned = collectionOf(s, uid).length;
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('gacha_optout_confirm').setLabel('Yes, opt me out').setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId('gacha_optout_cancel').setLabel('Cancel').setStyle(ButtonStyle.Secondary));
+    return interaction.reply({
+      flags: 64,
+      content:
+        `⚠️ **Are you sure you want to opt out?**\n\n` +
+        `This is permanent and costly:\n` +
+        `• You'll lose **75% of your Dinar** — that's **${fmt(penalty)}** of your **${fmt(dinar)}** (you'd keep **${fmt(dinar - penalty)}**).\n` +
+        `• Your entire collection of **${owned}** card${owned === 1 ? '' : 's'} will be released back into the pool for others to claim.\n` +
+        `• You'll be removed as a claimable card, and every claim and wishlist involving you will be cleared.\n\n` +
+        `If you opt back in later, you'll be starting again from scratch.`,
+      components: [row],
+    });
+  }
+
+  // ── /gacha-wish + /gacha-wishlist ──────────────────────────────────────────
+  async function cmdWish(interaction, s) {
+    const uid = interaction.user.id;
+    const target = interaction.options.getUser('user');
+    if (target.id === uid) return interaction.reply(eph('You can\'t wishlist yourself.'));
+    if (target.bot)        return interaction.reply(eph('You can\'t wishlist a bot.'));
+    const wl = (s.wishlists[uid] ||= []);
+    if (wl.includes(target.id)) return interaction.reply(eph('They\'re already on your wishlist.'));
+    if (wl.length >= 20)        return interaction.reply(eph('Your wishlist is full (20 max).'));
+    wl.push(target.id);
+    saveData(interaction.guild.id);
+    const optedIn = !!s.pool[target.id];
+    const msg = optedIn
+      ? `⭐ <@${target.id}> — **${interaction.user.username}** added you to their wishlist! They'll race to claim you when you're rolled.`
+      : `⭐ <@${target.id}> — **${interaction.user.username}** wants to collect you, but you're not in the game yet! Use \`/gacha-optin\` to become a claimable card.`;
+    await interaction.reply({ content: msg, allowedMentions: { users: [target.id] } });
+  }
+  function cmdWishlist(interaction, s) {
+    const uid = interaction.user.id;
+    const action = interaction.options.getString('action') || 'view';
+    const wl = (s.wishlists[uid] ||= []);
+    if (action === 'view') return interaction.reply(eph(wl.length ? `⭐ Your wishlist: ${wl.map(w => `<@${w}>`).join(', ')}` : 'Your wishlist is empty. Add someone with `/gacha-wish`.'));
+    const target = interaction.options.getUser('user');
+    if (!target) return interaction.reply(eph('Pick a member to remove.'));
+    s.wishlists[uid] = wl.filter(x => x !== target.id);
+    saveData(interaction.guild.id);
+    return interaction.reply(eph(`Removed <@${target.id}> from your wishlist.`));
+  }
+
+  // ── /gacha-daily + /gacha-dinar ────────────────────────────────────────────
+  function cmdDaily(interaction, s) {
+    const uid = interaction.user.id;
+    const cd = (s.cooldowns[uid] ||= {});
+    const since = Date.now() - (cd.daily || 0);
+    if (since < 22 * 60 * 60 * 1000) {
+      const left = 22 * 60 * 60 * 1000 - since;
+      return interaction.reply(eph(`⏳ You've already claimed today. Come back in ${Math.floor(left / 3600000)}h ${Math.ceil((left % 3600000) / 60000)}m.`));
+    }
+    ensureFreshRarities(db, interaction.guild.id);
+    const bonus = Math.floor(collectionOf(s, uid).reduce((sum, cid) => sum + (s.pool[cid]?.value || 0), 0) / 50);
+    const total = DAILY_BASE + bonus;
+    addDinar(s, uid, total);
+    cd.daily = Date.now();
+    saveData(interaction.guild.id);
+    return interaction.reply(eph(`💰 Daily claimed: **+${fmt(total)} Dinar** (${fmt(DAILY_BASE)} base${bonus ? ` + ${fmt(bonus)} collection bonus` : ''}). Balance: **${fmt(dinarOf(s, uid))}**.`));
+  }
+  function cmdDinar(interaction, s) {
+    const target = interaction.options.getUser('user') || interaction.user;
+    return interaction.reply({ content: `💰 **${target.username}** has **${fmt(dinarOf(s, target.id))} Dinar**.` });
+  }
+
+  async function cmdFlip(interaction, s) {
+    const uid = interaction.user.id;
+    const name = interaction.member?.displayName || interaction.user.username;
+    const amount = interaction.options.getInteger('amount');
+    const side = interaction.options.getString('side');                 // 'heads' | 'tails'
+
+    // bet bounds are enforced by the slash command, but re-check defensively
+    if (amount < FLIP_MIN_BET || amount > FLIP_MAX_BET) {
+      return interaction.reply(eph(`🪙 Bet must be between **${fmt(FLIP_MIN_BET)}** and **${fmt(FLIP_MAX_BET)} Dinar**.`));
+    }
+    const cd = (s.cooldowns[uid] ||= {});
+    const since = Date.now() - (cd.flip || 0);
+    if (since < FLIP_CD_MS) return interaction.reply(eph(`⏳ You can flip again in **${fmtDur(FLIP_CD_MS - since)}**.`));
+    const bal = dinarOf(s, uid);
+    if (bal < amount) return interaction.reply(eph(`💸 You only have **${fmt(bal)} Dinar** — not enough to bet **${fmt(amount)}**.`));
+
+    // resolve now (house edge baked into FLIP_WIN_CHANCE), then animate
+    const win = Math.random() < FLIP_WIN_CHANCE;
+    const landed = win ? side : (side === 'heads' ? 'tails' : 'heads');
+    addDinar(s, uid, win ? amount : -amount);
+    if (!s.flipStats) s.flipStats = {};
+    const fstat = (s.flipStats[uid] ||= { wins: 0, losses: 0, won: 0, lost: 0 });
+    if (win) { fstat.wins++; fstat.won += amount; } else { fstat.losses++; fstat.lost += amount; }
+    cd.flip = Date.now();
+    saveData(interaction.guild.id);
+
+    const sideName = (x) => (x === 'heads' ? 'Heads' : 'Tails');
+    const newBal = dinarOf(s, uid);
+
+    // stage 1 — public "flipping" with the spinning coin
+    const spinEmbed = new EmbedBuilder().setColor(0xE6B840)
+      .setTitle('🪙 Libyan Coin Toss')
+      .setDescription(`**${name}** bet **${fmt(amount)} Dinar** on **${sideName(side)}**…\nThe coin is in the air! 🌀`)
+      .setImage('attachment://dinar-coin-spin.gif');
+    await interaction.reply({ embeds: [spinEmbed], files: [coinFile('dinar-coin-spin.gif')] }).catch(() => {});
+
+    await new Promise((r) => setTimeout(r, 2600));
+
+    // stage 2 — reveal the landed face + result
+    const faceFile = landed === 'heads' ? 'dinar-coin-heads.png' : 'dinar-coin-tails.png';
+    const resultEmbed = new EmbedBuilder().setColor(win ? 0x2ECC71 : 0xE74C3C)
+      .setTitle('🪙 Libyan Coin Toss')
+      .setDescription(
+        `The coin landed on **${sideName(landed)}**!\n\n` +
+        (win
+          ? `🎉 **${name}** called **${sideName(side)}** and won **+${fmt(amount)} Dinar**!`
+          : `💸 **${name}** called **${sideName(side)}** and lost **${fmt(amount)} Dinar**.`) +
+        `\n💰 New balance: **${fmt(newBal)} Dinar**`)
+      .setImage(`attachment://${faceFile}`)
+      .setFooter({ text: `One flip every ${Math.round(FLIP_CD_MS / 3600000)} hours` });
+    await interaction.editReply({ embeds: [resultEmbed], files: [coinFile(faceFile)], attachments: [] }).catch(() => {});
+  }
+
+  function cmdRichest(interaction, s) {
+    const medals = ['🥇', '🥈', '🥉'];
+    const ranked = Object.entries(s.dinar || {})
+      .filter(([, bal]) => bal > 0)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10);
+    const embed = new EmbedBuilder().setColor(0xF1C40F).setTitle('💰 Richest in Dinar — Top 10')
+      .setDescription(ranked.length
+        ? ranked.map(([id, bal], i) => `${medals[i] || `**${i + 1}.**`} <@${id}> — **${fmt(bal)}** Dinar`).join('\n')
+        : '_Nobody has any Dinar yet._');
+    return interaction.reply({ embeds: [embed] });
+  }
+
+  function cmdFlipBoard(interaction, s) {
+    const medals = ['🥇', '🥈', '🥉'];
+    const rows = Object.entries(s.flipStats || {})
+      .map(([id, st]) => {
+        const wins = st.wins || 0, losses = st.losses || 0, games = wins + losses;
+        return { id, wins, losses, games, net: (st.won || 0) - (st.lost || 0), winPct: games ? (wins / games) * 100 : 0 };
+      })
+      .filter(r => r.games > 0)
+      .sort((a, b) => b.net - a.net)
+      .slice(0, 10);
+    const embed = new EmbedBuilder().setColor(0xE6B840).setTitle('🪙 Coin Flip Leaderboard — Top 10')
+      .setDescription(rows.length
+        ? rows.map((r, i) => {
+            const sign = r.net >= 0 ? '+' : '';
+            return `${medals[i] || `**${i + 1}.**`} <@${r.id}> — **${sign}${fmt(r.net)}** Dinar\n` +
+                   `　${r.wins}W / ${r.losses}L · ${r.winPct.toFixed(0)}% win · ${(100 - r.winPct).toFixed(0)}% loss`;
+          }).join('\n')
+        : '_No coin flips yet. Be the first with `/dinar-flip`!_')
+      .setFooter({ text: 'Ranked by net Dinar won' });
+    return interaction.reply({ embeds: [embed] });
+  }
+  function cmdDinarSet(interaction, s) {
+    if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) return interaction.reply(eph('🚫 Admins only.'));
+    const u = interaction.options.getUser('user');
+    const amount = Math.max(0, interaction.options.getInteger('amount'));
+    s.dinar[u.id] = amount;
+    saveData(interaction.guild.id);
+    return interaction.reply(eph(`✅ Set <@${u.id}>'s balance to **${fmt(amount)} Dinar**.`));
+  }
+
+  // ── /gacha-collection ──────────────────────────────────────────────────────
+  function cmdCollection(interaction, s) {
+    const target = interaction.options.getUser('user') || interaction.user;
+    ensureFreshRarities(db, interaction.guild.id);
+    const owned = collectionOf(s, target.id);
+    const totalValue = owned.reduce((sum, cid) => sum + (s.pool[cid]?.value || 0), 0);
+    const byTier = {};
+    for (const cid of owned) { const t = s.pool[cid]?.rarity || 'Common'; (byTier[t] ||= []).push(cid); }
+    const lines = [];
+    for (const t of [...TIERS].reverse()) if (byTier[t]?.length) lines.push(`${TIER_EMOJI[t]} **${t}** (${byTier[t].length}): ${byTier[t].map(c => `<@${c}>`).join(', ')}`);
+    const embed = new EmbedBuilder().setColor(0x9B59B6)
+      .setTitle(`🎴 ${target.username}'s Collection`).setThumbnail(target.displayAvatarURL())
+      .setDescription(owned.length ? lines.join('\n') : '_Empty — roll with `/gacha-roll` and claim someone!_')
+      .addFields({ name: 'Members owned', value: `${owned.length}`, inline: true }, { name: 'Total value', value: `💰 ${fmt(totalValue)} Dinar`, inline: true });
+    return interaction.reply({ embeds: [embed] });
+  }
+
+  // ── /gacha-rarest (top 15) ─────────────────────────────────────────────────
+  function cmdRarest(interaction, s) {
+    ensureFreshRarities(db, interaction.guild.id);
+    const ids = Object.keys(s.pool);
+    if (!ids.length) return interaction.reply(eph('Nobody has opted in yet.'));
+    const ranked = ids.map(id => ({ id, ...s.pool[id] }))
+      .sort((a, b) => (b.value - a.value) || (b.score - a.score))
+      .slice(0, 15);
+    const lines = ranked.map((e, i) => {
+      const owner = s.owners[e.id] ? `owned by <@${s.owners[e.id]}>` : '_unclaimed_';
+      return `**${i + 1}.** ${TIER_EMOJI[e.rarity]} <@${e.id}> · ${e.rarity} · 💰 ${fmt(e.value)} · ${owner}`;
+    });
+    const embed = new EmbedBuilder().setColor(0xE74C3C).setTitle('💎 Top 15 Rarest Cards').setDescription(lines.join('\n'));
+    return interaction.reply({ embeds: [embed] });
+  }
+
+  // ── /gacha-release (divorce) ───────────────────────────────────────────────
+  function cmdRelease(interaction, s) {
+    const uid = interaction.user.id;
+    const target = interaction.options.getUser('user');
+    if (s.owners[target.id] !== uid) return interaction.reply(eph(`You don't own <@${target.id}>.`));
+    if (cardHasActiveRaid(s, target.id)) return interaction.reply(eph("That card is under an active raid — you can't release it until the raid resolves."));
+    ensureFreshRarities(db, interaction.guild.id);
+    const refund = Math.floor((s.pool[target.id]?.value || 0) * RELEASE_REFUND);
+    delete s.owners[target.id];
+    addDinar(s, uid, refund);
+    saveData(interaction.guild.id);
+    return interaction.reply(eph(`💔 Released <@${target.id}> and received **+${fmt(refund)} Dinar**. They're claimable again. Balance: **${fmt(dinarOf(s, uid))}**.`));
+  }
+
+  // ── /gacha-raid ────────────────────────────────────────────────────────────
+  const cardHasActiveRaid = (s, cardId) => Object.values(s.raids || {}).some(r => r.cardId === cardId);
+
+  async function cmdRaid(interaction, s) {
+    const gid    = interaction.guild.id;
+    const raider = interaction.user.id;
+    if (!s.raidsEnabled) return interaction.reply(eph('🚫 Raids are currently disabled.'));
+
+    // Raids must be public: if the owner can't see the alert, they can't defend.
+    // Requiring @everyone view access guarantees the targeted owner can see it.
+    const everyonePerms = interaction.channel?.permissionsFor(interaction.guild.roles.everyone);
+    if (everyonePerms && !everyonePerms.has(PermissionFlagsBits.ViewChannel)) {
+      return interaction.reply(eph('🔒 Raids must be started in a **public channel** so the owner can see the alert and defend. Please run this in a channel everyone can view.'));
+    }
+    ensureFreshRarities(db, gid);
+
+    const owner = interaction.options.getUser('owner');
+    const card  = interaction.options.getUser('card');
+
+    if (!s.pool[raider])                return interaction.reply(eph('You must be opted in to raid. Use `/gacha-optin` first.'));
+    if (card.id === raider)             return interaction.reply(eph("You can't raid your own card."));
+    if (!s.owners[card.id])             return interaction.reply(eph(`<@${card.id}> isn't owned by anyone — there's nothing to raid.`));
+    if (s.owners[card.id] === raider)   return interaction.reply(eph('You already own that card.'));
+    if (s.owners[card.id] !== owner.id) return interaction.reply(eph(`<@${owner.id}> doesn't own <@${card.id}> — the current owner is <@${s.owners[card.id]}>.`));
+    if (cardHasActiveRaid(s, card.id))  return interaction.reply(eph('That card already has an active raid running.'));
+
+    const cardWait = (s.raidCardCd[card.id] || 0) + RAID_CARD_CD_MS - Date.now();
+    if (cardWait > 0) return interaction.reply(eph(`That card was raided recently — it's protected for another **${fmtDur(cardWait)}**.`));
+
+    const userWait = (s.raidUserCd[raider] || 0) + RAID_USER_CD_MS - Date.now();
+    if (userWait > 0) return interaction.reply(eph(`You can only start one raid per day. Try again in **${fmtDur(userWait)}**.`));
+
+    if (Object.values(s.raids).filter(r => r.raider === raider).length >= RAID_MAX_ACTIVE)
+      return interaction.reply(eph(`You already have ${RAID_MAX_ACTIVE} raids running. Wait for one to resolve first.`));
+
+    const entry = s.pool[card.id] || { rarity: 'Common', value: TIER_VALUE.Common };
+    const pct   = RAID_COST_PCT[entry.rarity] ?? 0.30;
+    const fee   = Math.floor((entry.value || 0) * pct);
+    if (fee <= 0)                 return interaction.reply(eph('That card has no value to raid.'));
+    if (dinarOf(s, raider) < fee) return interaction.reply(eph(`You need **${fmt(fee)} Dinar** to raid this ${entry.rarity} card (you have **${fmt(dinarOf(s, raider))}**).`));
+    const comp = Math.min(RAID_DEFEND_REWARD, fee);   // flat 50, but never more than the raider paid (no minting)
+
+    // Post the alert first; only charge if it actually posts.
+    await interaction.reply({
+      content: `<@${owner.id}>`,
+      embeds: [new EmbedBuilder().setColor(0xE74C3C).setTitle('🚨 Raid Alert!')
+        .setDescription(
+          `<@${raider}> is attempting to acquire ${TIER_EMOJI[entry.rarity]} <@${card.id}> (**${entry.rarity}** · 💰 ${fmt(entry.value)}) from <@${owner.id}>'s collection.\n\n` +
+          `<@${owner.id}> — react with ${RAID_EMOJI} within **10 hours** to defend your ownership.\n` +
+          `If you don't defend in time, the card transfers to <@${raider}>.`)
+        .setFooter({ text: `Raid fee: ${fmt(fee)} Dinar · defend to keep the card and earn ${fmt(comp)} Dinar` })],
+      allowedMentions: { users: [owner.id] },
+    });
+    const msg = await interaction.fetchReply();
+    await msg.react(RAID_EMOJI).catch(() => {});
+
+    // Charge + record only after a successful post.
+    addDinar(s, raider, -fee);
+    s.raidUserCd[raider]  = Date.now();
+    s.raidCardCd[card.id] = Date.now();
+    s.raids[`${card.id}-${Date.now()}`] = {
+      raider, owner: owner.id, cardId: card.id, fee, comp, rarity: entry.rarity,
+      messageId: msg.id, channelId: msg.channelId || msg.channel?.id,
+      createdAt: Date.now(), expiresAt: Date.now() + RAID_DEFEND_MS,
+    };
+    saveData(gid);
+  }
+
+  // Resolve a raid. outcome: 'defended' (owner kept it) | 'success' (transfers to raider).
+  async function resolveRaid(s, gid, raidId, outcome, message) {
+    const r = s.raids[raidId];
+    if (!r) return;
+    delete s.raids[raidId];
+    s.raidCardCd[r.cardId] = Date.now();   // start the 2-day protection from resolution
+
+    if (outcome === 'defended') {
+      addDinar(s, r.owner, r.comp);
+      saveData(gid);
+      const defendedEmbed = new EmbedBuilder().setColor(0x2ECC71).setTitle('🛡️ Raid Defended!')
+        .setDescription(`<@${r.owner}> defended ${TIER_EMOJI[r.rarity]} <@${r.cardId}>! <@${r.raider}>'s raid failed.\n\n<@${r.raider}> lost the **${fmt(r.fee)} Dinar** fee, and <@${r.owner}> earned **+${fmt(r.comp)} Dinar** for defending.`);
+      await announceRaidResult(r, defendedEmbed, message);
+    } else {
+      const transferred = s.owners[r.cardId] === r.owner;   // guard against trade/release mid-raid
+      if (transferred) s.owners[r.cardId] = r.raider;
+      saveData(gid);
+      const successEmbed = new EmbedBuilder().setColor(0xE67E22).setTitle(transferred ? '⚔️ Raid Successful!' : '⚔️ Raid Ended')
+        .setDescription(transferred
+          ? `<@${r.owner}> didn't defend in time — ${TIER_EMOJI[r.rarity]} <@${r.cardId}> now belongs to <@${r.raider}>!\n\nFee paid: **${fmt(r.fee)} Dinar**.`
+          : `The raid on <@${r.cardId}> ended, but its ownership had already changed. <@${r.raider}>'s **${fmt(r.fee)} Dinar** fee was spent.`);
+      await announceRaidResult(r, successEmbed, message);
+    }
+  }
+
+  // Reliably announce a raid result as a FRESH message in the channel (interaction-reply
+  // alerts can't always be edited later), then best-effort edit/clear the original alert.
+  async function announceRaidResult(r, embed, message) {
+    let channel = null;
+    try { channel = await client.channels.fetch(r.channelId); } catch {}
+    if (channel) await channel.send({ embeds: [embed] }).catch((e) => console.error('[gacha] raid announce:', e.message));
+    try {
+      const original = message || (channel && await channel.messages.fetch(r.messageId).catch(() => null));
+      if (original) { await original.edit({ embeds: [embed] }).catch(() => {}); await original.reactions.removeAll().catch(() => {}); }
+    } catch { /* original gone or not editable — the fresh announcement already covered it */ }
+  }
+
+  // Keep a raid message clean: only the targeted owner's ❌ may remain. Removes any
+  // other emoji entirely, and any ❌ added by someone other than the owner.
+  // (Requires the bot to have the Manage Messages permission in that channel.)
+  async function enforceRaidReactions(message, ownerId) {
+    if (!message?.reactions) return;
+    for (const rx of message.reactions.cache.values()) {
+      if (rx.emoji.name !== RAID_EMOJI) { await rx.remove().catch(() => {}); continue; }
+      let users; try { users = await rx.users.fetch(); } catch { continue; }
+      for (const u of users.values()) {
+        if (!u.bot && u.id !== ownerId) await rx.users.remove(u.id).catch(() => {});
+      }
+    }
+  }
+
+  // ── /gacha-trade ───────────────────────────────────────────────────────────
+  async function cmdTrade(interaction, s) {
+    const uid = interaction.user.id;
+    if (!s.tradingEnabled) return interaction.reply(eph('🚫 Trading is currently disabled.'));
+    const other = interaction.options.getUser('with');
+    const give  = interaction.options.getUser('give');
+    const recv  = interaction.options.getUser('receive');
+    if (other.id === uid) return interaction.reply(eph('You can\'t trade with yourself.'));
+    if (other.bot)        return interaction.reply(eph('You can\'t trade with a bot.'));
+    if (s.owners[give.id] !== uid)     return interaction.reply(eph(`You don't own <@${give.id}>.`));
+    if (s.owners[recv.id] !== other.id) return interaction.reply(eph(`<@${other.id}> doesn't own <@${recv.id}>.`));
+    if (cardHasActiveRaid(s, give.id) || cardHasActiveRaid(s, recv.id)) return interaction.reply(eph('A card in this trade is under an active raid — wait for it to resolve first.'));
+    const tradeId = `${uid}-${Date.now()}`;
+    s.trades[tradeId] = { from: uid, to: other.id, give: give.id, receive: recv.id, ts: Date.now() };
+    saveData(interaction.guild.id);
+    const embed = new EmbedBuilder().setColor(0x3498DB).setTitle('🔁 Trade Offer')
+      .setDescription(`<@${uid}> offers <@${give.id}> for your <@${recv.id}>.\n<@${other.id}>, do you accept?`);
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`gacha_trade_ok:${tradeId}`).setLabel('Accept').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId(`gacha_trade_no:${tradeId}`).setLabel('Decline').setStyle(ButtonStyle.Danger));
+    return interaction.reply({ content: `<@${other.id}>`, embeds: [embed], components: [row], allowedMentions: { users: [other.id] } });
+  }
+
+  // ── /gacha-leaderboard ─────────────────────────────────────────────────────
+  function cmdLeaderboard(interaction, s) {
+    ensureFreshRarities(db, interaction.guild.id);
+    const owners = {};
+    for (const cid of Object.keys(s.owners)) {
+      const o = s.owners[cid];
+      (owners[o] ||= { count: 0, value: 0 });
+      owners[o].count++; owners[o].value += s.pool[cid]?.value || 0;
+    }
+    const ranked = Object.entries(owners).sort((a, b) => b[1].value - a[1].value).slice(0, 10);
+    const embed = new EmbedBuilder().setColor(0xF1C40F).setTitle('🏆 Collection Leaderboard')
+      .setDescription(ranked.length ? ranked.map(([id, d], i) => `**${i + 1}.** <@${id}> — ${d.count} members · 💰 ${fmt(d.value)} Dinar`).join('\n') : '_No collections yet._');
+    return interaction.reply({ embeds: [embed] });
+  }
+
+  // ── /gacha-list (private — may be a long list) ─────────────────────────────
+  function cmdList(interaction, s) {
+    ensureFreshRarities(db, interaction.guild.id);
+    const ids = Object.keys(s.pool);
+    if (!ids.length) return interaction.reply(eph('Nobody is opted in yet. Be the first with `/gacha-optin`!'));
+    const ranked = ids.map(id => ({ id, ...s.pool[id] })).sort((a, b) => (b.value - a.value) || (b.score - a.score));
+    const lines = ranked.map(e => `${TIER_EMOJI[e.rarity]} <@${e.id}>${s.owners[e.id] ? ' 🔒' : ''}`);
+    let desc = '', shown = 0;
+    for (const line of lines) {
+      if (desc.length + line.length + 1 > 3800) break;
+      desc += (desc ? '\n' : '') + line; shown++;
+    }
+    if (shown < lines.length) desc += `\n…and ${lines.length - shown} more`;
+    const embed = new EmbedBuilder().setColor(0x2ECC71)
+      .setTitle(`🎴 Opted-in Members (${ids.length})`).setDescription(desc)
+      .setFooter({ text: '🔒 = already owned' });
+    return interaction.reply({ embeds: [embed], flags: 64 });
+  }
+
+  // ── Buttons ────────────────────────────────────────────────────────────────
+  async function handleButton(interaction) {
+    const s = getState(db, interaction.guild.id);
+    const [action, arg] = interaction.customId.split(':');
+    if (!s.enabled) return interaction.reply(eph('🚫 The collection game is disabled.')).catch(() => {});
+
+    if (action === 'gacha_claim') {
+      const memberId = arg;
+      const uid = interaction.user.id;
+      const lr = liveRolls[interaction.message.id];
+      if (!lr || lr.memberId !== memberId || lr.type !== 'claim' || lr.claimed || Date.now() > lr.expiresAt) {
+        return interaction.reply(eph('⌛ Too late — this card is no longer claimable.'));
+      }
+      if (!s.pool[uid]) return interaction.reply(eph('🎴 You need to join the game before you can collect cards! Use `/gacha-optin` to opt in, then come back and claim.'));
+      if (s.owners[memberId]) return interaction.reply(eph(`Already owned by <@${s.owners[memberId]}>.`));
+      if (memberId === uid)   return interaction.reply(eph('You can\'t own yourself!'));
+      const cd = (s.cooldowns[uid] ||= {});
+      const csince = Date.now() - (cd.claim || 0);
+      if (csince < CLAIM_COOLDOWN_MS) {
+        const left = CLAIM_COOLDOWN_MS - csince;
+        return interaction.reply(eph(`⏳ You've claimed recently. Next claim in ${Math.floor(left / 3600000)}h ${Math.ceil((left % 3600000) / 60000)}m.`));
+      }
+      const cost = s.pool[memberId]?.value || 0;
+      if (dinarOf(s, uid) < cost) {
+        return interaction.reply(eph(`💰 You need **${fmt(cost)} Dinar** to claim this ${s.pool[memberId]?.rarity || ''} card, but you only have **${fmt(dinarOf(s, uid))}**. Earn more with \`/gacha-daily\` and the other games.`));
+      }
+      addDinar(s, uid, -cost);
+      lr.claimed = true;
+      s.owners[memberId] = uid;
+      cd.claim = Date.now();
+      (s.stats[uid] ||= { rolls: 0, claims: 0 }).claims++;
+      delete liveRolls[interaction.message.id];
+      saveData(interaction.guild.id);
+      await interaction.update({ components: [] }).catch(() => {});
+      return interaction.followUp({ content: `🎴 <@${uid}> claimed <@${memberId}> for 💰 ${fmt(cost)} Dinar!` }).catch(() => {});
+    }
+
+    if (action === 'gacha_dinardrop') {
+      const uid = interaction.user.id;
+      const lr = liveRolls[interaction.message.id];
+      if (!lr || lr.type !== 'dinardrop' || lr.dinarClaimed || Date.now() > lr.expiresAt) {
+        return interaction.reply(eph('⌛ Too late — the Dinar has already been grabbed.'));
+      }
+      if (!s.pool[uid]) return interaction.reply(eph('💵 You need to join the game before you can collect Dinar! Use `/gacha-optin` to opt in.'));
+      lr.dinarClaimed = true;
+      const amount = DINAR_DROP_MIN + Math.floor(Math.random() * (DINAR_DROP_MAX - DINAR_DROP_MIN + 1));
+      addDinar(s, uid, amount);
+      delete liveRolls[interaction.message.id];
+      saveData(interaction.guild.id);
+      await interaction.update({ components: [] }).catch(() => {});
+      return interaction.followUp({ content: `💵 <@${uid}> grabbed **${fmt(amount)} Dinar**!` }).catch(() => {});
+    }
+
+    if (action === 'gacha_optout_cancel') {
+      return interaction.update({ content: "✅ Cancelled — you're still in the collection game.", components: [] }).catch(() => {});
+    }
+
+    if (action === 'gacha_optout_confirm') {
+      const uid = interaction.user.id;
+      if (!s.pool[uid]) return interaction.update({ content: "You're already opted out.", components: [] }).catch(() => {});
+      const penalty = Math.floor(dinarOf(s, uid) * 0.75);
+      if (penalty > 0) addDinar(s, uid, -penalty);
+      const released = collectionOf(s, uid);
+      for (const cid of released) delete s.owners[cid];   // their collection returns to the pool
+      dissolveMember(s, uid);                              // remove them as a card + clear claims/wishlists of them
+      recomputeRarities(db, interaction.guild.id);
+      saveData(interaction.guild.id);
+      await interaction.update({
+        content:
+          `👋 You've opted out of the collection game.\n\n` +
+          `• Lost **${fmt(penalty)} Dinar** (you kept **${fmt(dinarOf(s, uid))}**).\n` +
+          `• Released **${released.length}** card${released.length === 1 ? '' : 's'} back into the pool.\n` +
+          `• Removed you as a card and cleared all claims and wishlists involving you.`,
+        components: [],
+      }).catch(() => {});
+      return;
+    }
+
+    if (action === 'gacha_trade_ok' || action === 'gacha_trade_no') {
+      const trade = s.trades[arg];
+      if (!trade) return interaction.reply(eph('This trade offer has expired or was already handled.'));
+      if (interaction.user.id !== trade.to) return interaction.reply(eph('Only the person being offered can respond.'));
+      if (Date.now() - trade.ts > TRADE_TTL_MS) { delete s.trades[arg]; saveData(interaction.guild.id); return interaction.reply(eph('This trade offer has expired.')); }
+      if (action === 'gacha_trade_no') {
+        delete s.trades[arg]; saveData(interaction.guild.id);
+        await interaction.update({ components: [] }).catch(() => {});
+        return interaction.followUp(eph('Trade declined.')).catch(() => {});
+      }
+      if (s.owners[trade.give] !== trade.from || s.owners[trade.receive] !== trade.to) {
+        delete s.trades[arg]; saveData(interaction.guild.id);
+        return interaction.reply(eph('Trade failed — ownership changed.'));
+      }
+      s.owners[trade.give] = trade.to;
+      s.owners[trade.receive] = trade.from;
+      delete s.trades[arg];
+      saveData(interaction.guild.id);
+      await interaction.update({ components: [] }).catch(() => {});
+      return interaction.followUp({ content: `✅ Trade complete! <@${trade.from}> ⇄ <@${trade.to}>.` }).catch(() => {});
+    }
+  }
+
+  // ── Admin ──────────────────────────────────────────────────────────────────
+  async function cmdAdmin(interaction, s) {
+    if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) return interaction.reply(eph('🚫 Admins only.'));
+    const sub = interaction.options.getSubcommand();
+    const gid = interaction.guild.id;
+    if (sub === 'toggle')  { s.enabled = interaction.options.getString('state') === 'on'; saveData(gid); return interaction.reply(eph(`Game is now **${s.enabled ? 'enabled' : 'disabled'}**.`)); }
+    if (sub === 'trading') { s.tradingEnabled = interaction.options.getString('state') === 'on'; saveData(gid); return interaction.reply(eph(`Trading is now **${s.tradingEnabled ? 'enabled' : 'disabled'}**.`)); }
+    if (sub === 'raids')   { s.raidsEnabled = interaction.options.getString('state') === 'on'; saveData(gid); return interaction.reply(eph(`Raids are now **${s.raidsEnabled ? 'enabled' : 'disabled'}**. ${!s.raidsEnabled ? 'Existing raids will still resolve.' : ''}`)); }
+    if (sub === 'channel') {
+      const act = interaction.options.getString('action');
+      if (act === 'clear') { s.channels = []; saveData(gid); return interaction.reply(eph('✅ Cleared — the game now works everywhere.')); }
+      const ch = interaction.options.getChannel('channel');
+      if (!ch) return interaction.reply(eph('Pick a channel for add/remove.'));
+      if (act === 'add') { if (!s.channels.includes(ch.id)) s.channels.push(ch.id); } else s.channels = s.channels.filter(c => c !== ch.id);
+      saveData(gid);
+      return interaction.reply(eph(`✅ Allowed channels: ${s.channels.length ? s.channels.map(c => `<#${c}>`).join(', ') : 'everywhere'}.`));
+    }
+    if (sub === 'rollchannel') {
+      const act = interaction.options.getString('action');
+      if (!s.rollChannels) s.rollChannels = [];
+      if (act === 'clear') { s.rollChannels = []; saveData(gid); return interaction.reply(eph('✅ Cleared — `/gacha-roll` now works in any channel the game allows.')); }
+      const ch = interaction.options.getChannel('channel');
+      if (!ch) return interaction.reply(eph('Pick a channel for add/remove.'));
+      if (act === 'add') { if (!s.rollChannels.includes(ch.id)) s.rollChannels.push(ch.id); } else s.rollChannels = s.rollChannels.filter(c => c !== ch.id);
+      saveData(gid);
+      return interaction.reply(eph(`✅ \`/gacha-roll\` is now allowed in: ${s.rollChannels.length ? s.rollChannels.map(c => `<#${c}>`).join(', ') : 'any channel (no roll restriction)'}.`));
+    }
+    if (sub === 'optin') {
+      const u = interaction.options.getUser('user');
+      if (s.pool[u.id]) return interaction.reply(eph(`<@${u.id}> is already opted in.`));
+      s.pool[u.id] = { rarity: 'Common', score: 0, value: TIER_VALUE.Common, rarityOverride: null, valueOverride: null };
+      recomputeRarities(db, gid); saveData(gid);
+      return interaction.reply(eph(`✅ Forced <@${u.id}> into the game as ${TIER_EMOJI[s.pool[u.id].rarity]} ${s.pool[u.id].rarity}.`));
+    }
+    if (sub === 'resetroll') {
+      const u = interaction.options.getUser('user');
+      if (u) {
+        if (s.cooldowns[u.id]) { delete s.cooldowns[u.id].roll; delete s.cooldowns[u.id].claim; }
+        saveData(gid);
+        return interaction.reply(eph(`✅ Roll & claim cooldowns reset for <@${u.id}>.`));
+      }
+      for (const k of Object.keys(s.cooldowns)) { delete s.cooldowns[k].roll; delete s.cooldowns[k].claim; }
+      saveData(gid);
+      return interaction.reply(eph('✅ Roll & claim cooldowns reset for **everyone**.'));
+    }
+    if (sub === 'resetraid') {
+      const u = interaction.options.getUser('user');
+      s.raidCardCd = {};   // clear all 2-day per-card protections so any card can be re-raided
+      if (u) {
+        delete s.raidUserCd[u.id];
+        saveData(gid);
+        return interaction.reply(eph(`✅ Raid cooldown reset for <@${u.id}>, and all card protections cleared.`));
+      }
+      s.raidUserCd = {};
+      saveData(gid);
+      return interaction.reply(eph('✅ Raid cooldowns reset for **everyone**, and all card protections cleared.'));
+    }
+    if (sub === 'override') {
+      const u = interaction.options.getUser('user');
+      if (!s.pool[u.id]) return interaction.reply(eph('That member isn\'t opted in.'));
+      const rarity = interaction.options.getString('rarity');
+      const value  = interaction.options.getInteger('value');
+      if (rarity != null) s.pool[u.id].rarityOverride = rarity === 'clear' ? null : rarity;
+      if (value  != null) s.pool[u.id].valueOverride  = value < 0 ? null : value;
+      recomputeRarities(db, gid); saveData(gid);
+      return interaction.reply(eph(`✅ <@${u.id}> → ${TIER_EMOJI[s.pool[u.id].rarity]} ${s.pool[u.id].rarity} · 💰 ${fmt(s.pool[u.id].value)} Dinar.`));
+    }
+    if (sub === 'release') {
+      const u = interaction.options.getUser('user');
+      if (!s.owners[u.id]) return interaction.reply(eph('That member isn\'t currently owned.'));
+      const prev = s.owners[u.id]; delete s.owners[u.id]; saveData(gid);
+      return interaction.reply(eph(`✅ Released <@${u.id}> from <@${prev}>.`));
+    }
+    if (sub === 'forceremove') {
+      const u = interaction.options.getUser('user');
+      dissolveMember(s, u.id); recomputeRarities(db, gid); saveData(gid);
+      return interaction.reply(eph(`✅ Removed <@${u.id}> from the game and dissolved all claims/wishlists of them.`));
+    }
+    if (sub === 'recompute') { recomputeRarities(db, gid); saveData(gid); return interaction.reply(eph('✅ Rarities recomputed from current stats.')); }
+  }
 }
 
-module.exports = { getDiyarCommands, initDiyar };
+module.exports = { getGachaCommands, initGacha, awardDinar, isAtDinarCap, dinarDailyCap, getDinar, spendDinar };
