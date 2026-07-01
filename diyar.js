@@ -22,11 +22,13 @@ const STARTER_ARMY        = 40;
 const TROOP_COST          = 1.5;                    // Dinar per troop
 const SHIELD_MS           = 0;                     // truce disabled (no starting truce, no post-raid shield)
 const ATTACK_COOLDOWN_MS  = 30 * 60 * 1000;     // between your own attacks
+const RAID_WINDOW_MS      = 30 * 1000;          // PvP raids run live for 30s so the defender can rally
+const REINFORCE_MULT      = 2.0;                // defence boost if the defender reinforces in time (bonus, never a penalty)
 const LOOT_PCT            = 0.20;                  // share of a defender's Dinar stolen on a win (transfer, not minted)
 const CAPTURE_RATIO       = 1.4;                   // must out-power a PLAYER city this much to seize it
 const MATCH_BAND          = 3.0;                   // can't punch down: target strength must be ≥ yours / band
-const NPC_LOOT_PER_LEVEL  = 100;                    // PvE loot from neutral militias (minted, small)
-const INCOME_PER_LEVEL_HR = 4;                     // Dinar/hour per city level
+const LOOT_BY_LEVEL       = [0, 50, 80, 120];       // minted raid loot by city level (defender loses nothing)
+const INCOME_PER_LEVEL_HR = 20;                    // Dinar/hour per city level (20/40/60)
 const INCOME_CAP_HRS      = 12;                    // accrual caps at 12h, so you must collect
 const UPG_MAX             = 10;
 const UPG_BASE            = { mil: 240, for: 200, eco: 180 };   // cost = base × (level+1)
@@ -41,8 +43,8 @@ const upgCost = (track, lvl) => UPG_BASE[track] * (lvl + 1) * (lvl >= 3 ? 2 : 1)
 
 // ─── Boss ───────────────────────────────────────────────────────────────────
 const BOSS_DURATION_MS    = 6 * 3600 * 1000;      // time to defeat before it pillages
-const BOSS_STRIKE_CD_MS   = 5 * 1000;             // per-player strike cooldown (5s)
-const BOSS_BASE_HP        = 500;
+const BOSS_STRIKE_CD_MS   = 30 * 1000;            // per-player strike cooldown (30s)
+const BOSS_HP             = 10000;                 // flat boss HP
 const BOSS_HP_PER_PLAYER  = 0;                     // flat HP (raise this to scale with player count)
 const BOSS_SPAWNS_PER_DAY = 2;
 const BOSS_WIN_START      = 11;                    // Libya-time window for spawns
@@ -150,7 +152,6 @@ function svgToPng(svg) {
 // ════════════════════════════════════════════════════════════════════════════
 function renderMap(state, viewerId) {
   const W = MAP_W + MAP_PAD * 2;
-  const H = MAP_H + MAP_PAD * 2 + 46;
   const poly = BORDER.map(([lo, la]) => `${projX(lo).toFixed(0)},${(projY(la) + 40).toFixed(0)}`).join(' ');
 
   let mine = 0, rival = 0, neutral = 0, nodes = '';
@@ -173,29 +174,41 @@ function renderMap(state, viewerId) {
     nodes += `<text x="${lxx.toFixed(0)}" y="${lyy.toFixed(0)}" font-size="14" fill="#f5e9c8" text-anchor="middle">${esc(c.name)}</text>`;
   }
 
-  const title = viewerId ? 'Diyar — Your Realm' : 'Diyar — Map of Libya';
-  let legend = `<text x="${MAP_PAD}" y="30" font-size="20" fill="#f1c40f">${title}</text>`;
-  let lx = MAP_PAD; const ly = H - 14;
-  const swatch = (color, label) => {
-    const sw = `<rect x="${lx}" y="${ly - 11}" width="13" height="13" rx="2" fill="${color}"/><text x="${lx + 18}" y="${ly}" font-size="13" fill="#cbd3da">${esc(label)}</text>`;
-    lx += 40 + label.length * 7.5; return sw;
-  };
+  // legend — wraps onto stacked rows so many owners never run off the edge
+  const items = [];
   if (viewerId) {
-    legend += swatch(COL_YOU, `Your cities (${mine})`);
-    legend += swatch(COL_RIVAL, `Rivals (${rival})`);
-    legend += swatch(NEUTRAL, `Neutral (${neutral})`);
+    items.push([COL_YOU, `Your cities (${mine})`], [COL_RIVAL, `Rivals (${rival})`], [NEUTRAL, `Neutral (${neutral})`]);
   } else {
-    legend += swatch(NEUTRAL, 'Neutral');
-    const owners = Object.entries(state.players).map(([id, p]) => ({ id, p, n: p.cities.length }))
+    items.push([NEUTRAL, 'Neutral']);
+    const owners = Object.entries(state.players).map(([id, p]) => ({ p, n: p.cities.length }))
       .filter(o => o.n > 0).sort((a, b) => b.n - a.n);
-    for (const o of owners.slice(0, 7)) legend += swatch(o.p.color, `${o.p.name} (${o.n})`);
+    for (const o of owners.slice(0, 20)) items.push([o.p.color, `${o.p.name} (${o.n})`]);
   }
+  const wOf = (label) => 34 + String(label).length * 7.8;
+  const maxRowW = MAP_W - 8;
+  const rows = [[]]; let rowW = 0;
+  for (const it of items) {
+    const w = wOf(it[1]);
+    if (rowW + w > maxRowW && rows[rows.length - 1].length) { rows.push([]); rowW = 0; }
+    rows[rows.length - 1].push(it); rowW += w;
+  }
+  const rowH = 24;
+  const legendTopY = MAP_PAD + 40 + MAP_H + 30;
+  const H = legendTopY + (rows.length - 1) * rowH + 16;
+  let legend = `<text x="${MAP_PAD}" y="30" font-size="20" fill="#f1c40f">${viewerId ? 'Diyar — Your Realm' : 'Diyar — Map of Libya'}</text>`;
+  rows.forEach((row, ri) => {
+    let lx = MAP_PAD; const ly = legendTopY + ri * rowH;
+    for (const [color, label] of row) {
+      legend += `<rect x="${lx}" y="${ly - 11}" width="13" height="13" rx="2" fill="${color}"/><text x="${lx + 18}" y="${ly}" font-size="13" fill="#cbd3da">${esc(label)}</text>`;
+      lx += wOf(label);
+    }
+  });
 
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" font-family="DejaVu Sans, sans-serif">
     <rect width="${W}" height="${H}" fill="#10243a"/>
-    ${legend}
     <polygon points="${poly}" fill="#cbb074" stroke="#8a6d3b" stroke-width="3"/>
     ${nodes}
+    ${legend}
   </svg>`;
   return new AttachmentBuilder(svgToPng(svg), { name: 'diyar-map.png' });
 }
@@ -405,7 +418,21 @@ function buyWeapon(state, db, guildId, saveData, userId) {
 }
 
 // returns {error} or a full battle result for rendering
-function resolveAttack(state, db, guildId, saveData, attackerId, cityId, sendPct) {
+// the real defensive strength of a city (garrison + walls + city-size bonus) — shown everywhere so
+// the dropdown, the confirm and the result all agree instead of the old raw-garrison number
+function effectiveDefence(state, city, reinforceMult) {
+  const owner = city.ownerId ? state.players[city.ownerId] : null;
+  const dMultBase = 1 + (owner ? owner.upg.for * 0.15 : 0) + city.level * 0.1;
+  const lastStand = (owner && owner.cities.length === 1) ? 1.5 : 1.0;
+  return Math.round((city.garrison * dMultBase * lastStand + city.level * 8) * (reinforceMult || 1));
+}
+// the real attack strength of a force (troops + weapon tier + military upgrades)
+function effectiveAttack(attacker, send) {
+  return Math.round(send * (1 + attacker.weaponTier * 0.15 + attacker.upg.mil * 0.12));
+}
+
+// validate a raid and lock the committed troops; returns {error} or {pending}
+function startRaid(state, db, guildId, saveData, attackerId, cityId, sendPct) {
   const attacker = state.players[attackerId];
   const city = state.cities[cityId];
   if (!attacker || !city) return { error: 'Not found.' };
@@ -413,6 +440,8 @@ function resolveAttack(state, db, guildId, saveData, attackerId, cityId, sendPct
   const now = Date.now();
   if (now - attacker.lastAttackAt < ATTACK_COOLDOWN_MS)
     return { error: `Your army is regrouping. Ready in ${msLeft(attacker.lastAttackAt + ATTACK_COOLDOWN_MS)}.` };
+  if (state.pendingRaids && Object.values(state.pendingRaids).some(p => p.cityId === cityId))
+    return { error: 'That city is already under attack — wait for the current raid to finish.' };
 
   const owner = city.ownerId ? state.players[city.ownerId] : null;
   if (owner) {
@@ -423,52 +452,58 @@ function resolveAttack(state, db, guildId, saveData, attackerId, cityId, sendPct
 
   const send = Math.floor(attacker.army * sendPct);
   if (send < 1) return { error: 'You have no troops to send. Recruit an army first.' };
+  attacker.army -= send;         // lock the committed troops for the duration of the raid
+  attacker.lastAttackAt = now;   // cooldown starts at commit
+  if (saveData) saveData(guildId);
+  return { pending: {
+    attackerId, attackerName: attacker.name, cityId, cityName: city.name,
+    defenderId: city.ownerId, defenderName: owner ? owner.name : null, send, startedAt: now,
+  } };
+}
+
+// resolve a locked raid (optionally boosted by a defender reinforcement) and apply loot/capture/casualties
+function resolveRaid(state, db, guildId, saveData, pending, reinforceMult) {
+  const attacker = state.players[pending.attackerId];
+  const city = state.cities[pending.cityId];
+  const send = pending.send;
+  if (!attacker) return null;
+  if (!city) { attacker.army += send; return null; }   // city vanished — refund troops
+  const now = Date.now();
+  const owner = city.ownerId ? state.players[city.ownerId] : null;
+  const rMult = reinforceMult || 1;
 
   const aMult = 1 + attacker.weaponTier * 0.15 + attacker.upg.mil * 0.12;
   const aPow = send * aMult * rnd(0.85, 1.15);
   const dMultBase = 1 + (owner ? owner.upg.for * 0.15 : 0) + city.level * 0.1;
-  const lastStand = (owner && owner.cities.length === 1) ? 1.5 : 1.0;   // underdog defending their last city
-  const dPow = (city.garrison * dMultBase * lastStand + city.level * 8) * rnd(0.85, 1.15);
-
+  const lastStand = (owner && owner.cities.length === 1) ? 1.5 : 1.0;
+  const dPow = (city.garrison * dMultBase * lastStand + city.level * 8) * rMult * rnd(0.85, 1.15);
   const win = aPow > dPow;
-  attacker.army -= send;
+
   const result = {
-    attackerId, attackerName: attacker.name, cityId, cityName: city.name,
-    defenderId: city.ownerId, defenderName: owner ? owner.name : null,
-    send, win, defShown: Math.round(city.garrison * dMultBase * lastStand + city.level * 8),
+    attackerId: pending.attackerId, attackerName: pending.attackerName, cityId: city.id, cityName: city.name,
+    defenderId: city.ownerId, defenderName: owner ? owner.name : (pending.defenderName || null),
+    send, win, reinforced: rMult > 1,
+    defShown: effectiveDefence(state, city, rMult), atkShown: effectiveAttack(attacker, send),
     cas: 0, survivors: 0, stolen: 0, captured: false,
   };
 
   if (win) {
     const cas = Math.round(send * clamp(dPow / aPow, 0, 1) * 0.4);
     let survivors = send - cas;
-    // loot
-    if (owner) {
-      const protect = 1 - owner.upg.eco * 0.04;
-      const defenderDinar = getDinar(db, guildId, city.ownerId);
-      const stolen = Math.min(Math.round(defenderDinar * LOOT_PCT * protect), defenderDinar);
-      if (stolen > 0) { spendDinar(db, guildId, city.ownerId, stolen, saveData); awardDinar(db, guildId, attackerId, stolen, saveData); }
-      result.stolen = stolen;
-    } else {
-      const stolen = city.level * NPC_LOOT_PER_LEVEL;
-      awardDinar(db, guildId, attackerId, stolen, saveData);
-      result.stolen = stolen;
-    }
-    // any successful raid seizes the city (the match-band already stops you punching down)
-    {
-      if (owner) { owner.cities = owner.cities.filter(id => id !== cityId); owner.stats.lost++; }
-      city.ownerId = attackerId; city.npc = false;
-      attacker.cities.push(cityId);
-      const g = Math.round(survivors * 0.35);
-      city.garrison = g; survivors -= g; city.lastIncomeAt = now;
-      attacker.stats.captured++;
-      result.captured = true;
-    }
+    const stolen = LOOT_BY_LEVEL[city.level] || LOOT_BY_LEVEL[1];   // minted; defender loses nothing
+    awardDinar(db, guildId, pending.attackerId, stolen, saveData);
+    result.stolen = stolen;
+    if (owner) { owner.cities = owner.cities.filter(id => id !== city.id); owner.stats.lost++; }
+    city.ownerId = pending.attackerId; city.npc = false;
+    attacker.cities.push(city.id);
+    const g = Math.round(survivors * 0.35);
+    city.garrison = g; survivors -= g; city.lastIncomeAt = now;
+    attacker.stats.captured++; result.captured = true;
     attacker.army += survivors;
     attacker.stats.raidsWon++;
     result.cas = cas; result.survivors = survivors;
   } else {
-    const cas = Math.round(send * clamp(aPow / dPow, 0, 1) * 0.6);    // heavy losses on a failed raid
+    const cas = Math.round(send * clamp(aPow / dPow, 0, 1) * 0.6);
     const survivors = send - cas;
     city.garrison = Math.max(0, city.garrison - Math.round(city.garrison * clamp(aPow / dPow, 0, 1) * 0.4));
     attacker.army += survivors;
@@ -476,19 +511,58 @@ function resolveAttack(state, db, guildId, saveData, attackerId, cityId, sendPct
     if (owner) owner.stats.defended++;
     result.cas = cas; result.survivors = survivors;
   }
-
-  if (owner) owner.shieldUntil = now + SHIELD_MS;   // protect the raided player from being farmed
-  attacker.lastAttackAt = now;
-  saveData(guildId);
+  if (owner) owner.shieldUntil = now + SHIELD_MS;
+  if (saveData) saveData(guildId);
   return result;
+}
+
+// instant raid (neutral militias, and the compatibility path used by tests)
+function resolveAttack(state, db, guildId, saveData, attackerId, cityId, sendPct) {
+  const r = startRaid(state, db, guildId, saveData, attackerId, cityId, sendPct);
+  if (r.error) return r;
+  return resolveRaid(state, db, guildId, saveData, r.pending, 1);
+}
+
+const raidBar = (val, max) => { const n = Math.max(0, Math.min(12, Math.round(val / (max || 1) * 12))); return '🟥'.repeat(n) + '⬛'.repeat(12 - n); };
+
+// the live 30s countdown embed shown in the war room while a PvP raid plays out
+function raidLiveEmbed(state, raid, secsLeft) {
+  const city = state.cities[raid.cityId];
+  const atk = effectiveAttack(state.players[raid.attackerId] || { weaponTier: 0, upg: { mil: 0 } }, raid.send);
+  const def = effectiveDefence(state, city, raid.reinforced ? REINFORCE_MULT : 1);
+  const mx = Math.max(atk, def, 1);
+  const desc =
+    `**${raid.attackerName}** storms **${city.name}**${raid.defenderName ? ` — held by **${raid.defenderName}**` : ''}!\n\n` +
+    `⚔ Attackers\n\`${raidBar(atk, mx)}\` **${fmt(atk)}**\n\n` +
+    `🛡 Defenders\n\`${raidBar(def, mx)}\` **${fmt(def)}**${raid.reinforced ? '  🛡️ *reinforced!*' : ''}\n\n` +
+    (raid.reinforced
+      ? `🛡️ Reinforcements have arrived — the walls hold far stronger! Bracing for the outcome…`
+      : `⏳ **${secsLeft}s** — defender, hit **Send Reinforcements** to rally your garrison!`);
+  return new EmbedBuilder().setColor(raid.reinforced ? COLOR.blue : COLOR.red).setTitle(`⚔ Battle for ${city.name}`).setDescription(desc);
+}
+
+// the final text result (replaces the old still image)
+function raidResultEmbed(r) {
+  const title = r.win ? (r.captured ? `🏴 ${r.cityName} has fallen!` : `⚔ ${r.cityName} — Raided`) : `🛡 ${r.cityName} — Defended`;
+  const outcome = r.win
+    ? `**Victory!** ${r.captured ? `**${r.attackerName}** plants their banner over **${r.cityName}**. ` : ''}Looted **${fmt(r.stolen)} Dinar**.\nLost **${fmt(r.cas)}** troops • **${fmt(r.survivors)}** marched home.`
+    : `**Repelled!** ${r.defenderName || 'The militia'} held the walls${r.reinforced ? ' with reinforcements' : ''}.\n**${r.attackerName}** lost **${fmt(r.cas)}** troops • **${fmt(r.survivors)}** limped home.`;
+  const desc =
+    `⚔ **${r.attackerName}** — **${fmt(r.send)}** troops • power **${fmt(r.atkShown)}**\n` +
+    `🛡 **${r.defenderName || 'Militia'}** — defence power **${fmt(r.defShown)}**${r.reinforced ? ' 🛡️' : ''}\n\n${outcome}`;
+  return new EmbedBuilder().setColor(r.win ? COLOR.green : COLOR.red).setTitle(title).setDescription(desc);
+}
+
+function reinforceRow(raidId) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`dy:reinf:${raidId}`).setLabel('🛡 Send Reinforcements').setStyle(ButtonStyle.Success));
 }
 
 // ─── Boss ─────────────────────────────────────────────────────────────────
 function spawnBoss(state, saveData, guildId) {
   if (state.boss) return null;
   const def = BOSS_DEFS[Math.floor(Math.random() * BOSS_DEFS.length)];
-  // HP scales 500 → 5000 at random, with bigger threats rarer (skewed toward the low end)
-  const hpMax = Math.round((500 + Math.pow(Math.random(), 2.5) * 4500) / 50) * 50;
+  const hpMax = BOSS_HP;
   const owned = CITY_DEFS.map(c => state.cities[c.id]).filter(c => c.ownerId);
   const target = owned.length ? owned[Math.floor(Math.random() * owned.length)] : null;
   state.boss = {
@@ -697,12 +771,13 @@ function targetSelect(state, userId) {
   for (const c of CITY_DEFS) {
     const city = state.cities[c.id];
     if (city.ownerId === userId) continue;
+    if (state.pendingRaids && Object.values(state.pendingRaids).some(p => p.cityId === c.id)) continue;   // already under attack
     const owner = city.ownerId ? state.players[city.ownerId] : null;
     let note;
-    if (!owner) note = `Militia • Lv ${city.level} • 🛡${fmt(city.garrison)}`;
+    if (!owner) note = `Militia • Lv ${city.level} • 🛡${fmt(effectiveDefence(state, city))} def`;
     else if (owner.shieldUntil > Date.now()) continue;                       // shielded → hide
     else if (playerStrength(state, owner) * MATCH_BAND < myStr) continue;     // too weak → hide
-    else note = `${owner.name} • Lv ${city.level} • 🛡${fmt(city.garrison)}`;
+    else note = `${owner.name} • Lv ${city.level} • 🛡${fmt(effectiveDefence(state, city))} def`;
     opts.push({ label: city.name, description: note, value: c.id });
   }
   if (!opts.length) {
@@ -864,6 +939,44 @@ function initDiyar({ client, db, saveData, awardLP }) {
     const state = stateOf(guildId); if (!state.channelId) return;
     try { const ch = await client.channels.fetch(state.channelId); await ch.send(payload); } catch (e) { console.error('[diyar announce]', e.message); }
   }
+
+  const raidTimers = {};   // in-memory countdown intervals (not persisted)
+  async function launchRaid(guildId, raidId) {
+    const state = stateOf(guildId);
+    const raid = state.pendingRaids && state.pendingRaids[raidId];
+    if (!raid || !raid.channelId) return;
+    let msg = null;
+    try {
+      const ch = await client.channels.fetch(raid.channelId);
+      const secs = Math.max(0, Math.round((raid.endsAt - Date.now()) / 1000));
+      msg = await ch.send({ content: `<@${raid.defenderId}>`, embeds: [raidLiveEmbed(state, raid, secs)], components: [reinforceRow(raidId)] });
+      raid.messageId = msg.id; saveData(guildId);
+    } catch (e) { console.error('[diyar raid post]', e.message); }
+    if (raidTimers[raidId]) clearInterval(raidTimers[raidId]);
+    raidTimers[raidId] = setInterval(async () => {
+      const st = stateOf(guildId); const rd = st.pendingRaids && st.pendingRaids[raidId];
+      if (!rd) { clearInterval(raidTimers[raidId]); delete raidTimers[raidId]; return; }
+      const secs = Math.max(0, Math.round((rd.endsAt - Date.now()) / 1000));
+      if (secs <= 0) { clearInterval(raidTimers[raidId]); delete raidTimers[raidId]; await finishRaid(guildId, raidId); return; }
+      try { if (msg) await msg.edit({ embeds: [raidLiveEmbed(st, rd, secs)], components: [reinforceRow(raidId)] }); } catch { /* ignore */ }
+    }, 6000);
+  }
+  async function finishRaid(guildId, raidId) {
+    const state = stateOf(guildId);
+    const raid = state.pendingRaids && state.pendingRaids[raidId];
+    if (!raid) return;
+    delete state.pendingRaids[raidId];
+    if (raidTimers[raidId]) { clearInterval(raidTimers[raidId]); delete raidTimers[raidId]; }
+    const result = resolveRaid(state, db, guildId, saveData, raid, raid.reinforced ? REINFORCE_MULT : 1);
+    saveData(guildId);
+    if (!result) return;
+    try {
+      const ch = await client.channels.fetch(raid.channelId);
+      const m = raid.messageId ? await ch.messages.fetch(raid.messageId).catch(() => null) : null;
+      if (m) await m.edit({ content: '', embeds: [raidResultEmbed(result)], components: [] });
+      else await ch.send({ embeds: [raidResultEmbed(result)] });
+    } catch (e) { console.error('[diyar raid finish]', e.message); }
+  }
   async function refreshBossMessage(guildId) {
     const state = stateOf(guildId); const b = state.boss;
     if (!b || !b.channelId || !b.messageId) return;
@@ -896,6 +1009,10 @@ function initDiyar({ client, db, saveData, awardLP }) {
           due.fired = true; saveData(guild.id);
           if (!state.boss) { spawnBoss(state, saveData, guild.id); await postBoss(guild.id); }
         }
+      }
+      // resolve any live raid whose window elapsed but whose timer was lost (e.g. a redeploy)
+      for (const rid of Object.keys(state.pendingRaids || {})) {
+        if (now > state.pendingRaids[rid].endsAt && !raidTimers[rid]) await finishRaid(guild.id, rid);
       }
     }
   }
@@ -946,7 +1063,7 @@ function initDiyar({ client, db, saveData, awardLP }) {
         }
         if (interaction.commandName === 'diyar-leaderboard') {
           const state = stateOf(gid);
-          return interaction.reply(leaderboard(state));
+          return interaction.reply({ embeds: leaderboard(state).embeds, components: [] });   // public: no interactive buttons
         }
         if (interaction.commandName === 'diyar-set-channel') {
           const state = stateOf(gid);
@@ -1038,9 +1155,13 @@ function initDiyar({ client, db, saveData, awardLP }) {
         return interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLOR.gold).setTitle('🗺 Your Realm — Map of Libya').setImage('attachment://diyar-map.png')], components: [backRow()], files: [renderMap(state, uid)] });
       }
       if (action === 'collect') {
-        const got = collectIncome(state, db, gid, saveData, uid);
-        if (got > 0) { await interaction.reply(eph({ content: `💰 Collected **${fmt(got)} Dinar** from your cities.` })); return; }
         const p = state.players[uid];
+        const got = collectIncome(state, db, gid, saveData, uid);
+        if (got > 0) {
+          const who = p?.name || interaction.member?.displayName || interaction.user.username;
+          await interaction.reply({ content: `💰 **${who}** collected **${fmt(got)} Dinar** from their cities.` });   // public
+          return;
+        }
         const cities = ownedCities(state, uid);
         let msg;
         if (!cities.length) msg = '🪙 You hold no cities yet — capture one to start earning Dinar.';
@@ -1086,17 +1207,35 @@ function initDiyar({ client, db, saveData, awardLP }) {
       }
       if (action === 'atk') {
         const cityId = parts[2], pct = parts[3] === '50' ? 0.5 : 1.0;
-        const r = resolveAttack(state, db, gid, saveData, uid, cityId, pct);
-        if (r.error) return interaction.update({ embeds: [new EmbedBuilder().setColor(COLOR.grey).setTitle('⚔ Raid blocked').setDescription(r.error)], components: [backRow()], files: [] });
-        const embed = new EmbedBuilder().setColor(r.win ? COLOR.green : COLOR.red)
-          .setTitle(r.win ? (r.captured ? `🏴 You captured ${r.cityName}!` : `⚔ Raid on ${r.cityName} — Victory`) : `🛡 Raid on ${r.cityName} — Repelled`)
-          .setImage('attachment://diyar-battle.png');
-        // public result so the whole server sees it
-        const summary = r.win
-          ? `⚔ **${r.attackerName}** raided **${r.cityName}**${r.defenderName ? ` (held by **${r.defenderName}**)` : ''} — **Victory!** ${r.captured ? 'Captured the city' : 'Raided it'}${r.stolen ? ` and looted **${fmt(r.stolen)} Dinar**` : ''}.`
-          : `🛡 **${r.attackerName}**'s raid on **${r.cityName}**${r.defenderName ? ` (held by **${r.defenderName}**)` : ''} was **repelled**.`;
-        announce(gid, { content: summary, files: [renderBattle(r)] });   // public: result + image for everyone
-        return interaction.update({ embeds: [embed], components: [backRow()], files: [renderBattle(r)] });
+        const start = startRaid(state, db, gid, saveData, uid, cityId, pct);
+        if (start.error) return interaction.update({ embeds: [new EmbedBuilder().setColor(COLOR.grey).setTitle('⚔ Raid blocked').setDescription(start.error)], components: [backRow()], files: [] });
+        const pending = start.pending;
+        if (!pending.defenderId) {
+          // neutral militia — resolve instantly, announce as text
+          const result = resolveRaid(state, db, gid, saveData, pending, 1);
+          announce(gid, { embeds: [raidResultEmbed(result)] });
+          return interaction.update({ embeds: [raidResultEmbed(result)], components: [backRow()], files: [] });
+        }
+        // PvP — run a live 30s window so the defender can rally
+        const raidId = 'r' + Date.now().toString(36) + Math.floor(Math.random() * 1000);
+        state.pendingRaids = state.pendingRaids || {};
+        state.pendingRaids[raidId] = { ...pending, id: raidId, endsAt: Date.now() + RAID_WINDOW_MS, reinforced: false, channelId: state.channelId, messageId: null };
+        saveData(gid);
+        launchRaid(gid, raidId).catch(e => console.error('[diyar raid]', e.message));
+        return interaction.update({ embeds: [new EmbedBuilder().setColor(COLOR.red).setTitle('⚔ Raid launched!')
+          .setDescription(`Your army marches on **${pending.cityName}**. The defender has **${Math.round(RAID_WINDOW_MS / 1000)}s** to rally — watch the war room for the outcome.`)], components: [backRow()], files: [] });
+      }
+      if (action === 'reinf') {
+        const raidId = parts[2];
+        const raid = state.pendingRaids && state.pendingRaids[raidId];
+        if (!raid) return interaction.reply(eph({ content: 'That battle is already decided.' }));
+        if (interaction.user.id !== raid.defenderId) return interaction.reply(eph({ content: 'Only the city\'s defender can send reinforcements.' }));
+        if (Date.now() > raid.endsAt) return interaction.reply(eph({ content: '⏳ Too late — the battle is already decided!' }));
+        if (raid.reinforced) return interaction.reply(eph({ content: '🛡 Your reinforcements are already on the way!' }));
+        raid.reinforced = true; saveData(gid);
+        const secs = Math.max(0, Math.round((raid.endsAt - Date.now()) / 1000));
+        try { return await interaction.update({ embeds: [raidLiveEmbed(state, raid, secs)], components: [reinforceRow(raidId)] }); }
+        catch { return interaction.reply(eph({ content: '🛡 Reinforcements sent — your garrison rallies!' })); }
       }
     } catch (e) {
       console.error('[diyar interaction]', e);
@@ -1109,7 +1248,7 @@ function initDiyar({ client, db, saveData, awardLP }) {
       getState: () => stateOf, ensurePlayer, resolveAttack, recruit, upgrade, reinforce, collectIncome,
       spawnBoss, strikeBoss, resolveBossDefeat, resolveBossExpire, playerStrength, ensureBossSched,
       pendingIncome, renderMap, renderBoss, renderBattle, pickTimes, reseedIfLanded,
-      claimTribute, buyWeapon, armouryView, profileView, resetSeason, targetSelect, reinforceSelect,
+      claimTribute, buyWeapon, armouryView, profileView, resetSeason, targetSelect, reinforceSelect, effectiveDefence, effectiveAttack, startRaid, resolveRaid,
     },
   };
 }
