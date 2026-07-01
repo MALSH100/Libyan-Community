@@ -19,6 +19,7 @@ const path = require('path');
 
 // ─── Tuning ───────────────────────────────────────────────────────────────────
 const STARTER_ARMY        = 40;
+const GARRISON_CAP        = 3000;                   // max troops a single city can hold
 const TROOP_COST          = 1.5;                    // Dinar per troop
 const SHIELD_MS           = 0;                     // truce disabled (no starting truce, no post-raid shield)
 const ATTACK_COOLDOWN_MS  = 30 * 60 * 1000;     // between your own attacks
@@ -421,11 +422,13 @@ function reinforce(state, saveData, guildId, userId, cityId, amt) {
   const p = state.players[userId];
   const city = state.cities[cityId];
   if (!city || city.ownerId !== userId) return { ok: false };
-  amt = Math.min(amt, p.army);
+  const room = GARRISON_CAP - city.garrison;
+  if (room <= 0) return { ok: false, capped: true, garrison: city.garrison };   // already full
+  amt = Math.min(amt, p.army, room);                                            // never past the cap
   if (amt < 1) return { ok: false, noTroops: true };
   p.army -= amt; city.garrison += amt;
   saveData(guildId);
-  return { ok: true, moved: amt, garrison: city.garrison };
+  return { ok: true, moved: amt, garrison: city.garrison, capped: city.garrison >= GARRISON_CAP };
 }
 
 function collectIncome(state, db, guildId, saveData, userId) {
@@ -915,15 +918,20 @@ function reinforceAmount(state, userId, cityId) {
   const p = state.players[userId];
   const city = state.cities[cityId];
   if (!city || city.ownerId !== userId) return reinforceSelect(state, userId);
+  const room = Math.max(0, GARRISON_CAP - city.garrison);
+  const full = room <= 0;
   const amtRow = new ActionRowBuilder().addComponents(
-    ...[10, 50, 100].map(n => new ButtonBuilder().setCustomId(`dy:rf_do:${cityId}:${n}`).setLabel(`+${n}`).setStyle(ButtonStyle.Success).setDisabled(p.army < n)),
-    new ButtonBuilder().setCustomId(`dy:rf_do:${cityId}:all`).setLabel(`All (${fmt(p.army)})`).setStyle(ButtonStyle.Success).setDisabled(p.army < 1));
+    ...[10, 50, 100].map(n => new ButtonBuilder().setCustomId(`dy:rf_do:${cityId}:${n}`).setLabel(`+${n}`).setStyle(ButtonStyle.Success).setDisabled(p.army < n || full)),
+    new ButtonBuilder().setCustomId(`dy:rf_do:${cityId}:all`).setLabel(`All (${fmt(Math.min(p.army, room))})`).setStyle(ButtonStyle.Success).setDisabled(p.army < 1 || full));
   const navRow = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('dy:reinforce').setLabel('↩ Another city').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('dy:home').setLabel('🏠 Done').setStyle(ButtonStyle.Secondary));
-  const note = p.army < 1 ? '\n\n*No troops left in reserve — recruit more or send your army elsewhere.*' : '';
+  const note = full
+    ? `\n\n🛡 *This city is **full** — it holds the maximum of ${fmt(GARRISON_CAP)} troops and can't take any more.*`
+    : p.army < 1 ? '\n\n*No troops left in reserve — recruit more or send your army elsewhere.*'
+    : `\n\n*Room for **${fmt(room)}** more before the ${fmt(GARRISON_CAP)} cap.*`;
   return { embeds: [new EmbedBuilder().setColor(COLOR.blue).setTitle(`🛡 Reinforce ${esc(city.name)}`)
-    .setDescription(`**${esc(city.name)}** — Lv ${city.level} • garrison **🛡${fmt(city.garrison)}**\nReserve army: **${fmt(p.army)}** troops.\n\nChoose how many to station here.${note}`)],
+    .setDescription(`**${esc(city.name)}** — Lv ${city.level} • garrison **🛡${fmt(city.garrison)} / ${fmt(GARRISON_CAP)}**\nReserve army: **${fmt(p.army)}** troops.\n\nChoose how many to station here.${note}`)],
     components: [amtRow, navRow] };
 }
 
@@ -1294,12 +1302,15 @@ function initDiyar({ client, db, saveData, awardLP }) {
       if (action === 'rf_pick') return interaction.update(reinforceAmount(state, uid, interaction.values[0]));
       if (action === 'rf_do') {
         const cityId = parts[2];
+        const city = state.cities[cityId];
         const amt = parts[3] === 'all' ? state.players[uid].army : parseInt(parts[3], 10);
         if (Number.isFinite(amt) && amt > 0) {
           const res = reinforce(state, saveData, gid, uid, cityId, amt);
           if (res.ok) {
-            const city = state.cities[cityId];
-            announce(gid, { content: `🛡 **${state.players[uid].name}** reinforced **${city.name}** with **${fmt(res.moved)}** troops — its defence is now **${fmt(effectiveDefence(state, city))}**.` });
+            const capNote = res.capped ? ` — now at the **${fmt(GARRISON_CAP)}** troop cap` : '';
+            announce(gid, { content: `🛡 **${state.players[uid].name}** reinforced **${city.name}** with **${fmt(res.moved)}** troops${capNote} — its defence is now **${fmt(effectiveDefence(state, city))}**.` });
+          } else if (res.capped) {
+            return interaction.reply(eph({ content: `🛡 **${city.name}** is already holding the maximum of **${fmt(GARRISON_CAP)}** troops, so it can't take any more. Station your army in one of your other cities instead.` }));
           }
         }
         return interaction.update(reinforceAmount(state, uid, cityId));
