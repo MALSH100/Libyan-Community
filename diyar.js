@@ -576,25 +576,29 @@ const raidBar = (val, max) => { const n = Math.max(0, Math.min(12, Math.round(va
 // the live 30s countdown embed shown in the war room while a PvP raid plays out
 function raidLiveEmbed(state, raid, secsLeft) {
   const city = state.cities[raid.cityId];
-  const atkP = effectiveAttack(state.players[raid.attackerId] || { weaponTier: 0, upg: { mil: 0 } }, raid.send);
-  const defP = effectiveDefence(state, city, raid.reinforced ? REINFORCE_MULT : 1);
-  // progress anchored to when the message appeared; reaches 1 at 85% of the window so the bars
-  // visibly finish a few seconds BEFORE the result is announced (never mid-drain at the reveal)
+  const attacker = state.players[raid.attackerId] || { weaponTier: 0, upg: { mil: 0 } };
+  const aPow = effectiveAttack(attacker, raid.send);
+  const dPow = effectiveDefence(state, city, raid.reinforced ? REINFORCE_MULT : 1);
+  // who's winning the clash, and by how much (-1 defender-dominant … +1 attacker-dominant)
+  const margin = (aPow - dPow) / Math.max(1, aPow + dPow);
+  // each side's FINAL bar level — both start at 1.0 (full) and drain toward these. The loser
+  // settles low but never fully empty (some troops always make it home); a close fight leaves
+  // both near half, so a coin-flip result never contradicts the picture.
+  const atkEnd = clamp(0.5 + margin * 0.55, 0.08, 0.92);
+  const defEnd = clamp(0.5 - margin * 0.55, 0.08, 0.92);
+  // progress is anchored to when the message posted and reaches 1 at ~90% of the window, so the
+  // bars finish draining right as the countdown runs out — never zeroed out early, never mid-drain
   const elapsed = raid.animStart ? (Date.now() - raid.animStart) : 0;
-  const f = clamp(elapsed / (RAID_WINDOW_MS * 0.85), 0, 1);
-  // asymmetric attrition: each side wears the other down by the enemy's strength, so the stronger
-  // side keeps a longer bar. Early drain is gentle, so the first frame the viewer sees looks full.
-  const DRAIN = 0.55;
-  const atkNow = Math.max(0, Math.round(atkP - defP * f * DRAIN));
-  const defNow = Math.max(0, Math.round(defP - atkP * f * DRAIN));
-  const mx = Math.max(atkP, defP, 1);
+  const prog = clamp(elapsed / (RAID_WINDOW_MS * 0.9), 0, 1);
+  const atkFrac = 1 - (1 - atkEnd) * prog;
+  const defFrac = 1 - (1 - defEnd) * prog;
   const status = raid.reinforced
-    ? `🛡️ **Reinforced!** The garrison rallies. ⏳ **${secsLeft}s** left…`
+    ? `🛡️ **Reinforced!** The garrison holds firm. ⏳ **${secsLeft}s** left…`
     : `⏳ **${secsLeft}s** left — defender, hit **🛡 Send Reinforcements** to rally your garrison!`;
   const desc =
     `**${raid.attackerName}** storms **${city.name}**${raid.defenderName ? ` — held by **${raid.defenderName}**` : ''}!\n\n` +
-    `⚔ Attackers\n\`${raidBar(atkNow, mx)}\` **${fmt(atkNow)}**\n\n` +
-    `🛡 Defenders\n\`${raidBar(defNow, mx)}\` **${fmt(defNow)}**${raid.reinforced ? '  🛡️' : ''}\n\n${status}`;
+    `⚔ Attackers  ·  power **${fmt(Math.round(aPow * atkFrac))}**\n\`${raidBar(atkFrac, 1)}\`\n\n` +
+    `🛡 Defenders  ·  power **${fmt(Math.round(dPow * defFrac))}**${raid.reinforced ? ' 🛡️' : ''}\n\`${raidBar(defFrac, 1)}\`\n\n${status}`;
   return new EmbedBuilder().setColor(raid.reinforced ? COLOR.blue : COLOR.red).setTitle(`⚔ Battle for ${city.name}`).setDescription(desc);
 }
 
