@@ -28,8 +28,9 @@ const LOOT_PCT            = 0.20;                  // share of a defender's Dina
 const CAPTURE_RATIO       = 1.4;                   // must out-power a PLAYER city this much to seize it
 const MATCH_BAND          = 3.0;                   // can't punch down: target strength must be ≥ yours / band
 const LOOT_BY_LEVEL       = [0, 50, 80, 120];       // minted raid loot by city level (defender loses nothing)
-const INCOME_PER_LEVEL_HR = 20;                    // Dinar/hour per city level (20/40/60)
+const INCOME_BY_LEVEL     = [0, 15, 20, 40];       // Dinar/hour by city level (small/med/big)
 const INCOME_CAP_HRS      = 12;                    // accrual caps at 12h, so you must collect
+ const COLLECT_COOLDOWN_MS = 90 * 60 * 1000;       // can only collect once per 90 min
 const UPG_MAX             = 10;
 const UPG_BASE            = { mil: 240, for: 200, eco: 180 };   // cost = base × (level+1)
 const TRIBUTE_BASE        = 40;                    // daily login reward (capped mint, async-friendly)
@@ -92,7 +93,7 @@ const CITY_DEFS = [
 ];
 const CITY_BY_ID = Object.fromEntries(CITY_DEFS.map(c => [c.id, c]));
 
-const PALETTE = ['#e74c3c','#3498db','#2ecc71','#9b59b6','#e67e22','#1abc9c','#f5b041','#e84393','#00cec9','#fab1a0','#6c5ce7','#fdcb6e'];
+const PALETTE = ['#e6194b','#4363d8','#3cb44b','#ffe119','#f032e6','#42d4f4','#f58231','#911eb4','#bfef45','#ff80c0','#ffffff','#00c2a8'];
 const NEUTRAL = '#7f8c8d';
 const COL_YOU   = '#3498db';   // your own cities on your private map (blue)
 const COL_RIVAL = '#e74c3c';   // rival cities on your private map (red)
@@ -289,6 +290,11 @@ function getState(db, guildId, saveData) {
   for (const id of Object.keys(data.__diyar.cities)) {
     if (!valid.has(id) && !data.__diyar.cities[id].ownerId) { delete data.__diyar.cities[id]; dirty = true; }
   }
+  // give every player a distinct colour from the palette (by join order) so the map stays readable
+  Object.keys(data.__diyar.players).forEach((id, i) => {
+    const want = PALETTE[i % PALETTE.length];
+    if (data.__diyar.players[id].color !== want) { data.__diyar.players[id].color = want; dirty = true; }
+  });
   if (dirty && saveData) saveData(guildId);
   return data.__diyar;
 }
@@ -342,7 +348,7 @@ const findId = (state, p) => Object.keys(state.players).find(id => state.players
 function pendingIncome(state, city) {
   if (!city.ownerId) return 0;
   const owner = state.players[city.ownerId];
-  const rate = INCOME_PER_LEVEL_HR * city.level * (1 + (owner ? owner.upg.eco * 0.12 : 0)); // per hour
+  const rate = INCOME_BY_LEVEL[city.level] * (1 + (owner ? owner.upg.eco * 0.12 : 0)); // per hour
   const hrs = clamp((Date.now() - city.lastIncomeAt) / 3600000, 0, INCOME_CAP_HRS);
   return Math.floor(rate * hrs);
 }
@@ -350,9 +356,17 @@ function pendingIncome(state, city) {
 // ════════════════════════════════════════════════════════════════════════════
 //  ACTIONS  (pure-ish; mutate state, return a result)
 // ════════════════════════════════════════════════════════════════════════════
+// troops get pricier the more land you hold, so sprawling empires are costlier to defend
+function troopCost(state, userId) {
+  const n = ownedCities(state, userId).length;
+  if (n === 0) return 1;      // landless — cheapest
+  if (n <= 2) return 1.5;     // 1–2 cities — standard
+  return 3;                   // 3+ cities — expensive
+}
+
 function recruit(state, db, guildId, saveData, userId, n) {
   const p = state.players[userId];
-  const cost = Math.round(n * TROOP_COST);
+  const cost = Math.round(n * troopCost(state, userId));
   if (getDinar(db, guildId, userId) < cost) return { ok: false, cost };
   spendDinar(db, guildId, userId, cost, saveData);
   p.army += n;
@@ -470,6 +484,7 @@ function resolveRaid(state, db, guildId, saveData, pending, reinforceMult) {
   if (!city) { attacker.army += send; return null; }   // city vanished — refund troops
   const now = Date.now();
   const owner = city.ownerId ? state.players[city.ownerId] : null;
+  const garrisonBefore = city.garrison;
   const rMult = reinforceMult || 1;
 
   const aMult = 1 + attacker.weaponTier * 0.15 + attacker.upg.mil * 0.12;
@@ -499,6 +514,7 @@ function resolveRaid(state, db, guildId, saveData, pending, reinforceMult) {
     const g = Math.round(survivors * 0.35);
     city.garrison = g; survivors -= g; city.lastIncomeAt = now;
     attacker.stats.captured++; result.captured = true;
+    result.defLoss = garrisonBefore;   // defender lost the whole garrison with the city
     attacker.army += survivors;
     attacker.stats.raidsWon++;
     result.cas = cas; result.survivors = survivors;
@@ -506,6 +522,7 @@ function resolveRaid(state, db, guildId, saveData, pending, reinforceMult) {
     const cas = Math.round(send * clamp(aPow / dPow, 0, 1) * 0.6);
     const survivors = send - cas;
     city.garrison = Math.max(0, city.garrison - Math.round(city.garrison * clamp(aPow / dPow, 0, 1) * 0.4));
+    result.defLoss = garrisonBefore - city.garrison;   // defenders still bleed troops even in victory
     attacker.army += survivors;
     attacker.stats.raidsLost++;
     if (owner) owner.stats.defended++;
@@ -528,29 +545,53 @@ const raidBar = (val, max) => { const n = Math.max(0, Math.min(12, Math.round(va
 // the live 30s countdown embed shown in the war room while a PvP raid plays out
 function raidLiveEmbed(state, raid, secsLeft) {
   const city = state.cities[raid.cityId];
-  const atk = effectiveAttack(state.players[raid.attackerId] || { weaponTier: 0, upg: { mil: 0 } }, raid.send);
-  const def = effectiveDefence(state, city, raid.reinforced ? REINFORCE_MULT : 1);
-  const mx = Math.max(atk, def, 1);
+  const atkP = effectiveAttack(state.players[raid.attackerId] || { weaponTier: 0, upg: { mil: 0 } }, raid.send);
+  const defP = effectiveDefence(state, city, raid.reinforced ? REINFORCE_MULT : 1);
+  const sum = Math.max(1, atkP + defP);
+  const dur = RAID_WINDOW_MS / 1000;
+  const f = clamp((dur - secsLeft) / dur, 0, 1);                 // 0 at start → 1 at the end
+  // live attrition: each side wears the other down over the window (weaker side fades faster)
+  const atkNow = Math.max(0, Math.round(atkP * (1 - (defP / sum) * f * 0.85)));
+  const defNow = Math.max(0, Math.round(defP * (1 - (atkP / sum) * f * 0.85)));
+  const mx = Math.max(atkP, defP, 1);                            // scale bars to the starting max so shrinkage shows
+  const status = raid.reinforced
+    ? `🛡️ **Reinforced!** The garrison rallies. ⏳ **${secsLeft}s** left…`
+    : `⏳ **${secsLeft}s** left — defender, hit **🛡 Send Reinforcements** to rally your garrison!`;
   const desc =
     `**${raid.attackerName}** storms **${city.name}**${raid.defenderName ? ` — held by **${raid.defenderName}**` : ''}!\n\n` +
-    `⚔ Attackers\n\`${raidBar(atk, mx)}\` **${fmt(atk)}**\n\n` +
-    `🛡 Defenders\n\`${raidBar(def, mx)}\` **${fmt(def)}**${raid.reinforced ? '  🛡️ *reinforced!*' : ''}\n\n` +
-    (raid.reinforced
-      ? `🛡️ Reinforcements have arrived — the walls hold far stronger! Bracing for the outcome…`
-      : `⏳ **${secsLeft}s** — defender, hit **Send Reinforcements** to rally your garrison!`);
+    `⚔ Attackers\n\`${raidBar(atkNow, mx)}\` **${fmt(atkNow)}**\n\n` +
+    `🛡 Defenders\n\`${raidBar(defNow, mx)}\` **${fmt(defNow)}**${raid.reinforced ? '  🛡️' : ''}\n\n${status}`;
   return new EmbedBuilder().setColor(raid.reinforced ? COLOR.blue : COLOR.red).setTitle(`⚔ Battle for ${city.name}`).setDescription(desc);
 }
 
-// the final text result (replaces the old still image)
+// the final result — coloured title, attacker on the left, defender on the right
 function raidResultEmbed(r) {
-  const title = r.win ? (r.captured ? `🏴 ${r.cityName} has fallen!` : `⚔ ${r.cityName} — Raided`) : `🛡 ${r.cityName} — Defended`;
-  const outcome = r.win
-    ? `**Victory!** ${r.captured ? `**${r.attackerName}** plants their banner over **${r.cityName}**. ` : ''}Looted **${fmt(r.stolen)} Dinar**.\nLost **${fmt(r.cas)}** troops • **${fmt(r.survivors)}** marched home.`
-    : `**Repelled!** ${r.defenderName || 'The militia'} held the walls${r.reinforced ? ' with reinforcements' : ''}.\n**${r.attackerName}** lost **${fmt(r.cas)}** troops • **${fmt(r.survivors)}** limped home.`;
-  const desc =
-    `⚔ **${r.attackerName}** — **${fmt(r.send)}** troops • power **${fmt(r.atkShown)}**\n` +
-    `🛡 **${r.defenderName || 'Militia'}** — defence power **${fmt(r.defShown)}**${r.reinforced ? ' 🛡️' : ''}\n\n${outcome}`;
-  return new EmbedBuilder().setColor(r.win ? COLOR.green : COLOR.red).setTitle(title).setDescription(desc);
+  const won = r.win;
+  const title = won ? '⚔   R A I D   V I C T O R Y   ⚔' : '🛡   R A I D   D E F E N D E D   🛡';
+  const subtitle = won
+    ? (r.captured ? `**${r.attackerName}** captured **${r.cityName}**!` : `**${r.attackerName}** raided **${r.cityName}** and pulled back.`)
+    : `**${r.defenderName || 'The militia'}** held **${r.cityName}**!`;
+  const atkField = [
+    `Troops sent: **${fmt(r.send)}**`,
+    `Attack power: **${fmt(r.atkShown)}**`,
+    `Troops lost: **${fmt(r.cas)}**`,
+    `Returned home: **${fmt(r.survivors)}**`,
+    `Loot: **${won ? '+' + fmt(r.stolen) : '0'}** 💰`,
+  ].join('\n');
+  const defField = [
+    `Defence power: **${fmt(r.defShown)}**${r.reinforced ? ' 🛡️' : ''}`,
+    `Troops lost: **${fmt(r.defLoss || 0)}**`,
+    `Reinforced: **${r.reinforced ? 'yes' : 'no'}**`,
+    `City: **${won ? 'LOST ❌' : 'HELD ✅'}**`,
+  ].join('\n');
+  return new EmbedBuilder()
+    .setColor(won ? COLOR.green : COLOR.red)
+    .setTitle(title)
+    .setDescription(subtitle)
+    .addFields(
+      { name: `⚔ Attacker · ${r.attackerName}`, value: atkField, inline: true },
+      { name: `🛡 Defender · ${r.defenderName || 'Militia'}`, value: defField, inline: true },
+    );
 }
 
 function reinforceRow(raidId) {
@@ -719,10 +760,17 @@ function cityView(state, db, guildId, userId) {
 function armyView(state, db, guildId, userId) {
   const p = state.players[userId];
   const dinar = getDinar(db, guildId, userId);
+  const unit = troopCost(state, userId);
+  const nCities = ownedCities(state, userId).length;
+  const why = nCities === 0
+    ? `You hold **no cities**, so troops are cheapest at **${unit} Dinar** each.`
+    : nCities <= 2
+      ? `You hold **${nCities}** cit${nCities === 1 ? 'y' : 'ies'}, so troops cost **${unit} Dinar** each.`
+      : `You hold **${nCities}** cities. Holding **3 or more** makes each troop cost **${unit} Dinar** — a large realm is expensive to raise armies for.`;
   const embed = new EmbedBuilder().setColor(COLOR.gold)
     .setTitle('🪖 Recruit Army')
-    .setDescription(`Army: **${fmt(p.army)}**  •  Dinar: **${fmt(dinar)}**\nEach troop costs **${TROOP_COST} Dinar**.`);
-  const mk = (n) => new ButtonBuilder().setCustomId(`dy:recruit:${n}`).setLabel(`+${n} (${Math.round(n * TROOP_COST)}💰)`).setStyle(ButtonStyle.Success).setDisabled(dinar < Math.round(n * TROOP_COST));
+    .setDescription(`Army: **${fmt(p.army)}**  •  Dinar: **${fmt(dinar)}**\nEach troop costs **${unit} Dinar**.\n\n*${why}*`);
+  const mk = (n) => new ButtonBuilder().setCustomId(`dy:recruit:${n}`).setLabel(`+${n} (${Math.round(n * unit)}💰)`).setStyle(ButtonStyle.Success).setDisabled(dinar < Math.round(n * unit));
   return { embeds: [embed], components: [new ActionRowBuilder().addComponents(mk(10), mk(50), mk(100), mk(250)), backRow()] };
 }
 
@@ -959,7 +1007,7 @@ function initDiyar({ client, db, saveData, awardLP }) {
       const secs = Math.max(0, Math.round((rd.endsAt - Date.now()) / 1000));
       if (secs <= 0) { clearInterval(raidTimers[raidId]); delete raidTimers[raidId]; await finishRaid(guildId, raidId); return; }
       try { if (msg) await msg.edit({ embeds: [raidLiveEmbed(st, rd, secs)], components: [reinforceRow(raidId)] }); } catch { /* ignore */ }
-    }, 6000);
+    }, 2000);
   }
   async function finishRaid(guildId, raidId) {
     const state = stateOf(guildId);
@@ -1156,8 +1204,13 @@ function initDiyar({ client, db, saveData, awardLP }) {
       }
       if (action === 'collect') {
         const p = state.players[uid];
+        const cdEnd = (p?.lastCollectAt || 0) + COLLECT_COOLDOWN_MS;
+        if (Date.now() < cdEnd) {
+          return interaction.reply(eph({ content: `⏳ You can collect again in **${msLeft(cdEnd)}**. Your cities keep earning (up to the ${INCOME_CAP_HRS}h cap) while you wait.` }));
+        }
         const got = collectIncome(state, db, gid, saveData, uid);
         if (got > 0) {
+          p.lastCollectAt = Date.now(); saveData(gid);
           const who = p?.name || interaction.member?.displayName || interaction.user.username;
           await interaction.reply({ content: `💰 **${who}** collected **${fmt(got)} Dinar** from their cities.` });   // public
           return;
@@ -1167,11 +1220,11 @@ function initDiyar({ client, db, saveData, awardLP }) {
         if (!cities.length) msg = '🪙 You hold no cities yet — capture one to start earning Dinar.';
         else {
           const ecoMult = 1 + p.upg.eco * 0.12;
-          const ratePerHr = cities.reduce((s, c) => s + INCOME_PER_LEVEL_HR * c.level * ecoMult, 0);
+          const ratePerHr = cities.reduce((s, c) => s + INCOME_BY_LEVEL[c.level] * ecoMult, 0);
           const capTotal = Math.floor(ratePerHr * INCOME_CAP_HRS);
           let soonestMs = Infinity;
           for (const c of cities) {
-            const rc = INCOME_PER_LEVEL_HR * c.level * ecoMult;
+            const rc = INCOME_BY_LEVEL[c.level] * ecoMult;
             const pend = rc * clamp((Date.now() - c.lastIncomeAt) / 3600000, 0, INCOME_CAP_HRS);
             const need = 1 - (pend - Math.floor(pend));
             const ms = rc > 0 ? need / rc * 3600000 : Infinity;
@@ -1202,7 +1255,13 @@ function initDiyar({ client, db, saveData, awardLP }) {
       if (action === 'rf_do') {
         const cityId = parts[2];
         const amt = parts[3] === 'all' ? state.players[uid].army : parseInt(parts[3], 10);
-        if (Number.isFinite(amt) && amt > 0) reinforce(state, saveData, gid, uid, cityId, amt);
+        if (Number.isFinite(amt) && amt > 0) {
+          const res = reinforce(state, saveData, gid, uid, cityId, amt);
+          if (res.ok) {
+            const city = state.cities[cityId];
+            announce(gid, { content: `🛡 **${state.players[uid].name}** reinforced **${city.name}** with **${fmt(res.moved)}** troops — its defence is now **${fmt(effectiveDefence(state, city))}**.` });
+          }
+        }
         return interaction.update(reinforceAmount(state, uid, cityId));
       }
       if (action === 'atk') {
@@ -1248,7 +1307,7 @@ function initDiyar({ client, db, saveData, awardLP }) {
       getState: () => stateOf, ensurePlayer, resolveAttack, recruit, upgrade, reinforce, collectIncome,
       spawnBoss, strikeBoss, resolveBossDefeat, resolveBossExpire, playerStrength, ensureBossSched,
       pendingIncome, renderMap, renderBoss, renderBattle, pickTimes, reseedIfLanded,
-      claimTribute, buyWeapon, armouryView, profileView, resetSeason, targetSelect, reinforceSelect, effectiveDefence, effectiveAttack, startRaid, resolveRaid,
+      claimTribute, buyWeapon, armouryView, profileView, resetSeason, targetSelect, reinforceSelect, effectiveDefence, effectiveAttack, startRaid, resolveRaid, troopCost, raidLiveEmbed, raidResultEmbed,
     },
   };
 }
