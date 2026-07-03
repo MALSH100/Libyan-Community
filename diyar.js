@@ -51,7 +51,8 @@ const THREAT_DMG_MIN      = 2;                     // garrison damage per tick p
 const THREAT_DMG_MAX      = 5;                     // garrison damage per tick per city (max)
 const THREAT_CITY_DMG_CAP = 800;                   // total damage cap per city — it weakens, never demolishes
 const THREAT_GARRISON_FLOOR = 20;                  // never grinds a garrison below this
-const BOSS_HP             = 10000;                 // flat boss HP
+const BOSS_HP_MIN         = 2000;                  // threat HP rolls randomly between these
+const BOSS_HP_MAX         = 5000;
 const BOSS_HP_PER_PLAYER  = 0;                     // flat HP (raise this to scale with player count)
 const BOSS_SPAWNS_PER_DAY = 2;
 const BOSS_WIN_START      = 11;                    // Libya-time window for spawns
@@ -662,10 +663,12 @@ function threatSiegeLines(state, b) {
 
 function threatEmbed(state) {
   const b = state.boss;
+  const log = (b.log || []).map(l => `⚔ **${esc(l.name)}** struck for **${fmt(l.dmg)}**`).join('\n') || '*— no strikes yet — be the first!*';
   const desc =
     `*${b.tag}.* Strike it down before it razes the cities!\n\n` +
     `👹 **Threat** — **${fmt(Math.max(0, b.hp))} / ${fmt(b.hpMax)}** HP\n\`${threatBar(b.hp / b.hpMax)}\`\n\n` +
     `⚔ **Under siege**\n${threatSiegeLines(state, b)}\n\n` +
+    `🗡 **Attack Log**\n${log}\n\n` +
     `⏳ **${msLeft(b.endsAt)}** left`;
   return new EmbedBuilder().setColor(COLOR.red).setTitle(`👹 ${b.name}`).setDescription(desc)
     .setFooter({ text: '⚔ Strike to attack — you can only strike once every 3s. Most damage = best loot.' });
@@ -735,10 +738,13 @@ function spawnBoss(state, saveData, guildId) {
   if (pool.length) addTarget(pool[Math.floor(Math.random() * pool.length)]);
 
   state.boss = {
-    name: def.name, tag: def.tag, hpMax: BOSS_HP, hp: BOSS_HP,
+    name: def.name, tag: def.tag,
+    hpMax: 0, hp: 0,   // set just below
     spawnedAt: Date.now(), endsAt: Date.now() + BOSS_DURATION_MS,
-    damage: {}, targets, channelId: state.channelId, messageId: null,
+    damage: {}, targets, log: [], channelId: state.channelId, messageId: null,
   };
+  const hp = Math.round((BOSS_HP_MIN + Math.random() * (BOSS_HP_MAX - BOSS_HP_MIN)) / 50) * 50;   // random 2,000–5,000
+  state.boss.hpMax = hp; state.boss.hp = hp;
   if (saveData) saveData(guildId);
   return state.boss;
 }
@@ -754,6 +760,9 @@ function strikeBoss(state, saveData, guildId, userId) {
   const dmg = Math.round((p.army * 0.06 * (1 + p.upg.mil * 0.1 + p.weaponTier * 0.15) + 12) * rnd(0.8, 1.2));   // chip damage — tuned for the 3s cooldown
   b.hp -= dmg;
   b.damage[userId] = (b.damage[userId] || 0) + dmg;
+  b.log = b.log || [];
+  b.log.unshift({ name: p.name, dmg });   // newest first
+  if (b.log.length > 3) b.log.length = 3;
   p.lastStrikeAt = now;
   p.stats.bossDmg += dmg;
   const killed = b.hp <= 0;
@@ -1322,10 +1331,8 @@ function initDiyar({ client, db, saveData, awardLP }) {
       if (action === 'strike') {
         const r = strikeBoss(state, saveData, gid, uid);
         if (r.error) return interaction.reply(eph({ content: r.error }));
-        // the live siege loop (every 3s) refreshes the bars and resolves the kill — no edits needed here
-        return interaction.reply(eph({ content: r.killed
-          ? `⚔ You hit **${state.boss ? state.boss.name : 'the enemy'}** for **${fmt(r.dmg)}** — the killing blow! (your total: ${fmt(r.total)})`
-          : `⚔ You hit **${state.boss ? state.boss.name : 'the enemy'}** for **${fmt(r.dmg)}**! (your total: ${fmt(r.total)})` }));
+        // no private reply spam — the hit lands in the public Attack Log on the next 3s edit
+        return interaction.deferUpdate();
       }
       if (action === 'bossdmg') return interaction.reply(eph(bossView(state)));
 
