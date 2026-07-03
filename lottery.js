@@ -347,7 +347,7 @@ function initLotto({ client, db, saveData }) {
     if (state.active || !state.channelId) return false;
     state.active = {
       id: 'L' + Date.now().toString(36), startedAt: Date.now(), endsAt: Date.now() + LOTTO_DURATION_MS,
-      pool: 0, entries: {}, remindersSent: 0, lastJoinAt: 0, channelId: state.channelId, messageId: null,
+      pool: 0, entries: {}, remindersSent: 0, lastJoinAt: 0, reminderMsgIds: [], channelId: state.channelId, messageId: null,
     };
     saveData(guildId);
     try {
@@ -371,16 +371,36 @@ function initLotto({ client, db, saveData }) {
     } catch { /* announcement gone — carry on */ }
   }
 
+  const remindEmbed = (L) => new EmbedBuilder().setColor(0xE7B41A).setTitle('🎉 Reminder - Lottery is LIVE!')
+    .setDescription(`💰 Prize pool: **${fmt(L.pool)} Dinar**\n👥 Participants: **${Object.keys(L.entries).length}**\n\n🎟 Join with **\`/dinar-lotto <wager>\`** (max ${fmt(WAGER_MAX)}) — ends <t:${Math.round(L.endsAt / 1000)}:R>`)
+    .setImage('attachment://wheel.gif');
+
   async function remind(guildId) {
     const state = stateOf(guildId); const L = state.active;
     if (!L) return;
     try {
       const ch = await client.channels.fetch(L.channelId);
       const file = new AttachmentBuilder(liveWheel(guildId, L), { name: 'wheel.gif' });
-      await ch.send({ embeds: [new EmbedBuilder().setColor(0xE7B41A).setTitle('🎉 Reminder - Lottery is LIVE!')
-        .setDescription(`💰 Prize pool: **${fmt(L.pool)} Dinar**\n👥 Participants: **${Object.keys(L.entries).length}**\n\n🎟 Join with **\`/dinar-lotto <wager>\`** (max ${fmt(WAGER_MAX)}) — ends <t:${Math.round(L.endsAt / 1000)}:R>`)
-        .setImage('attachment://wheel.gif')], files: [file] });
+      const msg = await ch.send({ embeds: [remindEmbed(L)], files: [file] });
+      L.reminderMsgIds = L.reminderMsgIds || [];
+      L.reminderMsgIds.push(msg.id);
+      if (L.reminderMsgIds.length > 4) L.reminderMsgIds.shift();   // only keep recent ones live
+      saveData(guildId);
     } catch (e) { console.error('[lottery remind]', e.message); }
+  }
+
+  // keep the posted reminder messages current too (latest participants + pool + wheel)
+  async function refreshReminders(guildId) {
+    const state = stateOf(guildId); const L = state.active;
+    if (!L || !L.reminderMsgIds || !L.reminderMsgIds.length) return;
+    try {
+      const ch = await client.channels.fetch(L.channelId);
+      const file = new AttachmentBuilder(liveWheel(guildId, L), { name: 'wheel.gif' });
+      for (const id of L.reminderMsgIds) {
+        const msg = await ch.messages.fetch(id).catch(() => null);
+        if (msg) await msg.edit({ embeds: [remindEmbed(L)], files: [file], attachments: [] });
+      }
+    } catch (e) { console.error('[lottery remind refresh]', e.message); }
   }
 
   async function closeLottery(guildId) {
@@ -559,6 +579,7 @@ function initLotto({ client, db, saveData }) {
         });
         // keep the permanent announcement's wheel + numbers current
         queueRender(() => refreshAnnouncement(gid));
+        queueRender(() => refreshReminders(gid));
         return;
       }
     } catch (e) { console.error('[lottery interaction]', e.message); }
@@ -567,7 +588,7 @@ function initLotto({ client, db, saveData }) {
   return { _test: {
     getState: () => stateOf, addEntry, pickWinner, ensureSched, pickTimes, entryList,
     buildWheelSVG, renderLiveGif, renderJoinGif, renderResultGif, renderWinnerStill,
-    startLottery, closeLottery, cancelLottery, tick, libyaDayKey, startOfLibyaDayUTC, leaderboardEmbed,
+    startLottery, closeLottery, cancelLottery, remind, refreshReminders, tick, libyaDayKey, startOfLibyaDayUTC, leaderboardEmbed,
     JOIN_GIF_MS, RESULT_GIF_MS,
   } };
 }
