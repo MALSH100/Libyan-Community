@@ -310,6 +310,8 @@ function getLottoCommands() {
     new SlashCommandBuilder().setName('lottery-leaderboard').setDescription('The lottery hall of fame — top winners').toJSON(),
     new SlashCommandBuilder().setName('lottery-start').setDescription('(Admin) Start a lottery right now')
       .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild).toJSON(),
+    new SlashCommandBuilder().setName('lottery-cancel').setDescription('(Admin) Stop the current lottery, refund all wagers and clear it')
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild).toJSON(),
     new SlashCommandBuilder().setName('lottery-channel').setDescription('(Admin) Hold lotteries in this channel')
       .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild).toJSON(),
   ];
@@ -435,6 +437,30 @@ function initLotto({ client, db, saveData }) {
     } catch (e) { console.error('[lottery close]', e.message); }
   }
 
+  // admin stop: cancel an active lottery, refund every wager (no winner), wipe its cache
+  async function cancelLottery(guildId) {
+    const state = stateOf(guildId); const L = state.active;
+    if (!L) return { none: true };
+    state.active = null;                                  // stop entries immediately
+    delete liveCache[guildId];                            // drop the cached wheel graphic
+    let refunded = 0, players = 0;
+    for (const [uid, e] of Object.entries(L.entries)) { awardDinar(db, guildId, uid, e.wager, saveData); refunded += e.wager; players++; }
+    state.history.unshift({ id: L.id, endedAt: Date.now(), pool: L.pool, entries: players, winnerId: null, cancelled: true });
+    state.history.length = Math.min(state.history.length, 10);
+    saveData(guildId);
+    try {
+      const ch = await client.channels.fetch(L.channelId);
+      await ch.send({ embeds: [new EmbedBuilder().setColor(0x777777).setTitle('🛑 Lottery cancelled')
+        .setDescription(players ? `An admin stopped the lottery. **All ${players} wager${players === 1 ? '' : 's'} refunded** — **${fmt(refunded)} Dinar** returned in full.` : 'An admin stopped the lottery. No entries to refund.')] });
+      if (L.messageId) {
+        const msg = await ch.messages.fetch(L.messageId).catch(() => null);
+        if (msg) await msg.edit({ embeds: [new EmbedBuilder().setColor(0x777777).setTitle('🛑 DINAR LOTTERY — CANCELLED')
+          .setDescription('This lottery was stopped by an admin. All wagers were refunded.')], files: [], attachments: [] });
+      }
+    } catch (e) { console.error('[lottery cancel]', e.message); }
+    return { refunded, players };
+  }
+
   function leaderboardEmbed(state) {
     const rows = Object.values(state.stats).filter(s => s.wins > 0)
       .sort((a, b) => b.won - a.won).slice(0, 10);
@@ -488,6 +514,16 @@ function initLotto({ client, db, saveData }) {
         return;
       }
 
+      if (interaction.commandName === 'lottery-cancel') {
+        if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild))
+          return interaction.reply({ content: 'You need **Manage Server** to cancel a lottery.', flags: 64 });
+        if (!state.active) return interaction.reply({ content: 'There is no lottery running right now.', flags: 64 });
+        await interaction.reply({ content: '🛑 Stopping the lottery and refunding all wagers…', flags: 64 });
+        const res = await cancelLottery(gid);
+        await interaction.editReply({ content: res.none ? '🛑 No active lottery to cancel.' : `🛑 Lottery cancelled — refunded **${fmt(res.refunded)} Dinar** across **${res.players}** player${res.players === 1 ? '' : 's'}.` });
+        return;
+      }
+
       if (interaction.commandName === 'lottery-leaderboard') {
         return interaction.reply({ embeds: [leaderboardEmbed(state)] });
       }
@@ -531,7 +567,7 @@ function initLotto({ client, db, saveData }) {
   return { _test: {
     getState: () => stateOf, addEntry, pickWinner, ensureSched, pickTimes, entryList,
     buildWheelSVG, renderLiveGif, renderJoinGif, renderResultGif, renderWinnerStill,
-    startLottery, closeLottery, tick, libyaDayKey, startOfLibyaDayUTC, leaderboardEmbed,
+    startLottery, closeLottery, cancelLottery, tick, libyaDayKey, startOfLibyaDayUTC, leaderboardEmbed,
     JOIN_GIF_MS, RESULT_GIF_MS,
   } };
 }
