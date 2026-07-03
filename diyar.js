@@ -44,8 +44,13 @@ const armouryCost = (tier) => ARMOURY_BASE * (tier + 1) * (tier >= 2 ? 2 : 1);
 const upgCost = (track, lvl) => UPG_BASE[track] * (lvl + 1) * (lvl >= 3 ? 2 : 1);   // steeper past level 3
 
 // ─── Boss ───────────────────────────────────────────────────────────────────
-const BOSS_DURATION_MS    = 6 * 3600 * 1000;      // time to defeat before it pillages
-const BOSS_STRIKE_CD_MS   = 30 * 1000;            // per-player strike cooldown (30s)
+const BOSS_DURATION_MS    = 20 * 60 * 1000;       // the siege lasts 20 minutes
+const BOSS_STRIKE_CD_MS   = 3 * 1000;             // per-player strike cooldown (3s)
+const THREAT_TICK_MS      = 3000;                  // live message edit + siege damage tick
+const THREAT_DMG_MIN      = 2;                     // garrison damage per tick per city (min)
+const THREAT_DMG_MAX      = 5;                     // garrison damage per tick per city (max)
+const THREAT_CITY_DMG_CAP = 800;                   // total damage cap per city — it weakens, never demolishes
+const THREAT_GARRISON_FLOOR = 20;                  // never grinds a garrison below this
 const BOSS_HP             = 10000;                 // flat boss HP
 const BOSS_HP_PER_PLAYER  = 0;                     // flat HP (raise this to scale with player count)
 const BOSS_SPAWNS_PER_DAY = 2;
@@ -640,16 +645,99 @@ function reinforceRow(raidId) {
     new ButtonBuilder().setCustomId(`dy:reinf:${raidId}`).setLabel('🛡 Send Reinforcements').setStyle(ButtonStyle.Success));
 }
 
+// ─── Threat (live siege) UI — text-based, distinct purple bar for the threat ──
+const threatBar = (frac) => { const n = Math.max(0, Math.min(12, Math.round(frac * 12))); return '🟪'.repeat(n) + '⬛'.repeat(12 - n); };
+
+function threatSiegeLines(state, b) {
+  if (!b.targets || !b.targets.length) return '*It found no ruled cities to besiege — bring it down for the spoils!*';
+  return b.targets.map(t => {
+    const c = state.cities[t.cityId];
+    const owner = c && c.ownerId ? state.players[c.ownerId]?.name : null;
+    const status = t.done === 'cap' ? '✅ *withstood the assault*'
+      : t.done === 'floor' ? '🏚 *defences shattered*'
+      : `🔥 −**${fmt(t.dmg)}** troops so far`;
+    return `🏙 **${esc(c.name)}**${owner ? ` (${esc(owner)})` : ''} — 🛡 **${fmt(c.garrison)}**  ${status}\n\`${raidBar(c.garrison, Math.max(1, t.startGarrison))}\``;
+  }).join('\n');
+}
+
+function threatEmbed(state) {
+  const b = state.boss;
+  const desc =
+    `*${b.tag}.* Strike it down before it razes the cities!\n\n` +
+    `👹 **Threat** — **${fmt(Math.max(0, b.hp))} / ${fmt(b.hpMax)}** HP\n\`${threatBar(b.hp / b.hpMax)}\`\n\n` +
+    `⚔ **Under siege**\n${threatSiegeLines(state, b)}\n\n` +
+    `⏳ **${msLeft(b.endsAt)}** left`;
+  return new EmbedBuilder().setColor(COLOR.red).setTitle(`👹 ${b.name}`).setDescription(desc)
+    .setFooter({ text: '⚔ Strike to attack — you can only strike once every 3s. Most damage = best loot.' });
+}
+
+function threatStrikeRow() {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('dy:strike').setLabel('⚔ Strike!').setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId('dy:bossdmg').setLabel('📊 Damage').setStyle(ButtonStyle.Secondary));
+}
+
+function threatDefeatEmbed(state, b, rewards) {
+  const lines = rewards.slice(0, 5).map((w, i) => `${['🥇','🥈','🥉'][i] || `**${i + 1}.**`} ${esc(w.name)} — ${fmt(w.dmg)} dmg → +${fmt(w.dinar)}💰${w.lp ? ` +${w.lp}LP` : ''}${w.weapon ? ' 🗡 weapon up!' : ''}`);
+  const siege = (b.targets || []).filter(t => t.dmg > 0)
+    .map(t => `🏙 ${esc(state.cities[t.cityId]?.name || t.cityId)} — lost **${fmt(t.dmg)}** troops to the siege`).join('\n');
+  return new EmbedBuilder().setColor(COLOR.green).setTitle(`💀 ${b.name} — DEFEATED`)
+    .setDescription(`The realm rallied and struck it down!\n\n**Spoils**\n${lines.join('\n') || '—'}${siege ? `\n\n**Siege toll**\n${siege}` : ''}`);
+}
+
+function threatWithdrawEmbed(res) {
+  const siege = res.razedCities.filter(t => t.dmg > 0)
+    .map(t => `🏙 ${esc(t.city)}${t.owner ? ` (${esc(t.owner)})` : ''} — lost **${fmt(t.dmg)}** troops`).join('\n');
+  return new EmbedBuilder().setColor(COLOR.grey).setTitle(`👹 ${res.name} withdraws!`)
+    .setDescription(`No one brought it down in time. It ravaged the land and slipped away.\n\n**Siege toll**\n${siege || '*The cities held — no lasting damage.*'}`);
+}
+
 // ─── Boss ─────────────────────────────────────────────────────────────────
+// leaderboard order: most cities first, then strength — used to pick siege targets
+function rankPlayers(state) {
+  return Object.entries(state.players)
+    .map(([id, p]) => ({ id, p, str: playerStrength(state, p), c: p.cities.length }))
+    .filter(r => r.c > 0)
+    .sort((a, b) => b.c - a.c || b.str - a.str);
+}
+
 function spawnBoss(state, saveData, guildId) {
   if (state.boss) return null;
   const def = BOSS_DEFS[Math.floor(Math.random() * BOSS_DEFS.length)];
-  const hpMax = BOSS_HP;
-  const owned = CITY_DEFS.map(c => state.cities[c.id]).filter(c => c.ownerId);
-  const target = owned.length ? owned[Math.floor(Math.random() * owned.length)] : null;
+  const ranked = rankPlayers(state);
+  const taken = new Set();
+  const randCityOf = (entry) => {
+    if (!entry) return null;
+    const pool = entry.p.cities.filter(id => !taken.has(id));
+    return pool.length ? pool[Math.floor(Math.random() * pool.length)] : null;
+  };
+  const targets = [];
+  const addTarget = (cityId) => {
+    if (!cityId || taken.has(cityId)) return;
+    taken.add(cityId);
+    const c = state.cities[cityId];
+    targets.push({ cityId, startGarrison: c.garrison, dmg: 0, done: null });
+  };
+  // 1st: always a random city of the #1 ranked ruler
+  addTarget(randCityOf(ranked[0]));
+  // 2nd: 70% a city of #2, 30% a city of #3 (falls back to whichever exists)
+  const second = Math.random() < 0.7 ? (randCityOf(ranked[1]) || randCityOf(ranked[2]))
+                                     : (randCityOf(ranked[2]) || randCityOf(ranked[1]));
+  addTarget(second);
+  // 3rd: any owned city not already under siege — owners with 2+ cities are 3× as likely
+  const pool = [];
+  for (const c of CITY_DEFS) {
+    const city = state.cities[c.id];
+    if (!city.ownerId || taken.has(c.id)) continue;
+    const w = (state.players[city.ownerId]?.cities.length || 0) >= 2 ? 3 : 1;
+    for (let k = 0; k < w; k++) pool.push(c.id);
+  }
+  if (pool.length) addTarget(pool[Math.floor(Math.random() * pool.length)]);
+
   state.boss = {
-    name: def.name, tag: def.tag, hpMax, hp: hpMax, spawnedAt: Date.now(), endsAt: Date.now() + BOSS_DURATION_MS,
-    damage: {}, targetCityId: target ? target.id : null, channelId: state.channelId, messageId: null,
+    name: def.name, tag: def.tag, hpMax: BOSS_HP, hp: BOSS_HP,
+    spawnedAt: Date.now(), endsAt: Date.now() + BOSS_DURATION_MS,
+    damage: {}, targets, channelId: state.channelId, messageId: null,
   };
   if (saveData) saveData(guildId);
   return state.boss;
@@ -662,8 +750,8 @@ function strikeBoss(state, saveData, guildId, userId) {
   const p = state.players[userId];
   if (!p) return { error: 'Join the game first with /diyar.' };
   const now = Date.now();
-  if (now - p.lastStrikeAt < BOSS_STRIKE_CD_MS) return { error: `You're rallying troops. Strike again in ${msLeft(p.lastStrikeAt + BOSS_STRIKE_CD_MS)}.` };
-  const dmg = Math.round((p.army * (1 + p.upg.mil * 0.1 + p.weaponTier * 0.15) + 50) * rnd(0.8, 1.2));
+  if (now - p.lastStrikeAt < BOSS_STRIKE_CD_MS) return { error: `⏳ Catch your breath — you can strike again in **${Math.ceil((p.lastStrikeAt + BOSS_STRIKE_CD_MS - now) / 1000)}s**.` };
+  const dmg = Math.round((p.army * 0.06 * (1 + p.upg.mil * 0.1 + p.weaponTier * 0.15) + 12) * rnd(0.8, 1.2));   // chip damage — tuned for the 3s cooldown
   b.hp -= dmg;
   b.damage[userId] = (b.damage[userId] || 0) + dmg;
   p.lastStrikeAt = now;
@@ -695,19 +783,14 @@ function resolveBossDefeat(state, db, guildId, saveData) {
 
 function resolveBossExpire(state, db, guildId, saveData) {
   const b = state.boss; if (!b) return null;
-  const city = b.targetCityId ? state.cities[b.targetCityId] : null;
-  let razed = null;
-  if (city && city.ownerId) {
-    const owner = state.players[city.ownerId];
-    const looted = Math.min(Math.round(getDinar(db, guildId, city.ownerId) * 0.1), getDinar(db, guildId, city.ownerId));
-    if (looted > 0) spendDinar(db, guildId, city.ownerId, looted, saveData);
-    const before = city.garrison;
-    city.garrison = Math.round(city.garrison * 0.3);
-    razed = { city: city.name, owner: owner ? owner.name : null, looted, garrisonLost: before - city.garrison };
-  }
+  // the siege damage was inflicted LIVE while it raged — expiry just means it withdraws unslain
+  const razedCities = (b.targets || []).map(t => {
+    const c = state.cities[t.cityId];
+    return { city: c ? c.name : t.cityId, owner: c && c.ownerId ? (state.players[c.ownerId]?.name || null) : null, dmg: t.dmg };
+  });
   state.boss = null;
   if (saveData) saveData(guildId);
-  return { razed, name: b.name };
+  return { name: b.name, razedCities };
 }
 
 // ─── Boss scheduler (persistent, survives redeploys — same model as spawns) ──
@@ -946,11 +1029,12 @@ function leaderboard(state) {
 
 function bossView(state) {
   const b = state.boss;
-  if (!b) return { embeds: [new EmbedBuilder().setColor(COLOR.grey).setTitle('👹 Boss').setDescription('No threat is active. They strike at random times — watch the war room.')], components: [backRow()] };
+  if (!b) return { embeds: [new EmbedBuilder().setColor(COLOR.grey).setTitle('👹 Threat').setDescription('No threat is active. They strike at random times — watch the war room.')], components: [backRow()] };
   const ranked = Object.entries(b.damage).sort((a, c) => c[1] - a[1]).slice(0, 5)
     .map(([uid, d], i) => `**${i + 1}.** ${esc(state.players[uid]?.name || 'Unknown')} — ${fmt(d)}`);
   const embed = new EmbedBuilder().setColor(COLOR.red).setTitle(`👹 ${b.name}`)
-    .setDescription(`HP **${fmt(Math.max(0, b.hp))} / ${fmt(b.hpMax)}** • ⏳ ${msLeft(b.endsAt)} left\n\n**Top damage**\n${ranked.join('\n') || '— no strikes yet —'}`);
+    .setDescription(`👹 **${fmt(Math.max(0, b.hp))} / ${fmt(b.hpMax)}** HP • ⏳ ${msLeft(b.endsAt)} left\n\`${threatBar(b.hp / b.hpMax)}\`\n\n⚔ **Under siege**\n${threatSiegeLines(state, b)}\n\n**Top damage**\n${ranked.join('\n') || '— no strikes yet —'}`)
+    .setFooter({ text: '⚔ You can only strike once every 3s.' });
   return { embeds: [embed], components: [new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('dy:strike').setLabel('⚔ Strike!').setStyle(ButtonStyle.Danger)), backRow()] };
 }
@@ -1007,6 +1091,8 @@ function getDiyarCommands() {
       .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild).toJSON(),
     new SlashCommandBuilder().setName('diyar-reset').setDescription('(Admin) Wipe all progress and start a fresh season (player Dinar is kept)')
       .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild).toJSON(),
+    new SlashCommandBuilder().setName('diyar-spawn-threat').setDescription('(Admin) Unleash a threat on the realm right now')
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild).toJSON(),
   ];
 }
 
@@ -1014,20 +1100,66 @@ function initDiyar({ client, db, saveData, awardLP }) {
   const stateOf = (guildId) => getState(db, guildId, saveData);
 
   // ----- boss scheduler tick -----
+  const threatTimers = {};   // in-memory siege intervals per guild (not persisted)
   async function postBoss(guildId) {
     const state = stateOf(guildId);
     const b = state.boss; if (!b || !state.channelId) return;
     try {
       const ch = await client.channels.fetch(state.channelId);
-      const embed = new EmbedBuilder().setColor(COLOR.red).setTitle(`👹 ${b.name} appears!`)
-        .setDescription(`${b.tag}. Everyone can **strike** it — most damage wins the best loot. If it isn't slain in **${Math.round(BOSS_DURATION_MS/3600000)}h**, it pillages a city!`)
-        .setImage('attachment://diyar-boss.png');
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('dy:strike').setLabel('⚔ Strike!').setStyle(ButtonStyle.Danger),
-        new ButtonBuilder().setCustomId('dy:bossdmg').setLabel('📊 Damage').setStyle(ButtonStyle.Secondary));
-      const msg = await ch.send({ embeds: [embed], components: [row], files: [renderBoss(b)] });
+      const msg = await ch.send({ embeds: [threatEmbed(state)], components: [threatStrikeRow()] });
       b.messageId = msg.id; b.channelId = ch.id; saveData(guildId);
-    } catch (e) { console.error('[diyar boss post]', e.message); }
+    } catch (e) { console.error('[diyar threat post]', e.message); }
+    startThreatLoop(guildId);
+  }
+  function startThreatLoop(guildId) {
+    if (threatTimers[guildId]) clearInterval(threatTimers[guildId]);
+    threatTimers[guildId] = setInterval(() => threatTick(guildId).catch(e => console.error('[diyar threat tick]', e.message)), THREAT_TICK_MS);
+  }
+  async function threatTick(guildId) {
+    const state = stateOf(guildId); const b = state.boss;
+    if (!b) { clearInterval(threatTimers[guildId]); delete threatTimers[guildId]; return; }
+    if (b.hp <= 0) return finishThreat(guildId, 'defeated');
+    if (Date.now() > b.endsAt) return finishThreat(guildId, 'expired');
+    // the siege grinds each targeted city by 2–5 troops per tick, capped so it weakens but never demolishes
+    for (const t of (b.targets || [])) {
+      if (t.done) continue;
+      const c = state.cities[t.cityId]; if (!c) { t.done = 'floor'; continue; }
+      let dmg = THREAT_DMG_MIN + Math.floor(Math.random() * (THREAT_DMG_MAX - THREAT_DMG_MIN + 1));
+      dmg = Math.min(dmg, THREAT_CITY_DMG_CAP - t.dmg, Math.max(0, c.garrison - THREAT_GARRISON_FLOOR));
+      if (dmg > 0) { c.garrison -= dmg; t.dmg += dmg; }
+      if (t.dmg >= THREAT_CITY_DMG_CAP) t.done = 'cap';
+      else if (c.garrison <= THREAT_GARRISON_FLOOR) t.done = 'floor';
+    }
+    saveData(guildId);
+    if (b.channelId && b.messageId) {
+      try {
+        const ch = await client.channels.fetch(b.channelId);
+        const msg = await ch.messages.fetch(b.messageId);
+        await msg.edit({ embeds: [threatEmbed(state)], components: [threatStrikeRow()] });
+      } catch { /* message gone — the siege still grinds on */ }
+    }
+  }
+  async function finishThreat(guildId, how) {
+    const state = stateOf(guildId); const b = state.boss;
+    if (threatTimers[guildId]) { clearInterval(threatTimers[guildId]); delete threatTimers[guildId]; }
+    if (!b) return;
+    const bm = { channelId: b.channelId, messageId: b.messageId };
+    let finale;
+    if (how === 'defeated') {
+      const snapshot = { name: b.name, targets: b.targets };
+      const res = resolveBossDefeat(state, db, guildId, saveData);
+      if (res) for (const w of res.rewards) if (w.lp) awardLP(guildId, w.uid, w.lp, 'diyar');
+      finale = threatDefeatEmbed(state, snapshot, res ? res.rewards : []);
+    } else {
+      const res = resolveBossExpire(state, db, guildId, saveData);
+      finale = threatWithdrawEmbed(res);
+    }
+    try {
+      const ch = await client.channels.fetch(bm.channelId);
+      const msg = bm.messageId ? await ch.messages.fetch(bm.messageId).catch(() => null) : null;
+      if (msg) await msg.edit({ embeds: [finale], components: [] });
+      else await announce(guildId, { embeds: [finale] });
+    } catch (e) { console.error('[diyar threat finish]', e.message); }
   }
   async function announce(guildId, payload) {
     const state = stateOf(guildId); if (!state.channelId) return;
@@ -1073,29 +1205,15 @@ function initDiyar({ client, db, saveData, awardLP }) {
       else await ch.send({ embeds: [raidResultEmbed(result)] });
     } catch (e) { console.error('[diyar raid finish]', e.message); }
   }
-  async function refreshBossMessage(guildId) {
-    const state = stateOf(guildId); const b = state.boss;
-    if (!b || !b.channelId || !b.messageId) return;
-    try {
-      const ch = await client.channels.fetch(b.channelId);
-      const msg = await ch.messages.fetch(b.messageId);
-      const embed = EmbedBuilder.from(msg.embeds[0]).setImage('attachment://diyar-boss.png');
-      await msg.edit({ embeds: [embed], files: [renderBoss(b)] });
-    } catch { /* message gone */ }
-  }
-
   async function tick() {
     const now = Date.now();
     for (const guild of client.guilds.cache.values()) {
       const state = db[guild.id] && db[guild.id].__diyar;
       if (!state) continue;
-      // expire an unbeaten boss
-      if (state.boss && now > state.boss.endsAt) {
-        const res = resolveBossExpire(state, db, guild.id, saveData);
-        if (res && res.razed) {
-          await announce(guild.id, { embeds: [new EmbedBuilder().setColor(COLOR.red).setTitle(`👹 ${res.name} escaped!`)
-            .setDescription(`No one slew it in time. It pillaged **${res.razed.city}**${res.razed.owner ? ` (${res.razed.owner})` : ''} — 🛡 −${fmt(res.razed.garrisonLost)} garrison${res.razed.looted ? `, 💰 −${fmt(res.razed.looted)} Dinar` : ''}.`)] });
-        }
+      // threat recovery: resolve an expired siege, or reattach the live loop after a redeploy
+      if (state.boss) {
+        if (now > state.boss.endsAt && !threatTimers[guild.id]) await finishThreat(guild.id, 'expired');
+        else if (!threatTimers[guild.id]) startThreatLoop(guild.id);
       }
       // spawn due bosses (only if a war room is set)
       if (state.channelId) {
@@ -1174,6 +1292,17 @@ function initDiyar({ client, db, saveData, awardLP }) {
             new ButtonBuilder().setCustomId('dy:reset_cancel').setLabel('Cancel').setStyle(ButtonStyle.Secondary));
           return interaction.reply(eph({ content: '⚠️ This wipes **all Diyar progress** — every player, city and ranking — and reseeds the map with fresh militias. Player **Dinar balances are not affected**. This cannot be undone.', components: [row] }));
         }
+        if (interaction.commandName === 'diyar-spawn-threat') {
+          if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild))
+            return interaction.reply(eph({ content: 'You need the **Manage Server** permission to unleash a threat.' }));
+          const state = stateOf(gid);
+          if (state.boss) return interaction.reply(eph({ content: `👹 **${state.boss.name}** is already ravaging the realm — deal with that one first.` }));
+          if (!state.channelId) return interaction.reply(eph({ content: 'Set a war room first with `/diyar-set-channel` so the threat has somewhere to appear.' }));
+          spawnBoss(state, saveData, gid);
+          await interaction.reply(eph({ content: '👹 A threat has been unleashed — check the war room!' }));
+          await postBoss(gid);
+          return;
+        }
         return;
       }
 
@@ -1193,29 +1322,10 @@ function initDiyar({ client, db, saveData, awardLP }) {
       if (action === 'strike') {
         const r = strikeBoss(state, saveData, gid, uid);
         if (r.error) return interaction.reply(eph({ content: r.error }));
-        await interaction.reply(eph({ content: `⚔ You hit **${state.boss ? state.boss.name : 'the enemy'}** for **${fmt(r.dmg)}**! (your total: ${fmt(r.total)})` }));
-        if (r.killed) {
-          const bm = state.boss ? { channelId: state.boss.channelId, messageId: state.boss.messageId, name: state.boss.name } : null;
-          const res = resolveBossDefeat(state, db, gid, saveData);
-          if (res) {
-            const lines = res.rewards.slice(0, 5).map((w, i) => `${['🥇','🥈','🥉'][i] || `**${i+1}.**`} ${esc(w.name)} — ${fmt(w.dmg)} dmg → +${fmt(w.dinar)}💰${w.lp ? ` +${w.lp}LP` : ''}${w.weapon ? ' 🗡 weapon up!' : ''}`);
-            for (const w of res.rewards) if (w.lp) awardLP(gid, w.uid, w.lp, 'diyar');
-            await announce(gid, { embeds: [new EmbedBuilder().setColor(COLOR.green).setTitle('🎉 The threat is vanquished!')
-              .setDescription(`The realm is safe. Spoils:\n\n${lines.join('\n')}`)] });
-          }
-          // re-edit the ORIGINAL threat message: show defeated, strip the strike/damage buttons + image
-          if (bm && bm.channelId && bm.messageId) {
-            try {
-              const ch = await client.channels.fetch(bm.channelId);
-              const msg = await ch.messages.fetch(bm.messageId);
-              await msg.edit({ embeds: [new EmbedBuilder().setColor(COLOR.green).setTitle(`💀 ${bm.name} — DEFEATED`)
-                .setDescription('The threat has been vanquished. The realm is safe.')], components: [], files: [], attachments: [] });
-            } catch (e) { console.error('[diyar boss defeat edit]', e.message); }
-          }
-        } else {
-          await refreshBossMessage(gid);
-        }
-        return;
+        // the live siege loop (every 3s) refreshes the bars and resolves the kill — no edits needed here
+        return interaction.reply(eph({ content: r.killed
+          ? `⚔ You hit **${state.boss ? state.boss.name : 'the enemy'}** for **${fmt(r.dmg)}** — the killing blow! (your total: ${fmt(r.total)})`
+          : `⚔ You hit **${state.boss ? state.boss.name : 'the enemy'}** for **${fmt(r.dmg)}**! (your total: ${fmt(r.total)})` }));
       }
       if (action === 'bossdmg') return interaction.reply(eph(bossView(state)));
 
@@ -1357,8 +1467,8 @@ function initDiyar({ client, db, saveData, awardLP }) {
     _test: {
       getState: () => stateOf, ensurePlayer, resolveAttack, recruit, upgrade, reinforce, collectIncome,
       spawnBoss, strikeBoss, resolveBossDefeat, resolveBossExpire, playerStrength, ensureBossSched,
-      pendingIncome, renderMap, renderBoss, renderBattle, pickTimes, reseedIfLanded,
-      claimTribute, buyWeapon, armouryView, profileView, resetSeason, targetSelect, reinforceSelect, effectiveDefence, effectiveAttack, startRaid, resolveRaid, troopCost, raidLiveEmbed, raidResultEmbed,
+      pendingIncome, renderMap, renderBoss, renderBattle, pickTimes, reseedIfLanded, rankPlayers, threatEmbed, threatSiegeLines, threatBar,
+      claimTribute, buyWeapon, armouryView, profileView, resetSeason, targetSelect, reinforceSelect, effectiveDefence, effectiveAttack, startRaid, resolveRaid, troopCost, raidLiveEmbed, raidResultEmbed, threatTick, finishThreat,
     },
   };
 }
