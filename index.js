@@ -1651,16 +1651,16 @@ async function handleCommand(interaction, commandName, user, guild) {
   // ── /libyan-commands and /clan-commands (alias) ─────────────────────────────
   if (commandName === 'clan-commands' || commandName === 'libyan-commands') {
     const pages = [
-      new EmbedBuilder().setColor(0x5865F2).setTitle('🏛️ Libyan Community Bot — Page 1/6: Clan Management')
+      new EmbedBuilder().setColor(0x5865F2).setTitle('🏛️ Libyan Community Bot — Page 1/8: Clan Management')
         .addFields(
           { name: '📋 Info', value: ['`/libyan-commands` — This menu', '`/clan-info [name]` — View clan details', '`/clan-list` — All clans ranked by XP', '`/clan-xp` — XP leaderboard', '`/libyan-stats [@user]` — View Libyan Points (LP) & Dinar'].join('\n') },
           { name: '🏰 Management', value: ['`/clan-create <name>` — Create a clan', '`/clan-disband` — Delete your clan *(Leader)*', '`/clan-rename <name> [emoji]` *(Leader)*', '`/clan-description <text>` *(Leader/Officer)*', '`/clan-motto <text>` *(Leader/Officer)*', '`/clan-ranks <member> <officer> <leader>` *(Leader)*'].join('\n') },
           { name: '👥 Membership', value: ['`/clan-invite @user` *(Leader/Officer)*', '`/clan-invite-accept`', '`/clan-invite-decline`', '`/clan-kick @user` *(Leader/Officer)*', '`/clan-leave`'].join('\n') },
           { name: '🛡️ Ranks', value: ['`/clan-promote @user` *(Leader)*', '`/clan-demote @user` *(Leader)*', '`/clan-transfer @user` *(Leader)*'].join('\n') },
           { name: '📢 Channel & Wars', value: ['`/clan-channel-create` *(Leader)*', '`/clan-channel-link` — set spawn channel *(Leader)*', '`/clan-channel-delete` *(Leader)*', '`/clan-war <clan>` *(Leader/Officer)*', '`/clan-war-accept` *(Leader/Officer)*', '`/clan-war-decline` *(Leader/Officer)*'].join('\n') },
-        ).setFooter({ text: 'Page 1 of 6 — use buttons to navigate' }),
+        ).setFooter({ text: 'Page 1 of 8 — use buttons to navigate' }),
 
-      new EmbedBuilder().setColor(0xFF0000).setTitle('🎮 Libyan Community Bot — Page 2/6: Pokémon')
+      new EmbedBuilder().setColor(0xFF0000).setTitle('🎮 Libyan Community Bot — Page 2/8: Pokémon')
         .addFields(
           { name: '🌿 Catching', value: ['`/pokemon-team` — Your Pokémon', '`/pokemon-stats <slot>` — Detailed stats + XP bar', '`/pokemon-view @user` — View someone\'s Pokémon', '`/pokemon-release <slot>` — Release a Pokémon', '`/pokemon-nickname <slot> <name>` — Nickname', '`/pokemon-info <name>` — Look up any Pokémon'].join('\n') },
           { name: '⚔️ Battles', value: ['`/pokemon-challenge @user <slot>` — Challenge to 1v1', '`/pokemon-accept <slot>` — Accept challenge', '`/pokemon-decline` — Decline challenge'].join('\n') },
@@ -1669,17 +1669,17 @@ async function handleCommand(interaction, commandName, user, guild) {
           { name: '⚙️ Clan Channel', value: '`/clan-pokemon <on/off>` — Turn spawns & item drops on or off in your clan channel *(Leader/Officer)*' },
           { name: '📊 Stats', value: ['`/pokemon-leaderboard` — Clan Pokémon rankings', '`/pokemon-server` — Server top Pokémon by wins', '`/pokedex` — Clan Pokédex completion'].join('\n') },
           { name: '⏱️ Timings', value: 'Wild Pokémon spawn every **5 hours**, flee after **3 hours**\nItem drops every **7 hours**, expire after **5 hours**\nShiny chance: 1 in 50 🌟' },
-        ).setFooter({ text: 'Page 2 of 6 — use buttons to navigate' }),
+        ).setFooter({ text: 'Page 2 of 8 — use buttons to navigate' }),
 
-      new EmbedBuilder().setColor(0xFFD700).setTitle('🏅 Libyan Community Bot — Page 3/6: Rank Permissions')
+      new EmbedBuilder().setColor(0xFFD700).setTitle('🏅 Libyan Community Bot — Page 3/8: Rank Permissions')
         .addFields(
           { name: '👑 Leader', value: ['✅ All permissions', '✅ Disband, rename, transfer', '✅ Promote, demote, kick anyone', '✅ Start & accept wars', '✅ Create/delete clan channel'].join('\n') },
           { name: '🛡️ Officer', value: ['✅ Invite & kick members', '✅ Set description & motto', '✅ Start clan wars', '❌ Cannot disband/rename/transfer', '❌ Cannot kick other Officers'].join('\n') },
           { name: '⚔️ Member', value: ['✅ View clan info', '✅ Participate in Pokémon & Ya Rayt', '✅ Claim item drops', '✅ Leave the clan', '❌ Cannot invite, kick or start wars'].join('\n') },
           { name: '🏛️ Libyan Points (LP)', value: ['War win: **+50 LP** per member', 'War loss: **+10 LP** per member', 'Catch Pokémon: **+1 LP**', 'Win Pokémon battle: **+15 LP**', 'Lose Pokémon battle: **+3 LP**', 'Ya Rayt reaction received: **+1 LP** each', 'Ya Rayt round winner: **+10 LP** bonus'].join('\n') },
-        ).setFooter({ text: 'Page 3 of 6 — use buttons to navigate' }),
+        ).setFooter({ text: 'Page 3 of 8 — use buttons to navigate' }),
 
-      new EmbedBuilder().setColor(0x00AA44).setTitle('🇱🇾 Libyan Community Bot — Page 4/6: Ya Rayt & Post of the Day')
+      new EmbedBuilder().setColor(0x00AA44).setTitle('🇱🇾 Libyan Community Bot — Page 4/8: Ya Rayt & Post of the Day')
         .addFields(
           { name: '📖 What is Ya Rayt?', value: '"Ya Rayt" (يا ريت) means **"I wish"** in Libyan Arabic.\nEvery 2 days at **6PM Libya time**, a new round opens.\nAt **8PM Libya time**, the round closes and results are posted.' },
           { name: '🎮 Commands', value: ['`/yarayt <wish>` — Submit your wish for the round (1 per round)', '`/top-yarayt` — Top 10 users by total reactions', '`/top-relatable-yarayt` — Top 10 🇱🇾 Relatable', '`/top-funny-yarayt` — Top 10 😂 Funny', '`/top-wholesome-yarayt` — Top 10 ❤️ Wholesome', '`/top-bold-yarayt` — Top 10 🔥 Bold'].join('\n') },
@@ -1687,27 +1687,45 @@ async function handleCommand(interaction, commandName, user, guild) {
           { name: '🏛️ LP Rewards', value: 'Each reaction received = **+1 LP**\nMost reactions in round = **+10 LP** bonus' },
           { name: '🏆 Post of the Day', value: 'Every day at **9PM Libya time**, the bot crowns the author of the most-reacted message (min **3 reactions**) from the last 24h and gives them a hoisted **Poster of the Day** role for 24h.' },
           { name: '🎮 POTD Command & Rewards', value: '`/potd-hall-of-fame` — View the all-time Post of the Day winners\nWinner: **+50 LP** · streak bonus (day 2+): **+25 LP/day**' },
-        ).setFooter({ text: 'Page 4 of 6 — use buttons to navigate' }),
+        ).setFooter({ text: 'Page 4 of 8 — use buttons to navigate' }),
 
-      new EmbedBuilder().setColor(0xE91E63).setTitle('🎴 Libyan Community Bot — Page 5/6: Collection Game (Qa\'ima)')
+      new EmbedBuilder().setColor(0xE91E63).setTitle('🎴 Libyan Community Bot — Page 5/8: Collection Game (Qa\'ima)')
         .setDescription('Collect your fellow members as cards! Opt in to become claimable, then roll, claim, trade and build a collection. Everything runs on **Dinar** 💰, the server currency.')
         .addFields(
           { name: '🚪 Getting in', value: ['`/gacha-optin` — Become a claimable card', '`/gacha-optout` — Leave & wipe all claims of you', '`/gacha-list` — See who has opted in'].join('\n') },
           { name: '🎲 Playing', value: ['`/gacha-roll` — Drop a random member as a card *(once every 3h)*', '`/gacha-wish @user` — Wishlist someone (pings them)', '`/gacha-wishlist` — View / clear your wishlist', '`/gacha-collection [@user]` — View a collection', '`/gacha-rarest` — The 15 rarest cards in the server'].join('\n') },
-          { name: '💰 Dinar & trading', value: ['`/dinar [@user]` — Check a Dinar balance', '`/gacha-daily` — Claim daily Dinar', '`/dinar-flip <bet> <heads/tails>` — Coin toss for Dinar (every 2h)', '`/dinar-richest` — Top 10 richest', '`/dinar-flip-leaderboard` — Top 10 coin-flip winners', '`/gacha-release @user` — Release a card for Dinar', '`/gacha-trade @with @give @receive` — Swap cards', '`/gacha-raid @owner @card` — Try to take a card from someone'].join('\n') },
+          { name: '💰 Dinar & trading', value: ['`/dinar [@user]` — Check a Dinar balance', '`/dinar-daily` — Claim daily Dinar', '`/dinar-flip <bet> <heads/tails>` — Coin toss for Dinar (every 2h)', '`/dinar-richest` — Top 10 richest', '`/dinar-flip-leaderboard` — Top 10 coin-flip winners', '`/gacha-release @user` — Release a card for Dinar', '`/gacha-trade @with @give @receive` — Swap cards', '`/gacha-raid @owner @card` — Try to take a card from someone'].join('\n') },
           { name: '⚡ How a roll works', value: ['• `/gacha-roll` warns, then drops the card after **5s**', '• **Anyone** can hit Claim — first click wins (sniping!)', '• A card expires if unclaimed after **60s**', '• Roll an already-owned member → a **💵 Dinar Drop** button appears instead', '• You must be **opted in** to claim cards or grab Dinar'].join('\n') },
           { name: '⚔️ How a raid works', value: ['• `/gacha-raid` lets you try to take an owned card — for a fee (10% of its value)', '• Must be run in a **public channel** so the owner can see & defend', '• The owner has **10h** to react ❌ to **defend**', '• Defended → you lose the fee, the owner keeps the card + up to a **50 Dinar** reward', '• Not defended → the card is **yours**', '• 1 raid/day, max 3 active, and each card is safe for 2 days after a raid', '• **Active owners almost never lose** — just defend!'].join('\n') },
-        ).setFooter({ text: 'Page 5 of 6 — use buttons to navigate' }),
+        ).setFooter({ text: 'Page 5 of 8 — use buttons to navigate' }),
 
-      new EmbedBuilder().setColor(0xF1C40F).setTitle('💎 Libyan Community Bot — Page 6/6: Rarity & Earning Dinar')
+      new EmbedBuilder().setColor(0xF1C40F).setTitle('💎 Libyan Community Bot — Page 6/8: Rarity & Earning Dinar')
         .setDescription('**Your card\'s rarity is earned, not random.** It is based on how active you are in the server, compared to everyone else in the game.')
         .addFields(
           { name: '⭐ How rarity is decided', value: ['Each opted-in member gets an **activity score** from:', '• 🏆 Clan war wins', '• 🇱🇾 Ya Rayt participation', '• 📸 Post of the Day wins', '• 🎮 Pokémon caught & battle wins', 'Your score is ranked against everyone in the pool to set your tier.'].join('\n') },
           { name: '🏅 The tiers (rarest → most common)', value: ['🔴 **Mythic** — top 1% · 15,000 Dinar', '🟡 **Legendary** — top 5% · 5,000 Dinar', '🟣 **Epic** — top 20% · 1,500 Dinar', '🔵 **Rare** — top 50% · 500 Dinar', '⚪ **Common** — everyone else · 100 Dinar'].join('\n') },
           { name: '📈 Rarity is LIVE', value: 'Rarities recalculate regularly. The more active you are, the rarer and more valuable **your** card becomes — and as the whole server gets more active, the bar to stay rare rises. Stay active to keep your value up!' },
-          { name: '💰 How to earn Dinar', value: ['• `/gacha-daily` — **+50** per day', '• 💵 Grab **Dinar Drops** when an owned card is rolled', '• 🏆 Win a Clan War — **+100**', '• 🇱🇾 Win Ya Rayt — **+500**', '• 📸 Win Post of the Day — **+300**', '• 🎮 Catch a Pokémon — **+20** · win a battle — **+75**', '• 💔 Release a card — **50%** of its value back', '• 🔁 Trade with other collectors', '• ⚠️ Clan wars & Pokémon battles each cap at **300 Dinar/day** (anti-farming)'].join('\n') },
+          { name: '💰 How to earn Dinar', value: ['• `/dinar-daily` — **+50** per day', '• 💵 Grab **Dinar Drops** when an owned card is rolled', '• 🏆 Win a Clan War — **+100**', '• 🇱🇾 Win Ya Rayt — **+500**', '• 📸 Win Post of the Day — **+300**', '• 🎮 Catch a Pokémon — **+20** · win a battle — **+75**', '• 💔 Release a card — **50%** of its value back', '• 🔁 Trade with other collectors', '• ⚠️ Clan wars & Pokémon battles each cap at **300 Dinar/day** (anti-farming)'].join('\n') },
           { name: '🛒 Spending Dinar', value: 'Claiming a card costs its **Dinar value** (a Mythic costs 15,000!). Winning the games is how you afford the best cards.' },
-        ).setFooter({ text: 'Page 6 of 6 — use buttons to navigate' }),
+        ).setFooter({ text: 'Page 6 of 8 — use buttons to navigate' }),
+
+      new EmbedBuilder().setColor(0xC8A24A).setTitle('🏛️ Libyan Community Bot — Page 7/8: Diyar (Conquest of Libya)')
+        .setDescription('Raise an army, seize cities across a map of Libya, build an empire and defend it — a live strategy game running on **Dinar** 💰.')
+        .addFields(
+          { name: '🗺️ Getting started', value: ['`/diyar` — Open your dashboard: join, attack, recruit, upgrade & collect', '`/diyar-map` — Post the current map of Libya', '`/diyar-leaderboard` — The top conquerors, their cities & war records', 'Join landless if the map is full — raid your way to a first city!'].join('\n') },
+          { name: '⚔️ Playing', value: ['From the dashboard you can **Raid** rival or neutral cities, **Recruit** troops, **Reinforce** a city, **Upgrade** (Military / Fortifications / Economy), buy weapons at the **Armoury**, **Collect** income, and **Strike** the world threat.', 'Cities earn Dinar hourly (collect every **90 min**). Bigger empires pay more per troop, so sprawling is costly.'].join('\n') },
+          { name: '🛡️ Live raids', value: ['Raiding a player runs **live for 30s** — the defender is pinged and can hit **Send Reinforcements** for a big defence boost.', 'Miss it and you still defend at full strength — reinforcing is only ever a bonus. Watch the health bars tell the story!'].join('\n') },
+          { name: '👹 The Threat', value: ['A monster appears at random times (or via admin) and besieges **3 cities** at once with a live health-bar battle.', 'Everyone can **Strike** it (once every 3s). Slay it in **20 min** for the best loot, or it weakens the cities and withdraws. It never fully destroys a city.'].join('\n') },
+          { name: '⚙️ Fairness & admin', value: ['A match-band stops the strong from punching down on much weaker players (neutral militias are always fair game).', 'Garrisons cap at **3,000** troops per city. Admins: `/diyar-set-channel`, `/diyar-spawn-threat`, `/diyar-reset`.'].join('\n') },
+        ).setFooter({ text: 'Page 7 of 8 — use buttons to navigate' }),
+
+      new EmbedBuilder().setColor(0xE7B41A).setTitle('🎡 Libyan Community Bot — Page 8/8: Dinar Lottery')
+        .setDescription('A casino-style lottery wheel that spins up **twice a day at random times** (11:00–23:00 Libya time). Wager Dinar, and the winner takes the **entire pool** 💰.')
+        .addFields(
+          { name: '🎟️ How to play', value: ['`/dinar-lotto <wager>` — Enter the live lottery (**1–500 Dinar**, one entry each)', 'Your wager is your slice of the wheel — **bigger wager = better odds**', 'Each lottery runs for **1 hour**; a reminder posts every 15 min'].join('\n') },
+          { name: '🏆 Winning', value: ['Odds are **wager-weighted**: chance = your wager ÷ total pool', 'When it closes, a suspense spin lands on the winner and they win the **whole pool**', '`/lottery-leaderboard` — The hall of fame: top winners of all time'].join('\n') },
+          { name: '⚙️ Admin', value: ['`/lottery-channel` — Set the channel lotteries run in', '`/lottery-start` — Start one immediately', '`/lottery-cancel` — Stop the current lottery & refund every wager'].join('\n') },
+        ).setFooter({ text: 'Page 8 of 8 — use buttons to navigate' }),
     ];
 
     const prev = new ButtonBuilder().setCustomId('cmd_prev').setLabel('◀ Previous').setStyle(ButtonStyle.Secondary);
