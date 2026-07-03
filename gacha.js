@@ -11,7 +11,7 @@
 //  • Rarity (Common→Mythic) is LIVE — ranked from each member's activity score
 //    (LP, Pokémon, Ya Rayt, POTD) against the rest of the pool, so it shifts as
 //    the server grows. Rarer cards are worth more Dinar and appear less often.
-//  • Earn Dinar: /gacha-daily, releasing members, Dinar drops, and (via the
+//  • Earn Dinar: /dinar-daily, releasing members, Dinar drops, and (via the
 //    exported awardDinar) clan wars, Ya Rayt, POTD, and Pokémon.
 //
 // COOLDOWNS: roll is PER-USER, once every 2 hours; claim is once per day per
@@ -246,7 +246,7 @@ function getGachaCommands() {
       .addStringOption(o => o.setName('action').setDescription('view or remove').setRequired(false)
         .addChoices({ name: 'view', value: 'view' }, { name: 'remove', value: 'remove' }))
       .addUserOption(o => o.setName('user').setDescription('Member to remove').setRequired(false)),
-    new SlashCommandBuilder().setName('gacha-daily').setDescription('Claim your daily Dinar').setDMPermission(false),
+    new SlashCommandBuilder().setName('dinar-daily').setDescription('Claim your daily Dinar').setDMPermission(false),
     new SlashCommandBuilder().setName('dinar').setDescription('Check a Dinar balance').setDMPermission(false)
       .addUserOption(o => o.setName('user').setDescription('Whose balance (default: you)').setRequired(false)),
     new SlashCommandBuilder().setName('dinar-set').setDescription('Set a member\'s Dinar balance exactly (admin only)')
@@ -310,7 +310,7 @@ function getGachaCommands() {
 // ─── Init ────────────────────────────────────────────────────────────────────
 function initGacha({ client, db, saveData }) {
   const CMDS = new Set([
-    'gacha-roll', 'gacha-optin', 'gacha-optout', 'gacha-wish', 'gacha-wishlist', 'gacha-daily',
+    'gacha-roll', 'gacha-optin', 'gacha-optout', 'gacha-wish', 'gacha-wishlist', 'dinar-daily',
     'dinar', 'dinar-set', 'gacha-collection', 'gacha-rarest', 'gacha-release', 'gacha-trade', 'gacha-leaderboard', 'gacha-list', 'gacha-admin', 'gacha-raid', 'dinar-flip', 'dinar-richest', 'dinar-flip-leaderboard',
   ]);
   // Currency commands are exempt from the kill-switch and channel gate, since
@@ -407,7 +407,7 @@ function initGacha({ client, db, saveData }) {
         case 'gacha-optout':      return cmdOptOut(interaction, s);
         case 'gacha-wish':        return cmdWish(interaction, s);
         case 'gacha-wishlist':    return cmdWishlist(interaction, s);
-        case 'gacha-daily':       return cmdDaily(interaction, s);
+        case 'dinar-daily':       return cmdDaily(interaction, s);
         case 'dinar':             return cmdDinar(interaction, s);
         case 'dinar-flip':        return cmdFlip(interaction, s);
         case 'dinar-richest':     return cmdRichest(interaction, s);
@@ -553,7 +553,7 @@ function initGacha({ client, db, saveData }) {
     return interaction.reply(eph(`Removed <@${target.id}> from your wishlist.`));
   }
 
-  // ── /gacha-daily + /gacha-dinar ────────────────────────────────────────────
+  // ── /dinar-daily + /gacha-dinar ────────────────────────────────────────────
   function cmdDaily(interaction, s) {
     const uid = interaction.user.id;
     const cd = (s.cooldowns[uid] ||= {});
@@ -918,7 +918,7 @@ function initGacha({ client, db, saveData }) {
       }
       const cost = s.pool[memberId]?.value || 0;
       if (dinarOf(s, uid) < cost) {
-        return interaction.reply(eph(`💰 You need **${fmt(cost)} Dinar** to claim this ${s.pool[memberId]?.rarity || ''} card, but you only have **${fmt(dinarOf(s, uid))}**. Earn more with \`/gacha-daily\` and the other games.`));
+        return interaction.reply(eph(`💰 You need **${fmt(cost)} Dinar** to claim this ${s.pool[memberId]?.rarity || ''} card, but you only have **${fmt(dinarOf(s, uid))}**. Earn more with \`/dinar-daily\` and the other games.`));
       }
       addDinar(s, uid, -cost);
       lr.claimed = true;
