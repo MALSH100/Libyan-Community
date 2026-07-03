@@ -1027,13 +1027,34 @@ function reinforceAmount(state, userId, cityId) {
     components: [amtRow, navRow] };
 }
 
-function leaderboard(state) {
+function leaderboard(state, viewerId) {
+  const viewer = viewerId ? state.players[viewerId] : null;
+  const vStr = viewer ? playerStrength(state, viewer) : 0;
+  const underRaid = new Set(Object.values(state.pendingRaids || {}).map(r => r.cityId));
   const rows = Object.entries(state.players)
-    .map(([id, p]) => ({ p, str: playerStrength(state, p), c: p.cities.length }))
-    .sort((a, b) => b.c - a.c || b.str - a.str).slice(0, 12);
+    .map(([id, p]) => ({ id, p, str: playerStrength(state, p), c: p.cities.length }))
+    .sort((a, b) => b.c - a.c || b.str - a.str).slice(0, 10);
   const medals = ['🥇', '🥈', '🥉'];
-  const lines = rows.map((r, i) => `${medals[i] || `**${i + 1}.**`} ${esc(r.p.name)} — **${r.c}** cities • ${fmt(r.str)} power • ${r.p.stats.captured}⚔ / ${r.p.stats.defended}🛡`);
-  return { embeds: [new EmbedBuilder().setColor(COLOR.gold).setTitle('🏆 Diyar — Conquerors').setDescription(lines.join('\n') || 'No rulers yet.')], components: [backRow()] };
+  let anyShield = false;
+  const lines = rows.map((r, i) => {
+    const s = r.p.stats;
+    // fairness shield: the match-band protects rulers far weaker than the viewer — it applies
+    // to the ruler, so it covers every city they hold
+    const shielded = !!viewer && r.id !== viewerId && r.str * MATCH_BAND < vStr;
+    if (shielded) anyShield = true;
+    const cityList = r.p.cities.map(cid => {
+      const c = state.cities[cid];
+      return `${esc(c.name)} (L${c.level})${underRaid.has(cid) ? '⚔' : ''}${shielded ? '🕊' : ''}`;
+    }).join(', ') || '*landless — raiding for a home*';
+    return `${medals[i] || `**${i + 1}.**`} **${esc(r.p.name)}**${r.id === viewerId ? ' *(you)*' : ''} — **${r.c}** ${r.c === 1 ? 'city' : 'cities'} • ${fmt(r.str)} power\n` +
+      `⚔ ${s.raidsWon}W / ${s.raidsLost}L raids • 🛡 ${s.defended} defended • 🏰 ${s.captured} taken / ${s.lost} lost • 👹 ${s.bossKills} boss kills\n` +
+      `🏙 ${cityList}`;
+  });
+  const legend = [];
+  if (anyShield) legend.push(`🕊 protected by the fairness system — too far below **${esc(viewer.name)}**'s strength for them to raid`);
+  if (underRaid.size) legend.push('⚔ under attack right now');
+  const desc = (lines.join('\n\n') || 'No rulers yet.') + (legend.length ? `\n\n*${legend.join('  •  ')}*` : '');
+  return { embeds: [new EmbedBuilder().setColor(COLOR.gold).setTitle('🏆 Diyar — Conquerors').setDescription(desc)], components: [backRow()] };
 }
 
 function bossView(state) {
@@ -1059,14 +1080,27 @@ function profileView(state, db, guildId, userId) {
   const rank = ranked.findIndex(r => r.id === userId) + 1;
   const fights = s.raidsWon + s.raidsLost;
   const winRate = fights ? Math.round(s.raidsWon / fights * 100) : 0;
+  const dinar = getDinar(db, guildId, userId);
+  const ecoMult = 1 + p.upg.eco * 0.12;
+  const incomeHr = cities.reduce((t, c) => t + INCOME_BY_LEVEL[c.level] * ecoMult, 0);
+  const pending = cities.reduce((t, c) => t + pendingIncome(state, c), 0);
+  const cdEnd = (p.lastCollectAt || 0) + COLLECT_COOLDOWN_MS;
+  const collectStr = Date.now() >= cdEnd ? 'ready ✅' : `in ${msLeft(cdEnd)}`;
+  const unit = troopCost(state, userId);
+  const underRaid = new Set(Object.values(state.pendingRaids || {}).map(r => r.cityId));
+  const cityLines = cities.map(c =>
+    `🏙 **${esc(c.name)}** (L${c.level})${underRaid.has(c.id) ? ' ⚔ *under attack!*' : ''} — 🛡 ${fmt(c.garrison)}/${fmt(GARRISON_CAP)} • 💰 ${fmt(Math.round(INCOME_BY_LEVEL[c.level] * ecoMult))}/hr • def power **${fmt(effectiveDefence(state, c))}**`
+  ).join('\n') || '*Landless — raid a city to claim a home.*';
   const embed = new EmbedBuilder().setColor(COLOR.gold).setTitle(`📜 ${p.name} — War Record`)
     .setDescription(
-      `Rank **#${rank}** of ${ranked.length}  •  **${fmt(str)}** power\n` +
-      `🏰 Cities **${cities.length}**  •  🪖 Army **${fmt(p.army)}**  •  🗡 Weapon tier **${p.weaponTier}**\n\n` +
-      `**Raids:** ${s.raidsWon}W / ${s.raidsLost}L  (${winRate}% win rate)\n` +
-      `**Cities captured:** ${s.captured}  •  **lost:** ${s.lost}\n` +
-      `**Successful defences:** ${s.defended}\n` +
-      `**Boss kills:** ${s.bossKills}  •  **total boss damage:** ${fmt(s.bossDmg)}`)
+      `Rank **#${rank}** of ${ranked.length}  •  **${fmt(str)}** power\n\n` +
+      `**💰 Wealth**\nDinar **${fmt(dinar)}**  •  income **${fmt(Math.round(incomeHr))}/hr**  •  uncollected **${fmt(Math.floor(pending))}**  •  collect ${collectStr}\n\n` +
+      `**🪖 Military**\nArmy **${fmt(p.army)}** in reserve  •  🗡 weapon tier **${p.weaponTier}**  •  troop cost **${unit}💰** each\n` +
+      `Upgrades: ⚔ Military **${p.upg.mil}**/${UPG_MAX}  •  🧱 Fortifications **${p.upg.for}**/${UPG_MAX}  •  💰 Economy **${p.upg.eco}**/${UPG_MAX}\n\n` +
+      `**🏙 Cities (${cities.length})**\n${cityLines}\n\n` +
+      `**⚔ War Record**\nRaids **${s.raidsWon}W / ${s.raidsLost}L** (${winRate}% win rate)  •  🛡 **${s.defended}** defended\n` +
+      `🏰 Captured **${s.captured}**  •  lost **${s.lost}**\n` +
+      `👹 Boss kills **${s.bossKills}**  •  total boss damage **${fmt(s.bossDmg)}**`)
     .setFooter({ text: `Ruling since ${new Date(p.joinedAt).toISOString().slice(0, 10)}` });
   return { embeds: [embed], components: [backRow()] };
 }
@@ -1286,7 +1320,7 @@ function initDiyar({ client, db, saveData, awardLP }) {
         }
         if (interaction.commandName === 'diyar-leaderboard') {
           const state = stateOf(gid);
-          return interaction.reply({ embeds: leaderboard(state).embeds, components: [] });   // public: no interactive buttons
+          return interaction.reply({ embeds: leaderboard(state, interaction.user.id).embeds, components: [] });   // public: no interactive buttons
         }
         if (interaction.commandName === 'diyar-set-channel') {
           const state = stateOf(gid);
@@ -1359,7 +1393,7 @@ function initDiyar({ client, db, saveData, awardLP }) {
       if (action === 'upgrade')     return interaction.update(upgradeView(state, db, gid, uid));
       if (action === 'armoury')     return interaction.update(armouryView(state, db, gid, uid));
       if (action === 'reinforce')   return interaction.update(reinforceSelect(state, uid));
-      if (action === 'leaderboard') return interaction.update(leaderboard(state));
+      if (action === 'leaderboard') return interaction.update(leaderboard(state, uid));
       if (action === 'profile')     return interaction.update(profileView(state, db, gid, uid));
       if (action === 'boss')        return interaction.update(bossView(state));
 
@@ -1475,7 +1509,7 @@ function initDiyar({ client, db, saveData, awardLP }) {
       getState: () => stateOf, ensurePlayer, resolveAttack, recruit, upgrade, reinforce, collectIncome,
       spawnBoss, strikeBoss, resolveBossDefeat, resolveBossExpire, playerStrength, ensureBossSched,
       pendingIncome, renderMap, renderBoss, renderBattle, pickTimes, reseedIfLanded, rankPlayers, threatEmbed, threatSiegeLines, threatBar,
-      claimTribute, buyWeapon, armouryView, profileView, resetSeason, targetSelect, reinforceSelect, effectiveDefence, effectiveAttack, startRaid, resolveRaid, troopCost, raidLiveEmbed, raidResultEmbed, threatTick, finishThreat,
+      claimTribute, buyWeapon, armouryView, profileView, leaderboard, resetSeason, targetSelect, reinforceSelect, effectiveDefence, effectiveAttack, startRaid, resolveRaid, troopCost, raidLiveEmbed, raidResultEmbed, threatTick, finishThreat,
     },
   };
 }
