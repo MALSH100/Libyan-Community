@@ -80,13 +80,26 @@ function wedgePath(a0, a1, ox, oy) {
   const large = (a1 - a0) > 180 ? 1 : 0;
   return `M ${(CX + ox).toFixed(1)} ${(CY + oy).toFixed(1)} L ${x0.toFixed(1)} ${y0.toFixed(1)} A ${R} ${R} 0 ${large} 1 ${x1.toFixed(1)} ${y1.toFixed(1)} Z`;
 }
+// a wedge spanning the whole wheel (a lone participant) must be drawn as a circle —
+// an SVG arc whose start and end coincide renders as nothing at all
+function wedgeShape(a0, a1, fill, stroke, sw, dash, ox, oy) {
+  const d = dash ? ` stroke-dasharray="${dash}"` : '';
+  if ((a1 - a0) >= 359.9)
+    return `<circle cx="${(CX + (ox || 0)).toFixed(1)}" cy="${(CY + (oy || 0)).toFixed(1)}" r="${R}" fill="${fill}" stroke="${stroke}" stroke-width="${sw}"${d}/>`;
+  return `<path d="${wedgePath(a0, a1, ox, oy)}" fill="${fill}" stroke="${stroke}" stroke-width="${sw}"${d}/>`;
+}
 function wedgeDefs(entries) {
   if (!entries.length) return Array.from({ length: 12 }, (_, i) => ({ a0: -90 + i * 30, a1: -60 + i * 30, color: WEDGE_COLORS[i % 3], i }));
   const total = entries.reduce((t, e) => t + e.wager, 0) || 1;
   let a = -90;
+  const n = entries.length;
   return entries.map((e, i) => {
     const span = e.wager / total * 360;
-    const d = { a0: a, a1: a + span, color: WEDGE_COLORS[i % 3], name: e.name, wager: e.wager, i };
+    // strict Green→Red→Dark cycle, but never let the last wedge share a colour
+    // with the first one it wraps round to touch
+    let color = WEDGE_COLORS[i % 3];
+    if (n > 1 && i === n - 1 && i % 3 === 0) color = WEDGE_COLORS[1];
+    const d = { a0: a, a1: a + span, color, name: e.name, wager: e.wager, i };
     a += span; return d;
   });
 }
@@ -112,7 +125,7 @@ function buildWheelSVG({ rotation = 0, entries = [], pool = 0, highlightIdx = -1
     const isFly = fly && fly.idx === w.i;
     if (w.i === gapIdx || (isFly && fly.t < 1)) {
       // the waiting slot: a dark cut-out with a dashed edge
-      slices += `<path d="${wedgePath(a0, a1)}" fill="#0b0c0e" stroke="#4a4f57" stroke-width="2" stroke-dasharray="6 5"/>`;
+      slices += wedgeShape(a0, a1, '#0b0c0e', '#4a4f57', 2, '6 5');
     }
     if (isFly) {
       const mid = (w.a0 + w.a1) / 2 + rotation;
@@ -120,12 +133,12 @@ function buildWheelSVG({ rotation = 0, entries = [], pool = 0, highlightIdx = -1
       const startX = WHEEL_SIZE - 46, startY = 44;                 // top-right corner
       const k = 1 - clamp(fly.t, 0, 1);
       const ox = (startX - centX) * k, oy = (startY - centY) * k;
-      flying += `<path d="${wedgePath(a0, a1, ox, oy)}" fill="${w.color}" stroke="#ffffff" stroke-width="3"/>` + wedgeLabel(w, rotation, ox, oy);
+      flying += wedgeShape(a0, a1, w.color, '#ffffff', 3, null, ox, oy) + wedgeLabel(w, rotation, ox, oy);
       continue;
     }
     if (w.i === gapIdx) continue;
     const isHi = w.i === highlightIdx;
-    slices += `<path d="${wedgePath(a0, a1)}" fill="${w.color}" stroke="${isHi ? '#ffffff' : '#0c0d0f'}" stroke-width="${isHi ? 4 : 1.5}"/>` + wedgeLabel(w, rotation);
+    slices += wedgeShape(a0, a1, w.color, isHi ? '#ffffff' : '#0c0d0f', isHi ? 4 : 1.5, null) + wedgeLabel(w, rotation);
   }
   const centre =
     `<circle cx="${CX}" cy="${CY}" r="62" fill="${COL_CENTER}" stroke="#33363b" stroke-width="4"/>` +
@@ -176,27 +189,34 @@ function renderLiveGif(entries, pool) {
   return encodeGif(frames, { entries, pool });
 }
 
-// join sequence: spin ~5s with an empty slot waiting → ease to a stop with the slot at the
-// top-right → the new wedge pops in at the corner and slides into the slot → holds, labelled
-// → builds speed and spins ~5s more with everyone aboard.  Total ≈ 12.3s (edit at 13s).
-function renderJoinGif(entries, newIdx, pool) {
+// join sequence: the wheel is already spinning FAST with an empty slot waiting → it smoothly
+// loses speed (never gaining any) until it halts with the slot at the top-right → the new
+// wedge pops in at the corner and slides into the slot → holds, labelled → builds speed back
+// up to the original fast spin. Deceleration starts at exactly the cruising speed so there is
+// no lurch before the stop.
+function planJoinFrames(entries, newIdx) {
   const frames = [];
   let rot = Math.random() * 360;
-  for (let i = 0; i < 30; i++) { rot += 42 - i * 0.4; frames.push({ rotation: rot % 360, gapIdx: newIdx, delay: 150 }); }
-  // decelerate so the empty slot lands facing the top-right corner (where the wedge flies from)
+  let v = 46;
+  for (let i = 0; i < 26; i++) { rot += v; v -= 0.5; frames.push({ rotation: rot % 360, gapIdx: newIdx, delay: 130 }); }   // fast cruise, 46 → 33.5°/f
+  // ease-out stop whose initial slope equals the current speed — lands the slot at -45°
   const defs = wedgeDefs(entries);
   const bis = (defs[newIdx].a0 + defs[newIdx].a1) / 2;
   const target = -45 - bis;
-  const delta = ((target - rot) % 360 + 360) % 360 + 360;
+  const D = ((target - rot) % 360 + 360) % 360 + 360;          // at least one full extra turn
+  const N = Math.max(10, Math.round(2 * D / v));               // quad ease-out initial velocity = 2D/N = v
   const rot0 = rot;
-  for (let i = 1; i <= 12; i++) frames.push({ rotation: (rot0 + delta * easeOutCubic(i / 12)) % 360, gapIdx: newIdx, delay: 135 });
-  rot = rot0 + delta;
+  for (let i = 1; i <= N; i++) { const t = i / N; frames.push({ rotation: (rot0 + D * (1 - (1 - t) * (1 - t))) % 360, gapIdx: newIdx, delay: 130 }); }
+  rot = rot0 + D;
   for (let i = 0; i < 8; i++) frames.push({ rotation: rot % 360, fly: { idx: newIdx, t: easeOutCubic(i / 7) }, delay: 125 });
   for (let i = 0; i < 3; i++) frames.push({ rotation: rot % 360, highlightIdx: newIdx, delay: 220 });
-  for (let i = 0; i < 30; i++) { rot += 3 + i * 1.4; frames.push({ rotation: rot % 360, delay: 150 }); }
-  return encodeGif(frames, { entries, pool });
+  let v2 = 3;
+  for (let i = 0; i < 28; i++) { rot += v2; v2 = Math.min(46, v2 + 1.7); frames.push({ rotation: rot % 360, delay: 130 }); }   // build back to cruise
+  return frames;
 }
-const JOIN_GIF_MS = 30 * 150 + 12 * 135 + 8 * 125 + 3 * 220 + 30 * 150;   // ≈ 12,280ms
+function renderJoinGif(entries, newIdx, pool) {
+  return encodeGif(planJoinFrames(entries, newIdx), { entries, pool });
+}
 
 // winner reveal: a long suspense spin (~12s) easing out over two slow extra turns, halting
 // on the winner's wedge with a white flash. Plays ONCE and freezes on the winner.
@@ -331,6 +351,20 @@ function initLotto({ client, db, saveData }) {
     return buf;
   }
 
+  const joinSummaryEmbed = (d) => new EmbedBuilder().setColor(0xE7B41A)
+    .setDescription(`🎟 **${esc(d.name)}** joined the lottery with **${fmt(d.wager)} Dinar**!\n📈 Current chance of winning: **${Number(d.chance).toFixed(2)}%**\n💰 Prize pool: **${fmt(d.pool)} Dinar** • 👥 **${d.count}** in`);
+
+  // collapse the previous participant's wheel message down to its clean summary
+  async function collapseJoin(L) {
+    if (!L || !L.lastJoin) return;
+    const d = L.lastJoin; L.lastJoin = null;
+    try {
+      const ch = await client.channels.fetch(d.channelId);
+      const msg = await ch.messages.fetch(d.messageId);
+      await msg.edit({ embeds: [joinSummaryEmbed(d.summary)], files: [], attachments: [] });
+    } catch { /* message gone — nothing to collapse */ }
+  }
+
   const annEmbed = (L) => new EmbedBuilder().setColor(0xE7B41A).setTitle('🎡 DINAR LOTTERY — LIVE!')
     .setDescription(
       `The wheel is spinning! Wager your Dinar for a chance to take the **whole pool**.\n\n` +
@@ -347,7 +381,7 @@ function initLotto({ client, db, saveData }) {
     if (state.active || !state.channelId) return false;
     state.active = {
       id: 'L' + Date.now().toString(36), startedAt: Date.now(), endsAt: Date.now() + LOTTO_DURATION_MS,
-      pool: 0, entries: {}, remindersSent: 0, lastJoinAt: 0, reminderMsgIds: [], channelId: state.channelId, messageId: null,
+      pool: 0, entries: {}, remindersSent: 0, lastJoinAt: 0, reminderMsgIds: [], lastJoin: null, channelId: state.channelId, messageId: null,
     };
     saveData(guildId);
     try {
@@ -407,6 +441,7 @@ function initLotto({ client, db, saveData }) {
     const state = stateOf(guildId); const L = state.active;
     if (!L) return;
     state.active = null;                          // stop entries immediately
+    await collapseJoin(L).catch(() => {});        // last participant wheel → summary
     const winnerId = pickWinner(L);
     let winner = null;
     if (winnerId) {
@@ -462,6 +497,7 @@ function initLotto({ client, db, saveData }) {
     const state = stateOf(guildId); const L = state.active;
     if (!L) return { none: true };
     state.active = null;                                  // stop entries immediately
+    await collapseJoin(L).catch(() => {});                // last participant wheel → summary
     delete liveCache[guildId];                            // drop the cached wheel graphic
     let refunded = 0, players = 0;
     for (const [uid, e] of Object.entries(L.entries)) { awardDinar(db, guildId, uid, e.wager, saveData); refunded += e.wager; players++; }
@@ -555,15 +591,18 @@ function initLotto({ client, db, saveData }) {
         if (r.error) return interaction.reply({ content: r.error, flags: 64 });
         const L = state.active;
         const inLottoChannel = interaction.channelId === L.channelId;
-        const summary = new EmbedBuilder().setColor(0xE7B41A)
-          .setDescription(`🎟 **${esc(name)}** joined the lottery with **${fmt(r.wager)} Dinar**!\n📈 Current chance of winning: **${r.chance.toFixed(2)}%**\n💰 Prize pool: **${fmt(r.pool)} Dinar** • 👥 **${r.count}** in`);
+        const summaryData = { name, wager: r.wager, chance: r.chance, pool: r.pool, count: r.count };
         if (!inLottoChannel) await interaction.reply({ content: `🎟 You're in with **${fmt(r.wager)} Dinar**! Watch <#${L.channelId}> for the wheel.`, flags: 64 });
         else await interaction.deferReply();
-        // the join animation: spin with a waiting slot → stop → your wedge flies in → speeds up
+        // the join animation: spin with a waiting slot → stop → your wedge flies in → speeds up.
+        // Only the LATEST participant's message keeps its wheel — the previous one collapses
+        // to its clean summary the moment someone newer joins.
         queueRender(async () => {
           try {
             const Lnow = stateOf(gid).active;
-            const entries = Lnow && Lnow.id === L.id ? entryList(Lnow) : entryList(L);
+            const live = Lnow && Lnow.id === L.id ? Lnow : L;
+            await collapseJoin(live);                                  // retire the previous wheel
+            const entries = entryList(live);
             const idx = entries.findIndex(e => e.id === interaction.user.id);
             const gif = renderJoinGif(entries, idx, r.pool);
             const file = new AttachmentBuilder(gif, { name: 'wheel.gif' });
@@ -571,10 +610,11 @@ function initLotto({ client, db, saveData }) {
             let msg;
             if (inLottoChannel) { await interaction.editReply(payload); msg = await interaction.fetchReply(); }
             else { const ch = await client.channels.fetch(L.channelId); msg = await ch.send(payload); }
-            setTimeout(() => { msg.edit({ embeds: [summary], files: [], attachments: [] }).catch(() => {}); }, JOIN_GIF_MS + 800);
+            live.lastJoin = { channelId: L.channelId, messageId: msg.id, summary: summaryData };
+            saveData(gid);
           } catch (e) {
             console.error('[lottery join gif]', e.message);
-            if (inLottoChannel) interaction.editReply({ embeds: [summary] }).catch(() => {});
+            if (inLottoChannel) interaction.editReply({ embeds: [joinSummaryEmbed(summaryData)] }).catch(() => {});
           }
         });
         // keep the permanent announcement's wheel + numbers current
@@ -589,7 +629,7 @@ function initLotto({ client, db, saveData }) {
     getState: () => stateOf, addEntry, pickWinner, ensureSched, pickTimes, entryList,
     buildWheelSVG, renderLiveGif, renderJoinGif, renderResultGif, renderWinnerStill,
     startLottery, closeLottery, cancelLottery, remind, refreshReminders, tick, libyaDayKey, startOfLibyaDayUTC, leaderboardEmbed,
-    JOIN_GIF_MS, RESULT_GIF_MS,
+    planJoinFrames, collapseJoin, joinSummaryEmbed, RESULT_GIF_MS,
   } };
 }
 
