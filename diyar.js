@@ -774,13 +774,15 @@ function resolveBossDefeat(state, db, guildId, saveData) {
   const b = state.boss; if (!b) return null;
   const ranked = Object.entries(b.damage).sort((a, b2) => b2[1] - a[1]);
   const rewards = [];
+  // threat loot — rewarding but not runaway; flatter curve so participants who chip in
+  // still feel it (top-to-bottom ~3.5× gap rather than 6×+). Tune these four values freely.
   ranked.forEach(([uid, dmg], i) => {
     const p = state.players[uid]; if (!p) return;
     let dinar = 0, lp = 0, weapon = false;
-    if (i === 0)      { dinar = 250; lp = 30; weapon = p.weaponTier < 5; p.stats.bossKills++; }
-    else if (i === 1) { dinar = 150; lp = 18; }
-    else if (i === 2) { dinar = 90; lp = 12; }
-    else              { dinar = 40; lp = 5; }
+    if (i === 0)      { dinar = 350; lp = 22; weapon = p.weaponTier < 5; p.stats.bossKills++; }
+    else if (i === 1) { dinar = 220; lp = 15; }
+    else if (i === 2) { dinar = 130; lp = 10; }
+    else              { dinar = 60;  lp = 5;  }
     if (weapon) p.weaponTier++;
     awardDinar(db, guildId, uid, dinar, saveData);
     rewards.push({ uid, name: p.name, dmg, dinar, lp, weapon });
@@ -1149,7 +1151,15 @@ function initDiyar({ client, db, saveData, awardLP }) {
     const b = state.boss; if (!b || !state.channelId) return;
     try {
       const ch = await client.channels.fetch(state.channelId);
-      const msg = await ch.send({ embeds: [threatEmbed(state)], components: [threatStrikeRow()] });
+      // warn the rulers whose cities are under siege by pinging them above the threat
+      const owners = [...new Set((b.targets || [])
+        .map(t => state.cities[t.cityId]?.ownerId)
+        .filter(id => id && state.players[id] && !state.players[id].npc))];
+      const ping = owners.length
+        ? `⚠️ ${owners.map(id => `<@${id}>`).join(' ')} — **your cities are under attack by ${esc(b.name)}!** Rally to defend them! 🛡`
+        : null;
+      const msg = await ch.send({ content: ping || undefined, embeds: [threatEmbed(state)], components: [threatStrikeRow()],
+        allowedMentions: { users: owners } });
       b.messageId = msg.id; b.channelId = ch.id; saveData(guildId);
     } catch (e) { console.error('[diyar threat post]', e.message); }
     startThreatLoop(guildId);
