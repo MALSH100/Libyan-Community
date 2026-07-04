@@ -214,8 +214,15 @@ function planJoinFrames(entries, newIdx) {
   for (let i = 0; i < 28; i++) { rot += v2; v2 = Math.min(46, v2 + 1.7); frames.push({ rotation: rot % 360, delay: 130 }); }   // build back to cruise
   return frames;
 }
+// the insert plays ONCE and freezes on its final frame; the message then swaps to the
+// seamless looping wheel (like the announcement), so the wedge only slides in a single time
 function renderJoinGif(entries, newIdx, pool) {
-  return encodeGif(planJoinFrames(entries, newIdx), { entries, pool });
+  return encodeGif(planJoinFrames(entries, newIdx), { entries, pool }, true);
+}
+// build the frames + matching duration together (planJoinFrames is randomised each call)
+function buildJoinGif(entries, newIdx, pool) {
+  const frames = planJoinFrames(entries, newIdx);
+  return { buf: encodeGif(frames, { entries, pool }, true), ms: frames.reduce((t, f) => t + f.delay, 0) };
 }
 
 // winner reveal: a long suspense spin (~12s) easing out over two slow extra turns, halting
@@ -363,6 +370,19 @@ function initLotto({ client, db, saveData }) {
       const msg = await ch.messages.fetch(d.messageId);
       await msg.edit({ embeds: [joinSummaryEmbed(d.summary)], files: [], attachments: [] });
     } catch { /* message gone — nothing to collapse */ }
+  }
+
+  // once the insert has played its single time, swap the join message to the seamless
+  // looping wheel so it keeps spinning (like the announcement) until it's superseded
+  async function toLiveLoop(gid, messageId, summaryData) {
+    const cur = stateOf(gid).active;
+    if (!cur || !cur.lastJoin || cur.lastJoin.messageId !== messageId) return;   // superseded or closed
+    try {
+      const ch = await client.channels.fetch(cur.lastJoin.channelId);
+      const msg = await ch.messages.fetch(messageId);
+      const file = new AttachmentBuilder(liveWheel(gid, cur), { name: 'wheel.gif' });
+      await msg.edit({ embeds: [joinSummaryEmbed(summaryData).setImage('attachment://wheel.gif')], files: [file], attachments: [] });
+    } catch { /* message gone — nothing to swap */ }
   }
 
   const annEmbed = (L) => new EmbedBuilder().setColor(0xE7B41A).setTitle('🎡 DINAR LOTTERY — LIVE!')
@@ -594,9 +614,9 @@ function initLotto({ client, db, saveData }) {
         const summaryData = { name, wager: r.wager, chance: r.chance, pool: r.pool, count: r.count };
         if (!inLottoChannel) await interaction.reply({ content: `🎟 You're in with **${fmt(r.wager)} Dinar**! Watch <#${L.channelId}> for the wheel.`, flags: 64 });
         else await interaction.deferReply();
-        // the join animation: spin with a waiting slot → stop → your wedge flies in → speeds up.
-        // Only the LATEST participant's message keeps its wheel — the previous one collapses
-        // to its clean summary the moment someone newer joins.
+        // the join animation plays the insert ONCE, then the message settles into a
+        // continuous spin (like the announcement). Only the LATEST participant keeps a wheel —
+        // the previous one collapses to its clean summary the moment someone newer joins.
         queueRender(async () => {
           try {
             const Lnow = stateOf(gid).active;
@@ -604,14 +624,16 @@ function initLotto({ client, db, saveData }) {
             await collapseJoin(live);                                  // retire the previous wheel
             const entries = entryList(live);
             const idx = entries.findIndex(e => e.id === interaction.user.id);
-            const gif = renderJoinGif(entries, idx, r.pool);
-            const file = new AttachmentBuilder(gif, { name: 'wheel.gif' });
+            const { buf, ms } = buildJoinGif(entries, idx, r.pool);    // plays once, then freezes
+            const file = new AttachmentBuilder(buf, { name: 'wheel.gif' });
             const payload = { embeds: [new EmbedBuilder().setColor(0xE7B41A).setDescription(`🎡 **${esc(name)}** spins into the lottery…`).setImage('attachment://wheel.gif')], files: [file] };
             let msg;
             if (inLottoChannel) { await interaction.editReply(payload); msg = await interaction.fetchReply(); }
             else { const ch = await client.channels.fetch(L.channelId); msg = await ch.send(payload); }
             live.lastJoin = { channelId: L.channelId, messageId: msg.id, summary: summaryData };
             saveData(gid);
+            // after the single insert play, swap in the seamless looping wheel so it keeps spinning
+            setTimeout(() => queueRender(() => toLiveLoop(gid, msg.id, summaryData)), ms + 120);
           } catch (e) {
             console.error('[lottery join gif]', e.message);
             if (inLottoChannel) interaction.editReply({ embeds: [joinSummaryEmbed(summaryData)] }).catch(() => {});
@@ -629,7 +651,7 @@ function initLotto({ client, db, saveData }) {
     getState: () => stateOf, addEntry, pickWinner, ensureSched, pickTimes, entryList,
     buildWheelSVG, renderLiveGif, renderJoinGif, renderResultGif, renderWinnerStill,
     startLottery, closeLottery, cancelLottery, remind, refreshReminders, tick, libyaDayKey, startOfLibyaDayUTC, leaderboardEmbed,
-    planJoinFrames, collapseJoin, joinSummaryEmbed, RESULT_GIF_MS,
+    planJoinFrames, buildJoinGif, collapseJoin, toLiveLoop, joinSummaryEmbed, liveWheel, RESULT_GIF_MS,
   } };
 }
 
