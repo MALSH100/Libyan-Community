@@ -608,7 +608,7 @@ function raidLiveEmbed(state, raid, secsLeft) {
     `**${raid.attackerName}** storms **${city.name}**${raid.defenderName ? ` — held by **${raid.defenderName}**` : ''}!\n\n` +
     `⚔ Attackers  ·  power **${fmt(Math.round(aPow * atkFrac))}**\n\`${raidBar(atkFrac, 1)}\`\n\n` +
     `🛡 Defenders  ·  power **${fmt(Math.round(dPow * defFrac))}**${raid.reinforced ? ' 🛡️' : ''}\n\`${raidBar(defFrac, 1)}\`\n\n${status}`;
-  return new EmbedBuilder().setColor(raid.reinforced ? COLOR.blue : COLOR.red).setTitle(`⚔ Battle for ${city.name}`).setDescription(desc);
+  return new EmbedBuilder().setColor(raid.reinforced ? COLOR.blue : COLOR.red).setTitle(`⚔ Battle for ${city.name}`).setDescription(desc + inviteLine());
 }
 
 // the final result — coloured title, attacker on the left, defender on the right
@@ -661,6 +661,12 @@ function threatSiegeLines(state, b) {
   }).join('\n');
 }
 
+// a small invite line permanently appended to threat/raid messages, so anyone watching the
+// action always sees how to start — it's never "too many players" for a community game
+function inviteLine() {
+  return '\n\n*🏴 Not playing yet? Type `/diyar` to join the war for Libya.*';
+}
+
 function threatEmbed(state) {
   const b = state.boss;
   const log = (b.log || []).map(l => `⚔ **${esc(l.name)}** struck for **${fmt(l.dmg)}**`).join('\n') || '*— no strikes yet — be the first!*';
@@ -669,7 +675,7 @@ function threatEmbed(state) {
     `👹 **Threat** — **${fmt(Math.max(0, b.hp))} / ${fmt(b.hpMax)}** HP\n\`${threatBar(b.hp / b.hpMax)}\`\n\n` +
     `⚔ **Under siege**\n${threatSiegeLines(state, b)}\n\n` +
     `🗡 **Attack Log**\n${log}\n\n` +
-    `⏳ **${msLeft(b.endsAt)}** left`;
+    `⏳ **${msLeft(b.endsAt)}** left` + inviteLine();
   return new EmbedBuilder().setColor(COLOR.red).setTitle(`👹 ${b.name}`).setDescription(desc)
     .setFooter({ text: '⚔ Strike to attack — you can only strike once every 3s. Most damage = best loot.' });
 }
@@ -1219,6 +1225,45 @@ function initDiyar({ client, db, saveData, awardLP }) {
     try { const ch = await client.channels.fetch(state.channelId); await ch.send(payload); } catch (e) { console.error('[diyar announce]', e.message); }
   }
 
+  // post the bilingual "how to start" nudge, deleting the previous one so only one lives in the channel
+  async function postNudge(guildId) {
+    const state = stateOf(guildId); if (!state.channelId) return;
+    try {
+      const ch = await client.channels.fetch(state.channelId);
+      if (state.nudgeMsgId) {
+        const old = await ch.messages.fetch(state.nudgeMsgId).catch(() => null);
+        if (old) await old.delete().catch(() => {});           // silent if already gone
+      }
+      const n = Object.keys(state.players || {}).length;
+      const embed = new EmbedBuilder().setColor(COLOR.gold).setTitle('🏴 Diyar — Conquest of Libya')
+        .setDescription(
+          `**New here?** Type \`/diyar\` to raise your banner and join the war for Libya${n > 0 ? ` — **${n}** ${n === 1 ? 'ruler is' : 'rulers are'} already fighting!` : '!'}\n` +
+          `Seize cities, build an army, defend your land and battle the threat.\n\n` +
+          `**هل أنت جديد؟** اكتب \`/diyar\` لرفع رايتك والانضمام إلى معركة ليبيا${n > 0 ? ` — يقاتل بالفعل **${n}** ${n === 1 ? 'حاكم' : 'حكّام'}!` : '!'}\n` +
+          `استولِ على المدن، ابنِ جيشك، دافع عن أرضك، وواجه التهديد.`);
+      const msg = await ch.send({ embeds: [embed] });
+      state.nudgeMsgId = msg.id; saveData(guildId);
+    } catch (e) { console.error('[diyar nudge]', e.message); }
+  }
+
+  // ── new-player discovery nudge: after a burst of channel activity settles into a lull,
+  //    post a bilingual "how to start" invite as the last message, so it's the first thing
+  //    a newcomer sees. Counts ALL messages (bot's own included) as activity. ──
+  const NUDGE_MSG_THRESHOLD = 30;                   // messages that must accumulate before a nudge can arm
+  const NUDGE_QUIET_MS      = 10 * 60 * 1000;       // channel must be silent this long (the "dip")
+  const NUDGE_COOLDOWN_MS   = 3 * 60 * 60 * 1000;   // at most one nudge every ~3 hours
+
+  // count every message in the Diyar channel and stamp the last-activity time (bot msgs included)
+  client.on('messageCreate', (msg) => {
+    try {
+      if (!msg.guildId) return;
+      const state = db[msg.guildId] && db[msg.guildId].__diyar;
+      if (!state || !state.channelId || msg.channelId !== state.channelId) return;
+      state.msgCount = (state.msgCount || 0) + 1;
+      state.lastMsgAt = Date.now();
+    } catch { /* ignore */ }
+  });
+
   const raidTimers = {};   // in-memory countdown intervals (not persisted)
   async function launchRaid(guildId, raidId) {
     const state = stateOf(guildId);
@@ -1275,6 +1320,15 @@ function initDiyar({ client, db, saveData, awardLP }) {
         if (due) {
           due.fired = true; saveData(guild.id);
           if (!state.boss) { spawnBoss(state, saveData, guild.id); await postBoss(guild.id); }
+        }
+        // discovery nudge: a burst of activity (≥30 messages) has since settled into a lull
+        // (≥10 min quiet), and we're past the cooldown → post the bilingual invite as the last
+        // message, deleting the previous nudge so only one ever sits in the channel
+        if ((state.msgCount || 0) >= NUDGE_MSG_THRESHOLD
+            && state.lastMsgAt && now - state.lastMsgAt >= NUDGE_QUIET_MS
+            && now - (state.lastNudgeAt || 0) > NUDGE_COOLDOWN_MS) {
+          state.lastNudgeAt = now; state.msgCount = 0; saveData(guild.id);
+          await postNudge(guild.id);
         }
       }
       // resolve any live raid whose window elapsed but whose timer was lost (e.g. a redeploy)
@@ -1516,10 +1570,10 @@ function initDiyar({ client, db, saveData, awardLP }) {
 
   return {
     _test: {
-      getState: () => stateOf, ensurePlayer, resolveAttack, recruit, upgrade, reinforce, collectIncome,
+      getState: () => stateOf, ensurePlayer, resolveAttack, recruit, upgrade, reinforce, collectIncome, tick,
       spawnBoss, strikeBoss, resolveBossDefeat, resolveBossExpire, playerStrength, ensureBossSched,
       pendingIncome, renderMap, renderBoss, renderBattle, pickTimes, reseedIfLanded, rankPlayers, threatEmbed, threatSiegeLines, threatBar,
-      claimTribute, buyWeapon, armouryView, profileView, leaderboard, resetSeason, targetSelect, reinforceSelect, effectiveDefence, effectiveAttack, startRaid, resolveRaid, troopCost, raidLiveEmbed, raidResultEmbed, threatTick, finishThreat,
+      claimTribute, buyWeapon, armouryView, profileView, leaderboard, resetSeason, targetSelect, reinforceSelect, effectiveDefence, effectiveAttack, startRaid, resolveRaid, troopCost, raidLiveEmbed, raidResultEmbed, threatTick, finishThreat, inviteLine, postNudge,
     },
   };
 }
