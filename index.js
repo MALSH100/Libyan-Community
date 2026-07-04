@@ -1716,7 +1716,7 @@ async function handleCommand(interaction, commandName, user, guild) {
           { name: '⚔️ Playing', value: ['From the dashboard you can **Raid** rival or neutral cities, **Recruit** troops, **Reinforce** a city, **Upgrade** (Military / Fortifications / Economy), buy weapons at the **Armoury**, **Collect** income, and **Strike** the world threat.', 'Cities earn Dinar hourly (collect every **90 min**). Bigger empires pay more per troop, so sprawling is costly.'].join('\n') },
           { name: '🛡️ Live raids', value: ['Raiding a player runs **live for 30s** — the defender is pinged and can hit **Send Reinforcements** for a big defence boost.', 'Miss it and you still defend at full strength — reinforcing is only ever a bonus. Watch the health bars tell the story!'].join('\n') },
           { name: '👹 The Threat', value: ['A monster appears at random times (or via admin) and besieges **3 cities** at once with a live health-bar battle.', 'Everyone can **Strike** it (once every 3s). Slay it in **20 min** for the best loot, or it weakens the cities and withdraws. It never fully destroys a city.'].join('\n') },
-          { name: '⚙️ Fairness & admin', value: ['A match-band stops the strong from punching down on much weaker players (neutral militias are always fair game).', 'Garrisons cap at **3,000** troops per city. Admins: `/diyar-set-channel`, `/diyar-spawn-threat`, `/diyar-reset`.'].join('\n') },
+          { name: '⚙️ Fairness', value: 'A match-band stops the strong from punching down on much weaker players (neutral militias are always fair game). Garrisons cap at **3,000** troops per city.' },
         ).setFooter({ text: 'Page 7 of 8 — use buttons to navigate' }),
 
       new EmbedBuilder().setColor(0xE7B41A).setTitle('🎡 Libyan Community Bot — Page 8/8: Dinar Lottery')
@@ -1724,7 +1724,6 @@ async function handleCommand(interaction, commandName, user, guild) {
         .addFields(
           { name: '🎟️ How to play', value: ['`/dinar-lotto <wager>` — Enter the live lottery (**1–500 Dinar**, one entry each)', 'Your wager is your slice of the wheel — **bigger wager = better odds**', 'Each lottery runs for **1 hour**; a reminder posts every 15 min'].join('\n') },
           { name: '🏆 Winning', value: ['Odds are **wager-weighted**: chance = your wager ÷ total pool', 'When it closes, a suspense spin lands on the winner and they win the **whole pool**', '`/lottery-leaderboard` — The hall of fame: top winners of all time'].join('\n') },
-          { name: '⚙️ Admin', value: ['`/lottery-channel` — Set the channel lotteries run in', '`/lottery-start` — Start one immediately', '`/lottery-cancel` — Stop the current lottery & refund every wager'].join('\n') },
         ).setFooter({ text: 'Page 8 of 8 — use buttons to navigate' }),
     ];
 
