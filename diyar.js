@@ -47,12 +47,12 @@ const upgCost = (track, lvl) => UPG_BASE[track] * (lvl + 1) * (lvl >= 3 ? 2 : 1)
 const BOSS_DURATION_MS    = 20 * 60 * 1000;       // the siege lasts 20 minutes
 const BOSS_STRIKE_CD_MS   = 3 * 1000;             // per-player strike cooldown (3s)
 const THREAT_TICK_MS      = 3000;                  // live message edit + siege damage tick
-const THREAT_DMG_MIN      = 2;                     // garrison damage per tick per city (min)
-const THREAT_DMG_MAX      = 5;                     // garrison damage per tick per city (max)
+const THREAT_DMG_MIN      = 1;                     // garrison damage per tick per city (min)
+const THREAT_DMG_MAX      = 2;                     // garrison damage per tick per city (max)
 const THREAT_CITY_DMG_CAP = 800;                   // total damage cap per city — it weakens, never demolishes
 const THREAT_GARRISON_FLOOR = 20;                  // never grinds a garrison below this
-const BOSS_HP_MIN         = 2000;                  // threat HP rolls randomly between these
-const BOSS_HP_MAX         = 5000;
+const BOSS_HP_MIN         = 1000;                  // threat HP rolls randomly between these
+const BOSS_HP_MAX         = 3000;
 const BOSS_HP_PER_PLAYER  = 0;                     // flat HP (raise this to scale with player count)
 const BOSS_SPAWNS_PER_DAY = 2;
 const BOSS_WIN_START      = 11;                    // Libya-time window for spawns
@@ -669,7 +669,9 @@ function inviteLine() {
 
 function threatEmbed(state) {
   const b = state.boss;
-  const log = (b.log || []).map(l => `⚔ **${esc(l.name)}** struck for **${fmt(l.dmg)}**`).join('\n') || '*— no strikes yet — be the first!*';
+  const log = (b.log || []).map(l => l.heavy
+    ? `💥 **${esc(l.name)}** HEAVY hit for **${fmt(l.dmg)}**!`
+    : `⚔ **${esc(l.name)}** struck for **${fmt(l.dmg)}**`).join('\n') || '*— no strikes yet — be the first!*';
   const desc =
     `*${b.tag}.* Strike it down before it razes the cities!\n\n` +
     `👹 **Threat** — **${fmt(Math.max(0, b.hp))} / ${fmt(b.hpMax)}** HP\n\`${threatBar(b.hp / b.hpMax)}\`\n\n` +
@@ -691,14 +693,14 @@ function threatDefeatEmbed(state, b, rewards) {
   const siege = (b.targets || []).filter(t => t.dmg > 0)
     .map(t => `🏙 ${esc(state.cities[t.cityId]?.name || t.cityId)} — lost **${fmt(t.dmg)}** troops to the siege`).join('\n');
   return new EmbedBuilder().setColor(COLOR.green).setTitle(`💀 ${b.name} — DEFEATED`)
-    .setDescription(`The realm rallied and struck it down!\n\n**Spoils**\n${lines.join('\n') || '—'}${siege ? `\n\n**Siege toll**\n${siege}` : ''}`);
+    .setDescription(`The realm rallied and struck it down!\n\n**Spoils**\n${lines.join('\n') || '—'}${siege ? `\n\n**Siege toll**\n${siege}` : ''}${inviteLine()}`);
 }
 
 function threatWithdrawEmbed(res) {
   const siege = res.razedCities.filter(t => t.dmg > 0)
     .map(t => `🏙 ${esc(t.city)}${t.owner ? ` (${esc(t.owner)})` : ''} — lost **${fmt(t.dmg)}** troops`).join('\n');
   return new EmbedBuilder().setColor(COLOR.grey).setTitle(`👹 ${res.name} withdraws!`)
-    .setDescription(`No one brought it down in time. It ravaged the land and slipped away.\n\n**Siege toll**\n${siege || '*The cities held — no lasting damage.*'}`);
+    .setDescription(`No one brought it down in time. It ravaged the land and slipped away.\n\n**Siege toll**\n${siege || '*The cities held — no lasting damage.*'}${inviteLine()}`);
 }
 
 // ─── Boss ─────────────────────────────────────────────────────────────────
@@ -749,13 +751,13 @@ function spawnBoss(state, saveData, guildId) {
     spawnedAt: Date.now(), endsAt: Date.now() + BOSS_DURATION_MS,
     damage: {}, targets, log: [], channelId: state.channelId, messageId: null,
   };
-  const hp = Math.round((BOSS_HP_MIN + Math.random() * (BOSS_HP_MAX - BOSS_HP_MIN)) / 50) * 50;   // random 2,000–5,000
+  const hp = Math.round((BOSS_HP_MIN + Math.random() * (BOSS_HP_MAX - BOSS_HP_MIN)) / 50) * 50;   // random 1,000–3,000
   state.boss.hpMax = hp; state.boss.hp = hp;
   if (saveData) saveData(guildId);
   return state.boss;
 }
 
-function strikeBoss(state, saveData, guildId, userId) {
+function strikeBoss(state, saveData, guildId, userId, heavy) {
   const b = state.boss;
   if (!b) return { error: 'No threat is active right now.' };
   if (b.hp <= 0) return { error: 'The enemy is already falling — the spoils are being tallied.' };
@@ -763,17 +765,24 @@ function strikeBoss(state, saveData, guildId, userId) {
   if (!p) return { error: 'Join the game first with /diyar.' };
   const now = Date.now();
   if (now - p.lastStrikeAt < BOSS_STRIKE_CD_MS) return { error: `⏳ Catch your breath — you can strike again in **${Math.ceil((p.lastStrikeAt + BOSS_STRIKE_CD_MS - now) / 1000)}s**.` };
-  const dmg = Math.round((p.army * 0.06 * (1 + p.upg.mil * 0.1 + p.weaponTier * 0.15) + 12) * rnd(0.8, 1.2));   // chip damage — tuned for the 3s cooldown
+  // heavy attack only lands if the player currently has one primed; it's consumed either way
+  const useHeavy = !!heavy && !!p.heavyReady;
+  p.heavyReady = false;
+  let dmg = Math.round((p.army * 0.06 * (1 + p.upg.mil * 0.1 + p.weaponTier * 0.15) + 12) * rnd(0.8, 1.2));   // chip damage — tuned for the 3s cooldown
+  if (useHeavy) dmg *= 3;                                   // HEAVY ATTACK — triple damage
   b.hp -= dmg;
   b.damage[userId] = (b.damage[userId] || 0) + dmg;
   b.log = b.log || [];
-  b.log.unshift({ name: p.name, dmg });   // newest first
+  b.log.unshift({ name: p.name, dmg, heavy: useHeavy });    // newest first
   if (b.log.length > 3) b.log.length = 3;
   p.lastStrikeAt = now;
   p.stats.bossDmg += dmg;
+  // 1-in-8 chance a normal strike primes a Heavy Attack for this player's next hit
+  let heavyUnlocked = false;
+  if (!useHeavy && Math.random() < 1 / 8) { p.heavyReady = true; heavyUnlocked = true; }
   const killed = b.hp <= 0;
   if (saveData) saveData(guildId);
-  return { dmg, killed, hpLeft: Math.max(0, b.hp), total: b.damage[userId] };
+  return { dmg, killed, hpLeft: Math.max(0, b.hp), total: b.damage[userId], usedHeavy: useHeavy, heavyUnlocked };
 }
 
 function resolveBossDefeat(state, db, guildId, saveData) {
@@ -1239,7 +1248,7 @@ function initDiyar({ client, db, saveData, awardLP }) {
         .setDescription(
           `**New here?** Type \`/diyar\` to raise your banner and join the war for Libya${n > 0 ? ` — **${n}** ${n === 1 ? 'ruler is' : 'rulers are'} already fighting!` : '!'}\n` +
           `Seize cities, build an army, defend your land and battle the threat.\n\n` +
-          `**هل أنت جديد؟** اكتب \`/diyar\` لرفع رايتك والانضمام إلى معركة ليبيا${n > 0 ? ` — يقاتل بالفعل **${n}** ${n === 1 ? 'حاكم' : 'حكّام'}!` : '!'}\n` +
+          `**هل أنت جديد؟** اكتب ⁦\`/diyar\`⁩ لرفع رايتك والانضمام إلى معركة ليبيا${n > 0 ? ` — يقاتل بالفعل **${n}** ${n === 1 ? 'حاكم' : 'حكّام'}!` : '!'}\n` +
           `استولِ على المدن، ابنِ جيشك، دافع عن أرضك، وواجه التهديد.`);
       const msg = await ch.send({ embeds: [embed] });
       state.nudgeMsgId = msg.id; saveData(guildId);
@@ -1426,10 +1435,18 @@ function initDiyar({ client, db, saveData, awardLP }) {
       const action = parts[1];
 
       // strike/damage come from the PUBLIC war-room message — they don't need a dashboard
-      if (action === 'strike') {
-        const r = strikeBoss(state, saveData, gid, uid);
+      if (action === 'strike' || action === 'heavy') {
+        const r = strikeBoss(state, saveData, gid, uid, action === 'heavy');
         if (r.error) return interaction.reply(eph({ content: r.error }));
-        // no private reply spam — the hit lands in the public Attack Log on the next 3s edit
+        // the hit lands in the public Attack Log on the next 3s edit — no public spam.
+        // heavy attacks are personal, so we deliver them via a private ephemeral button:
+        if (r.heavyUnlocked) {
+          // just primed one → give this player a private Heavy Attack button to use on their next hit
+          const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId('dy:heavy').setLabel('💥 Heavy Attack (3×)').setStyle(ButtonStyle.Success));
+          return interaction.reply(eph({ content: '💥 **Heavy Attack unlocked!** Your next strike deals **triple** damage — tap below (mind the 3s cooldown):', components: [row] }));
+        }
+        if (r.usedHeavy) return interaction.reply(eph({ content: `💥 **HEAVY HIT!** You struck for **${fmt(r.dmg)}** — triple damage! Back to normal strikes now.` }));
         return interaction.deferUpdate();
       }
       if (action === 'bossdmg') return interaction.reply(eph(bossView(state)));
@@ -1573,7 +1590,7 @@ function initDiyar({ client, db, saveData, awardLP }) {
       getState: () => stateOf, ensurePlayer, resolveAttack, recruit, upgrade, reinforce, collectIncome, tick,
       spawnBoss, strikeBoss, resolveBossDefeat, resolveBossExpire, playerStrength, ensureBossSched,
       pendingIncome, renderMap, renderBoss, renderBattle, pickTimes, reseedIfLanded, rankPlayers, threatEmbed, threatSiegeLines, threatBar,
-      claimTribute, buyWeapon, armouryView, profileView, leaderboard, resetSeason, targetSelect, reinforceSelect, effectiveDefence, effectiveAttack, startRaid, resolveRaid, troopCost, raidLiveEmbed, raidResultEmbed, threatTick, finishThreat, inviteLine, postNudge,
+      claimTribute, buyWeapon, armouryView, profileView, leaderboard, resetSeason, targetSelect, reinforceSelect, effectiveDefence, effectiveAttack, startRaid, resolveRaid, troopCost, raidLiveEmbed, raidResultEmbed, threatTick, finishThreat, inviteLine, postNudge, threatDefeatEmbed, threatWithdrawEmbed, strikeBoss,
     },
   };
 }
