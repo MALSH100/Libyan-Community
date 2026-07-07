@@ -542,6 +542,8 @@ const { getBattleCardsCommands, initBattleCards } = require('./battlecards');
 const { getDiyarCommands, initDiyar } = require('./diyar');
 
 const { getLottoCommands, initLotto } = require('./lottery');
+
+const { getShopCommands, initShop } = require('./shop');
 //const initTranslator = require('./translator');
 
 function getAllCommands() {
@@ -618,7 +620,13 @@ function getAllCommands() {
   } catch (e) {
     console.error('Could not load lottery.js commands:', e.message);
   }
-  _allCommands = [...commands, ...pokeCommands, ...yaraytCommands, ...exchangeCommands, ...newsCommands, ...jobsCommands, ...potdCommands, ...translatorCommands, ...libyaChatCommands, ...gachaCommands, ...battleCardsCommands, ...diyarCommands, ...lottoCommands];
+  let shopCommands = [];
+  try {
+    shopCommands = getShopCommands();
+  } catch (e) {
+    console.error('Could not load shop.js commands:', e.message);
+  }
+  _allCommands = [...commands, ...pokeCommands, ...yaraytCommands, ...exchangeCommands, ...newsCommands, ...jobsCommands, ...potdCommands, ...translatorCommands, ...libyaChatCommands, ...gachaCommands, ...battleCardsCommands, ...diyarCommands, ...lottoCommands, ...shopCommands];
   console.log(`📋 Command list built: ${_allCommands.map(c => c.name).join(', ')}`);
   return _allCommands;
 }
@@ -2435,6 +2443,7 @@ initBattleCards({ client, db, saveData, awardLP });
 // Diyar — Libyan conquest game (Dinar economy)
 initDiyar({ client, db, saveData, awardLP });
 initLotto({ client, db, saveData });
+initShop({ client, db, saveData });
 
 // Translator (reaction-based Arabic → English)
 //initTranslator(client, db, saveData);
