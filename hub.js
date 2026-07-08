@@ -21,6 +21,7 @@ const path = require('path');
 const fs = require('fs');
 const { Resvg } = require('@resvg/resvg-js');
 const { getDinar, spendDinar, awardDinar } = require('./gacha');
+const coins = require('./coinskins');
 
 // ── prices & lifetime ──
 const PRICE_SOLID    = 800;
@@ -108,6 +109,17 @@ const GRADIENTS = [
   { key: 'g_sahara',  name: 'Sahara Dunes',   a: 0xe7b41a, b: 0xb0793a, emoji: '🏜️' },
   { key: 'g_aurora',  name: 'Aurora',         a: 0x27c4e5, b: 0x8a5cf6, emoji: '🌌' },
   { key: 'g_rose',    name: 'Rose Petal',     a: 0xff5d8f, b: 0xff9a1a, emoji: '🌹' },
+  { key: 'g_lagoon',  name: 'Lagoon',         a: 0x0fb5ae, b: 0x8bd450, emoji: '🏝️' },
+  { key: 'g_peach',   name: 'Peach Melba',    a: 0xffc9a3, b: 0xff5d8f, emoji: '🍑' },
+  { key: 'g_galaxy',  name: 'Galaxy',         a: 0x5b5bd6, b: 0x2b2d31, emoji: '🌠' },
+  { key: 'g_lime',    name: 'Citrus Zest',    a: 0x8bd450, b: 0xffb020, emoji: '🍋' },
+  { key: 'g_berry',   name: 'Berry Blast',    a: 0xd53fb0, b: 0xc0223b, emoji: '🫐' },
+  { key: 'g_steel',   name: 'Steel Blue',     a: 0x5a6b7b, b: 0x2e6bff, emoji: '⚔️' },
+  { key: 'g_lava',    name: 'Molten Lava',    a: 0xffcc00, b: 0xc0223b, emoji: '🌋' },
+  { key: 'g_frost',   name: 'Frostbite',      a: 0xbfe3ff, b: 0x2e6bff, emoji: '❄️' },
+  { key: 'g_pinky',   name: 'Pink Blossom',   a: 0xff77c8, b: 0xff2d9c, emoji: '🌸' },
+  { key: 'g_neon',    name: 'Neon Nights',    a: 0xff2d9c, b: 0x27c4e5, emoji: '🎆' },
+  { key: 'g_forest',  name: 'Deep Forest',    a: 0x1f8a3d, b: 0x2b2d31, emoji: '🌲' },
 ];
 
 const solidByKey = (k) => SOLID_COLORS.find(c => c.key === k);
@@ -280,18 +292,19 @@ function initShop({ client, db, saveData, runFlip }) {
     let role = null, usedFallback = false;
     const baseOpts = { name, hoist: false, mentionable: false, permissions: [], reason: `Hub role for ${member.user.tag}` };
     if (kind === 'holo') {
-      // Discord holographic is a fixed preset — request the holographic style; fall back to a plain role
-      try { role = await guild.roles.create({ ...baseOpts, colors: { primaryColor: 0xeb459f, secondaryColor: 0x5865f2, tertiaryColor: 0x57f287 } }); }
-      catch (e) { usedFallback = true; role = await guild.roles.create({ ...baseOpts, color: 0xeb459f }); }
+      // Discord holographic requires these EXACT enforced values (primary/secondary/tertiary);
+      // any other triple is rejected and falls back to solid. These are Discord's fixed preset.
+      try { role = await guild.roles.create({ ...baseOpts, colors: { primaryColor: 11127295, secondaryColor: 16759788, tertiaryColor: 16761760 } }); }
+      catch (e) { usedFallback = true; role = await guild.roles.create({ ...baseOpts, colors: { primaryColor: 11127295 } }); }
     } else if (kind === 'gradient' || kind === 'customGrad') {
       const a = kind === 'customGrad' ? hexA : grad.a;
       const b = kind === 'customGrad' ? hexB : grad.b;
       try { role = await guild.roles.create({ ...baseOpts, colors: { primaryColor: a, secondaryColor: b } }); }
-      catch (e) { usedFallback = true; role = await guild.roles.create({ ...baseOpts, color: a }); }
+      catch (e) { usedFallback = true; role = await guild.roles.create({ ...baseOpts, colors: { primaryColor: a } }); }
     } else if (kind === 'customSolid') {
-      role = await guild.roles.create({ ...baseOpts, color: hex });
+      role = await guild.roles.create({ ...baseOpts, colors: { primaryColor: hex } });
     } else {
-      role = await guild.roles.create({ ...baseOpts, color: solid.hex });
+      role = await guild.roles.create({ ...baseOpts, colors: { primaryColor: solid.hex } });
     }
     // position just under the bot's highest role so the colour actually shows and can be assigned
     try {
@@ -346,22 +359,83 @@ function initShop({ client, db, saveData, runFlip }) {
     || !!interaction.member?.premiumSince
     || !!(interaction.member && interaction.member.premiumSinceTimestamp);
 
-  const hubEmbed = (isBooster) => new EmbedBuilder().setColor(0xE7B41A).setTitle('🏛️ The Community Hub')
-    .setDescription(
-      `Welcome! Pick an option below:\n\n` +
-      `🎨 **Custom Roles** — a personalised, colour or gradient role, your name on it\n` +
-      `🪙 **Coin Flip** — bet your Dinar on a flip of the coin\n` +
-      `🔥 **Daily Streak** — check in every day for a growing Dinar reward\n` +
-      `⭐ **Booster Perks** — ${isBooster ? '**unlocked!** free holographic & custom-hex roles' : '_boost the server to unlock free premium roles_'}\n\n` +
-      `*More coming soon…*`);
+  // in-memory "last action" per user, shown under the main hub menu (session-scoped)
+  const lastAction = new Map();
+  const setAction = (uid, text) => lastAction.set(uid, text);
+
+  const hubEmbed = (isBooster, uid, gid) => {
+    const la = uid && lastAction.get(uid);
+    const bal = (uid && gid) ? getDinar(db, gid, uid) : 0;
+    const e = new EmbedBuilder().setColor(0xE7B41A).setTitle('🏛️ The Community Hub')
+      .setDescription(
+        `Welcome! Pick an option below:\n\n` +
+        `🛒 **Shop** — custom roles & coin designs, bought with Dinar\n` +
+        `🪙 **Coin Flip** — bet your Dinar on a flip of the coin\n` +
+        `🔥 **Daily Streak** — check in every day for a growing Dinar reward\n` +
+        `⭐ **Booster Perks** — ${isBooster ? '**unlocked!** free holographic & custom-hex roles' : '_boost the server to unlock free premium roles_'}\n` +
+        `❓ **Help** — how everything works\n\n` +
+        `*More coming soon…*`);
+    if (uid) e.setAuthor({ name: `💰 ${fmt(bal)} Dinar` });
+    if (la) e.addFields({ name: '\u200b', value: `📋 *Last action:* ${la}` });
+    return e;
+  };
   const hubRow = (isBooster) => new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('hub:roles').setLabel('Custom Roles').setEmoji('🎨').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('hub:shop').setLabel('Shop').setEmoji('🛒').setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId('hub:flip').setLabel('Coin Flip').setEmoji('🪙').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('hub:streak').setLabel('Daily Streak').setEmoji('🔥').setStyle(ButtonStyle.Success),
     new ButtonBuilder().setCustomId('hub:booster').setLabel(isBooster ? 'Booster Perks' : 'Booster Perks (boost to unlock)').setEmoji('⭐').setStyle(ButtonStyle.Secondary).setDisabled(!isBooster),
     new ButtonBuilder().setCustomId('hub:help').setLabel('Help').setEmoji('❓').setStyle(ButtonStyle.Secondary));
   const backHubRow = () => new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('hub:home').setLabel('← Back to Hub').setStyle(ButtonStyle.Secondary));
+  const backRolesRow = () => new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('hub:roles').setLabel('← Back to Custom Roles').setStyle(ButtonStyle.Secondary));
+
+  // coin-designs shop: an overview embed + a dropdown of all skins, marking owned/equipped
+  function coinShopView(gid, uid) {
+    const equipped = coins.getEquipped(db, gid, uid);
+    const lines = coins.SKINS.map(s => {
+      const own = coins.isOwned(db, gid, uid, s.key);
+      const eq = equipped === s.key;
+      const tag = eq ? '✅ equipped' : own ? '🎟️ owned' : (s.price > 0 ? `💰 ${fmt(s.price)}` : 'free');
+      return `${s.emoji} **${s.name}** — *${s.rarity}* · ${tag}`;
+    }).join('\n');
+    const embed = new EmbedBuilder().setColor(0xE7B41A).setTitle('🪙 Coin Designs')
+      .setDescription(`Reskin your coin flip! Your equipped design shows on the **Heads/Tails** result.\n(The spin animation stays the same.)\n\n${lines}\n\n*Pick one below to preview, buy or equip.*`);
+    const select = new ActionRowBuilder().addComponents(
+      new StringSelectMenuBuilder().setCustomId('hub:coinPick').setPlaceholder('Preview a coin design…')
+        .addOptions(coins.SKINS.map(s => ({ label: `${s.name} (${s.rarity})`, value: s.key, emoji: s.emoji,
+          description: coins.isOwned(db, gid, uid, s.key) ? (coins.getEquipped(db, gid, uid) === s.key ? 'Equipped' : 'Owned') : (s.price > 0 ? `${fmt(s.price)} Dinar` : 'Free') }))));
+    const ownedCount = coins.getOwned(db, gid, uid).length;
+    const nav = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('hub:mycoins').setLabel(`My Coins (${ownedCount})`).setEmoji('🎒').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('hub:home').setLabel('← Back to Hub').setStyle(ButtonStyle.Secondary));
+    return { embeds: [embed], components: [select, nav], attachments: [] };
+  }
+  async function coinShopFiles() { return []; }   // overview has no image; previews attach on pick
+
+  // "My Coins" — only what the user owns, with quick-equip and current equipped highlighted
+  function myCoinsView(gid, uid) {
+    const equipped = coins.getEquipped(db, gid, uid);
+    const owned = coins.getOwned(db, gid, uid).map(k => coins.skinByKey(k)).filter(Boolean);
+    const lines = owned.map(s => {
+      const eq = equipped === s.key;
+      return `${s.emoji} **${s.name}** — *${s.rarity}*${eq ? ' · ✅ **equipped**' : ''}`;
+    }).join('\n');
+    const locked = coins.SKINS.filter(s => !coins.isOwned(db, gid, uid, s.key)).length;
+    const embed = new EmbedBuilder().setColor(0x5865F2).setTitle('🎒 My Coin Designs')
+      .setDescription(
+        `Coins you own (${owned.length}/${coins.SKINS.length}):\n\n${lines}\n\n` +
+        (locked > 0 ? `🔒 **${locked}** more available in the shop.\n\n` : `🏆 You own every coin design!\n\n`) +
+        `*Pick one below to equip it instantly.*`);
+    const equipSelect = new ActionRowBuilder().addComponents(
+      new StringSelectMenuBuilder().setCustomId('hub:coinEquipPick').setPlaceholder('Equip one of your coins…')
+        .addOptions(owned.map(s => ({ label: `${s.name} (${s.rarity})`, value: s.key, emoji: s.emoji,
+          description: equipped === s.key ? 'Currently equipped' : 'Tap to equip' }))));
+    const nav = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('hub:coins').setLabel('← Back to Shop').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('hub:home').setLabel('Hub').setStyle(ButtonStyle.Secondary));
+    return { embeds: [embed], components: [equipSelect, nav], attachments: [] };
+  }
 
   // roles section
   const rolesEmbed = (guildId, userId) => {
@@ -525,7 +599,7 @@ function initShop({ client, db, saveData, runFlip }) {
       if (interaction.isChatInputCommand() && interaction.commandName === 'hub') {
         if (!interaction.guildId) return interaction.reply({ content: 'Use this in the server.', flags: 64 });
         const boosting = isBoosting(interaction);
-        return interaction.reply({ embeds: [hubEmbed(boosting)], components: [hubRow(boosting)], flags: 64 });
+        return interaction.reply({ embeds: [hubEmbed(boosting, interaction.user.id, interaction.guildId)], components: [hubRow(boosting)], flags: 64 });
       }
       if (!interaction.guildId) return;
       const gid = interaction.guildId, uid = interaction.user.id;
@@ -534,11 +608,78 @@ function initShop({ client, db, saveData, runFlip }) {
       // hub navigation
       if (interaction.isButton() && interaction.customId === 'hub:home') {
         const boosting = isBoosting(interaction);
-        return interaction.update({ embeds: [hubEmbed(boosting)], components: [hubRow(boosting)], files: [], attachments: [] });
+        return interaction.update({ embeds: [hubEmbed(boosting, uid, gid)], components: [hubRow(boosting)], files: [], attachments: [] });
       }
+      // ── Shop sub-menu: Custom Roles + Coin Designs ──
+      if (interaction.isButton() && interaction.customId === 'hub:shop') {
+        const embed = new EmbedBuilder().setColor(0xE7B41A).setTitle('🛒 The Shop')
+          .setDescription(`Spend your Dinar 💰\n\n🎨 **Custom Roles** — a personalised colour or gradient role\n🪙 **Coin Designs** — reskin your coin flip with themed coins`);
+        const row = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId('hub:roles').setLabel('Custom Roles').setEmoji('🎨').setStyle(ButtonStyle.Primary),
+          new ButtonBuilder().setCustomId('hub:coins').setLabel('Coin Designs').setEmoji('🪙').setStyle(ButtonStyle.Success));
+        return interaction.update({ content: '', embeds: [embed], components: [row, backHubRow()], files: [], attachments: [] });
+      }
+      // Coin Designs — browse, preview, buy & equip
+      if (interaction.isButton() && interaction.customId === 'hub:coins') {
+        return interaction.update({ ...coinShopView(gid, uid), content: '', files: (await coinShopFiles(gid, uid)) });
+      }
+      // My Coins — owned skins with quick-equip
+      if (interaction.isButton() && interaction.customId === 'hub:mycoins') {
+        return interaction.update({ ...myCoinsView(gid, uid), content: '', files: [] });
+      }
+      // quick-equip from the My Coins dropdown
+      if (interaction.isStringSelectMenu() && interaction.customId === 'hub:coinEquipPick') {
+        const key = interaction.values[0];
+        const skin = coins.skinByKey(key);
+        if (coins.equip(db, gid, uid, key, saveData) && skin) setAction(uid, `🪙 Equipped the **${skin.name}** coin design.`);
+        return interaction.update({ ...myCoinsView(gid, uid), content: skin ? `✅ Equipped **${skin.name}** — it'll show on your next flip.` : '', files: [] });
+      }
+      // coin skin selected from the dropdown → preview + buy/equip
+      if (interaction.isStringSelectMenu() && interaction.customId === 'hub:coinPick') {
+        const key = interaction.values[0];
+        const skin = coins.skinByKey(key);
+        if (!skin) return interaction.deferUpdate();
+        const owned = coins.isOwned(db, gid, uid, key);
+        const equipped = coins.getEquipped(db, gid, uid) === key;
+        const png = coins.renderFace(key, 'heads');
+        const embed = new EmbedBuilder().setColor(coins.RARITY_COLOR[skin.rarity] || 0xE7B41A)
+          .setTitle(`${skin.emoji} ${skin.name}`)
+          .setDescription(`**Rarity:** ${skin.rarity}\n${skin.price > 0 ? `**Price:** ${fmt(skin.price)} Dinar` : '*Default coin — free*'}\n\n${equipped ? '✅ *Currently equipped.*' : owned ? '🎟️ *You own this — equip it below.*' : '🛒 *Buy it below to unlock.*'}`)
+          .setImage('attachment://coinpreview.png');
+        const row = new ActionRowBuilder();
+        if (equipped) row.addComponents(new ButtonBuilder().setCustomId('hub:coins').setLabel('✓ Equipped').setStyle(ButtonStyle.Secondary).setDisabled(true));
+        else if (owned) row.addComponents(new ButtonBuilder().setCustomId(`hub:coinEquip:${key}`).setLabel('Equip this coin').setEmoji('🪙').setStyle(ButtonStyle.Success));
+        else row.addComponents(new ButtonBuilder().setCustomId(`hub:coinBuy:${key}`).setLabel(`Buy — ${fmt(skin.price)} Dinar`).setEmoji('🛒').setStyle(ButtonStyle.Success));
+        const back = new ButtonBuilder().setCustomId('hub:coins').setLabel('← Back to Coins').setStyle(ButtonStyle.Secondary);
+        return interaction.update({ content: '', embeds: [embed], components: [row.addComponents(back)], files: [new AttachmentBuilder(png, { name: 'coinpreview.png' })], attachments: [] });
+      }
+      // equip an owned coin
+      if (interaction.isButton() && interaction.customId.startsWith('hub:coinEquip:')) {
+        const key = interaction.customId.split(':')[2];
+        coins.equip(db, gid, uid, key, saveData);
+        const skin = coins.skinByKey(key);
+        setAction(uid, `🪙 Equipped the **${skin ? skin.name : key}** coin design.`);
+        return interaction.update({ ...coinShopView(gid, uid), content: `✅ Equipped **${skin ? skin.name : key}**! It'll show on your next flip.`, files: (await coinShopFiles(gid, uid)) });
+      }
+      // buy a coin
+      if (interaction.isButton() && interaction.customId.startsWith('hub:coinBuy:')) {
+        const key = interaction.customId.split(':')[2];
+        const skin = coins.skinByKey(key);
+        if (!skin || skin.price <= 0) return interaction.deferUpdate();
+        if (coins.isOwned(db, gid, uid, key)) { coins.equip(db, gid, uid, key, saveData); return interaction.update({ ...coinShopView(gid, uid), files: (await coinShopFiles(gid, uid)) }); }
+        const bal = getDinar(db, gid, uid);
+        if (bal < skin.price)
+          return interaction.reply({ content: `💰 You need **${fmt(skin.price)} Dinar** but only have **${fmt(bal)}**. Keep earning!`, flags: 64 });
+        spendDinar(db, gid, uid, skin.price, saveData);
+        coins.addOwned(db, gid, uid, key, saveData);
+        coins.equip(db, gid, uid, key, saveData);   // auto-equip on purchase
+        setAction(uid, `🪙 Bought & equipped the **${skin.name}** coin (${fmt(skin.price)} Dinar).`);
+        return interaction.update({ ...coinShopView(gid, uid), content: `✅ **${skin.name}** unlocked & equipped! New balance **${fmt(getDinar(db, gid, uid))} Dinar**.`, files: (await coinShopFiles(gid, uid)) });
+      }
+
       if (interaction.isButton() && interaction.customId === 'hub:roles') {
         const png = renderSwatch(paletteSwatch());
-        return interaction.update({ embeds: [rolesEmbed(gid, uid)], components: [rolesRow(), backHubRow()],
+        return interaction.update({ content: '', embeds: [rolesEmbed(gid, uid)], components: [rolesRow(), backHubRow()],
           files: [new AttachmentBuilder(png, { name: 'palette.png' })], attachments: [] });
       }
       if (interaction.isButton() && interaction.customId === 'hub:flip') {
@@ -565,6 +706,7 @@ function initShop({ client, db, saveData, runFlip }) {
         const [, , side, amtStr] = interaction.customId.split(':');
         const amount = parseInt(amtStr, 10);
         await interaction.update({ content: '🪙 Tossing your coin in the channel…', components: [] }).catch(() => {});
+        setAction(uid, `🪙 Flipped **${fmt(amount)} Dinar** on **${side}** — watch the channel!`);
         const r = await runFlip({ guildId: gid, channel: interaction.channel, uid, name, amount, side });
         if (r && r.error) return interaction.editReply({ content: r.error, components: [] }).catch(() => {});
         return;
@@ -665,6 +807,7 @@ function initShop({ client, db, saveData, runFlip }) {
         }
         const styleName = btype === 'holo' ? 'holographic' : btype === 'solid' ? 'custom solid' : 'custom gradient';
         const fallbackLine = res.usedFallback ? `\n*(Premium styling wasn't available right now, so a solid colour was applied instead.)*` : '';
+        setAction(uid, `✨ Got a free **${styleName}** booster role — **${esc(rname)}**.`);
         return interaction.editReply({ content: `✨ **${esc(rname)}** is yours — a free **${styleName}** booster role! <@&${res.role.id}> has been added.\n💜 It stays as long as you keep boosting. Change it anytime for free from \`/hub\` → Booster Perks.${fallbackLine}` });
       }
 
@@ -681,17 +824,16 @@ function initShop({ client, db, saveData, runFlip }) {
           : res.continues
             ? `🔥 Streak extended to **${res.count} days**! **+${fmt(res.reward)} Dinar**${res.reward >= STREAK_CAP ? ' (max reward!)' : ''}. Best: ${res.best}.`
             : `🔥 Day **1** — **+${fmt(res.reward)} Dinar**. Come back tomorrow!`;
+        setAction(uid, `🔥 Checked in — ${res.wasReset ? 'started a new streak' : `day ${res.count}`} (+${fmt(res.reward)} Dinar).`);
         return interaction.followUp({ content: msg, flags: 64 }).catch(() => {});
       }
 
       // ── roles: choose colour category ──
       if (interaction.isButton() && interaction.customId === 'shop:solid') {
-        await interaction.reply({ content: `🎨 **Custom Solid Role** — **${fmt(PRICE_SOLID)} Dinar**. Pick a colour from either list, then you'll name it.\n⏳ *Lasts 1 month.*`, components: [solidSelectBright(), solidSelectSoft()], flags: 64 });
-        return;
+        return interaction.update({ content: `🎨 **Custom Solid Role** — **${fmt(PRICE_SOLID)} Dinar**. Pick a colour from either list, then you'll name it.\n⏳ *Lasts 1 month.*`, embeds: [], files: [], attachments: [], components: [solidSelectBright(), solidSelectSoft(), backRolesRow()] });
       }
       if (interaction.isButton() && interaction.customId === 'shop:grad') {
-        await interaction.reply({ content: `🌈 **Gradient Role** — **${fmt(PRICE_GRADIENT)} Dinar**. Pick your combo, then you'll name it.\n⏳ *Lasts 1 month.*`, components: [gradSelect()], flags: 64 });
-        return;
+        return interaction.update({ content: `🌈 **Gradient Role** — **${fmt(PRICE_GRADIENT)} Dinar**. Pick your combo, then you'll name it.\n⏳ *Lasts 1 month.*`, embeds: [], files: [], attachments: [], components: [gradSelect(), backRolesRow()] });
       }
 
       // colour picked → preview + "name & buy" + a BACK button to pick another
@@ -754,6 +896,7 @@ function initShop({ client, db, saveData, runFlip }) {
         const styleLine = res.usedFallback
           ? `\n*(Gradient styling wasn't available right now, so it was applied as a solid colour — it'll upgrade automatically next time you re-buy while boosts are active.)*`
           : '';
+        setAction(uid, `🎨 Bought a ${kind === 'solid' ? 'solid' : 'gradient'} role — **${esc(rname)}** (${fmt(price)} Dinar).`);
         return interaction.editReply({
           content: `✅ **${esc(rname)}** is yours! <@&${res.role.id}> has been added to you.\n💰 Paid **${fmt(price)} Dinar** — new balance **${fmt(newBal)}**.\n⏳ **This role expires <t:${Math.round(res.expiresAt / 1000)}:R>** (in 1 month). Open \`/hub\` anytime to refresh or change it.${styleLine}` });
       }

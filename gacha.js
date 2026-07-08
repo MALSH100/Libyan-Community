@@ -617,8 +617,20 @@ function initGacha({ client, db, saveData }) {
 
     await new Promise((r) => setTimeout(r, 2600));
 
-    // stage 2 — reveal the landed face + result
+    // stage 2 — reveal the landed face + result (reskin if the user equipped a coin design)
     const faceFile = landed === 'heads' ? 'dinar-coin-heads.png' : 'dinar-coin-tails.png';
+    let faceAttachment, faceUrl;
+    try {
+      const coins = require('./coinskins');
+      const equipped = coins.getEquipped(db, guildId, uid);
+      if (equipped && equipped !== 'default') {
+        const png = coins.renderFace(equipped, landed);
+        const fname = `coin-${equipped}-${landed}.png`;
+        faceAttachment = new AttachmentBuilder(png, { name: fname });
+        faceUrl = `attachment://${fname}`;
+      }
+    } catch (e) { /* fall back to default coin on any skin error */ }
+    if (!faceAttachment) { faceAttachment = coinFile(faceFile); faceUrl = `attachment://${faceFile}`; }
     const n = Math.abs(fstat.streak);
     const streakLine = fstat.streak > 0
       ? `\n🔥 **${name}** is riding a **${n}-win** streak!`
@@ -632,9 +644,9 @@ function initGacha({ client, db, saveData }) {
           : `💸 **${name}** called **${sideName(side)}** and lost **${fmt(amount)} Dinar**.`) +
         `\n💰 New balance: **${fmt(newBal)} Dinar**` +
         streakLine)
-      .setImage(`attachment://${faceFile}`)
+      .setImage(faceUrl)
       .setFooter({ text: `One flip every ${Math.round(FLIP_CD_MS / 3600000)} hours` });
-    await msg.edit({ embeds: [resultEmbed], files: [coinFile(faceFile)], attachments: [] }).catch(() => {});
+    await msg.edit({ embeds: [resultEmbed], files: [faceAttachment], attachments: [] }).catch(() => {});
     return { ok: true };
   }
 
