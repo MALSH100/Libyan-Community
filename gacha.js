@@ -575,21 +575,21 @@ function initGacha({ client, db, saveData }) {
     return interaction.reply({ content: `💰 **${target.username}** has **${fmt(dinarOf(s, target.id))} Dinar**.` });
   }
 
-  async function cmdFlip(interaction, s) {
-    const uid = interaction.user.id;
-    const name = interaction.member?.displayName || interaction.user.username;
-    const amount = interaction.options.getInteger('amount');
-    const side = interaction.options.getString('side');                 // 'heads' | 'tails'
-
-    // bet bounds are enforced by the slash command, but re-check defensively
-    if (amount < FLIP_MIN_BET || amount > FLIP_MAX_BET) {
-      return interaction.reply(eph(`🪙 Bet must be between **${fmt(FLIP_MIN_BET)}** and **${fmt(FLIP_MAX_BET)} Dinar**.`));
-    }
+  // Shared flip engine. Validates, resolves, updates balance/streak/cooldown, and posts the
+  // public animated flip to `channel`. Used by BOTH /dinar-flip and the /hub coin-flip button,
+  // so balances, the cooldown and the win/loss streak can never desync.
+  // Returns { ok:true } or { error:'...' } (caller shows the error privately).
+  async function runFlip({ guildId, channel, uid, name, amount, side }) {
+    amount = Math.floor(amount);
+    if (!Number.isFinite(amount) || amount < FLIP_MIN_BET || amount > FLIP_MAX_BET)
+      return { error: `🪙 Bet must be between **${fmt(FLIP_MIN_BET)}** and **${fmt(FLIP_MAX_BET)} Dinar**.` };
+    if (side !== 'heads' && side !== 'tails') return { error: 'Pick heads or tails.' };
+    const s = getState(db, guildId);
     const cd = (s.cooldowns[uid] ||= {});
     const since = Date.now() - (cd.flip || 0);
-    if (since < FLIP_CD_MS) return interaction.reply(eph(`⏳ You can flip again in **${fmtDur(FLIP_CD_MS - since)}**.`));
+    if (since < FLIP_CD_MS) return { error: `⏳ You can flip again in **${fmtDur(FLIP_CD_MS - since)}**.` };
     const bal = dinarOf(s, uid);
-    if (bal < amount) return interaction.reply(eph(`💸 You only have **${fmt(bal)} Dinar** — not enough to bet **${fmt(amount)}**.`));
+    if (bal < amount) return { error: `💸 You only have **${fmt(bal)} Dinar** — not enough to bet **${fmt(amount)}**.` };
 
     // resolve now (house edge baked into FLIP_WIN_CHANCE), then animate
     const win = Math.random() < FLIP_WIN_CHANCE;
@@ -598,11 +598,10 @@ function initGacha({ client, db, saveData }) {
     if (!s.flipStats) s.flipStats = {};
     const fstat = (s.flipStats[uid] ||= { wins: 0, losses: 0, won: 0, lost: 0, streak: 0 });
     if (win) { fstat.wins++; fstat.won += amount; } else { fstat.losses++; fstat.lost += amount; }
-    // streak: positive = consecutive wins, negative = consecutive losses; resets/flips on a change
     if (win) fstat.streak = (fstat.streak > 0 ? fstat.streak : 0) + 1;
     else     fstat.streak = (fstat.streak < 0 ? fstat.streak : 0) - 1;
     cd.flip = Date.now();
-    saveData(interaction.guild.id);
+    saveData(guildId);
 
     const sideName = (x) => (x === 'heads' ? 'Heads' : 'Tails');
     const newBal = dinarOf(s, uid);
@@ -612,13 +611,14 @@ function initGacha({ client, db, saveData }) {
       .setTitle('🪙 Libyan Coin Toss')
       .setDescription(`**${name}** bet **${fmt(amount)} Dinar** on **${sideName(side)}**…\nThe coin is in the air! 🌀`)
       .setImage('attachment://dinar-coin-spin.gif');
-    await interaction.reply({ embeds: [spinEmbed], files: [coinFile('dinar-coin-spin.gif')] }).catch(() => {});
+    let msg;
+    try { msg = await channel.send({ embeds: [spinEmbed], files: [coinFile('dinar-coin-spin.gif')] }); }
+    catch (e) { return { error: 'Could not post the flip here — check my permissions in this channel.' }; }
 
     await new Promise((r) => setTimeout(r, 2600));
 
     // stage 2 — reveal the landed face + result
     const faceFile = landed === 'heads' ? 'dinar-coin-heads.png' : 'dinar-coin-tails.png';
-    // streak line shown under the coin — positive = win streak, negative = loss streak
     const n = Math.abs(fstat.streak);
     const streakLine = fstat.streak > 0
       ? `\n🔥 **${name}** is riding a **${n}-win** streak!`
@@ -634,7 +634,19 @@ function initGacha({ client, db, saveData }) {
         streakLine)
       .setImage(`attachment://${faceFile}`)
       .setFooter({ text: `One flip every ${Math.round(FLIP_CD_MS / 3600000)} hours` });
-    await interaction.editReply({ embeds: [resultEmbed], files: [coinFile(faceFile)], attachments: [] }).catch(() => {});
+    await msg.edit({ embeds: [resultEmbed], files: [coinFile(faceFile)], attachments: [] }).catch(() => {});
+    return { ok: true };
+  }
+
+  async function cmdFlip(interaction, s) {
+    const uid = interaction.user.id;
+    const name = interaction.member?.displayName || interaction.user.username;
+    const amount = interaction.options.getInteger('amount');
+    const side = interaction.options.getString('side');                 // 'heads' | 'tails'
+    // pre-check so errors stay private; the flip itself posts publicly in the channel
+    const r = await runFlip({ guildId: interaction.guild.id, channel: interaction.channel, uid, name, amount, side });
+    if (r.error) return interaction.reply(eph(r.error));
+    return interaction.reply(eph('🪙 Your coin is in the air — watch the channel!')).catch(() => {});
   }
 
   function cmdRichest(interaction, s) {
@@ -1084,6 +1096,9 @@ function initGacha({ client, db, saveData }) {
     }
     if (sub === 'recompute') { recomputeRarities(db, gid); saveData(gid); return interaction.reply(eph('✅ Rarities recomputed from current stats.')); }
   }
+
+  // expose the shared flip engine so /hub can post the same public flip
+  return { runFlip };
 }
 
 module.exports = { getGachaCommands, initGacha, awardDinar, isAtDinarCap, dinarDailyCap, getDinar, spendDinar };

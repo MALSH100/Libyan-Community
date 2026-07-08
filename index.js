@@ -543,7 +543,7 @@ const { getDiyarCommands, initDiyar } = require('./diyar');
 
 const { getLottoCommands, initLotto } = require('./lottery');
 
-const { getShopCommands, initShop } = require('./shop');
+const { getShopCommands, initShop } = require('./hub');
 //const initTranslator = require('./translator');
 
 function getAllCommands() {
@@ -2437,13 +2437,13 @@ initPOTD({ client, db, saveData, awardLP });
 initLibyaChat(client);
 
 // Qa'ima — Server Collection Game (Dinar economy)
-initGacha({ client, db, saveData });
+const gachaApi = initGacha({ client, db, saveData });
 initBattleCards({ client, db, saveData, awardLP });
 
 // Diyar — Libyan conquest game (Dinar economy)
 initDiyar({ client, db, saveData, awardLP });
 initLotto({ client, db, saveData });
-initShop({ client, db, saveData });
+initShop({ client, db, saveData, runFlip: gachaApi && gachaApi.runFlip });
 
 // Translator (reaction-based Arabic → English)
 //initTranslator(client, db, saveData);
