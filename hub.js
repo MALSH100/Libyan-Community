@@ -381,10 +381,10 @@ function initShop({ client, db, saveData, runFlip }) {
 
   // solid colours are split across two category selects (Discord caps a select at 25 options)
   const solidSelectBright = () => new ActionRowBuilder().addComponents(
-    new StringSelectMenuBuilder().setCustomId('shop:pickSolid').setPlaceholder('🌈 Bright & Bold colours…')
+    new StringSelectMenuBuilder().setCustomId('shop:pickSolid:bright').setPlaceholder('🌈 Bright & Bold colours…')
       .addOptions(SOLID_BRIGHT.map(c => ({ label: c.name, value: c.key, emoji: c.emoji }))));
   const solidSelectSoft = () => new ActionRowBuilder().addComponents(
-    new StringSelectMenuBuilder().setCustomId('shop:pickSolid').setPlaceholder('🎨 Pastels, Earth & Neutrals…')
+    new StringSelectMenuBuilder().setCustomId('shop:pickSolid:soft').setPlaceholder('🎨 Pastels, Earth & Neutrals…')
       .addOptions(SOLID_SOFT.map(c => ({ label: c.name, value: c.key, emoji: c.emoji }))));
   const gradSelect = () => new ActionRowBuilder().addComponents(
     new StringSelectMenuBuilder().setCustomId('shop:pickGrad').setPlaceholder('Choose a gradient…')
@@ -686,14 +686,16 @@ function initShop({ client, db, saveData, runFlip }) {
 
       // ── roles: choose colour category ──
       if (interaction.isButton() && interaction.customId === 'shop:solid') {
-        return interaction.reply({ content: `🎨 **Custom Solid Role** — **${fmt(PRICE_SOLID)} Dinar**. Pick a colour from either list, then you'll name it.\n⏳ *Lasts 1 month.*`, components: [solidSelectBright(), solidSelectSoft()], flags: 64 });
+        await interaction.reply({ content: `🎨 **Custom Solid Role** — **${fmt(PRICE_SOLID)} Dinar**. Pick a colour from either list, then you'll name it.\n⏳ *Lasts 1 month.*`, components: [solidSelectBright(), solidSelectSoft()], flags: 64 });
+        return;
       }
       if (interaction.isButton() && interaction.customId === 'shop:grad') {
-        return interaction.reply({ content: `🌈 **Gradient Role** — **${fmt(PRICE_GRADIENT)} Dinar**. Pick your combo, then you'll name it.\n⏳ *Lasts 1 month.*`, components: [gradSelect()], flags: 64 });
+        await interaction.reply({ content: `🌈 **Gradient Role** — **${fmt(PRICE_GRADIENT)} Dinar**. Pick your combo, then you'll name it.\n⏳ *Lasts 1 month.*`, components: [gradSelect()], flags: 64 });
+        return;
       }
 
       // colour picked → preview + "name & buy" + a BACK button to pick another
-      if (interaction.isStringSelectMenu() && interaction.customId === 'shop:pickSolid') {
+      if (interaction.isStringSelectMenu() && interaction.customId.startsWith('shop:pickSolid')) {
         const c = solidByKey(interaction.values[0]); if (!c) return;
         const png = renderSwatch(choicePreview({ name: '', solid: c }));
         const row = new ActionRowBuilder().addComponents(

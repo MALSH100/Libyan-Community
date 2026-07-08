@@ -448,6 +448,11 @@ const client = new Client({
   },
 });
 
+// Each feature module (gacha, diyar, lottery, hub, pokemon, potd, yarayt, battlecards, …)
+// registers its own interactionCreate listener. That's more than Node's default warning
+// threshold of 10, so raise the cap to avoid a false "memory leak" warning.
+client.setMaxListeners(25);
+
 // ─── Command Definitions ──────────────────────────────────────────────────────
 
 const commands = [
@@ -543,7 +548,7 @@ const { getDiyarCommands, initDiyar } = require('./diyar');
 
 const { getLottoCommands, initLotto } = require('./lottery');
 
-//const { getCommands, init } = require('./hub');
+const { getShopCommands, initShop } = require('./hub');
 //const initTranslator = require('./translator');
 
 function getAllCommands() {
@@ -2443,7 +2448,7 @@ initBattleCards({ client, db, saveData, awardLP });
 // Diyar — Libyan conquest game (Dinar economy)
 initDiyar({ client, db, saveData, awardLP });
 initLotto({ client, db, saveData });
-//initShop({ client, db, saveData, runFlip: gachaApi && gachaApi.runFlip });
+initShop({ client, db, saveData, runFlip: gachaApi && gachaApi.runFlip });
 
 // Translator (reaction-based Arabic → English)
 //initTranslator(client, db, saveData);
