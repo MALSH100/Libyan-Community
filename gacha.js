@@ -606,13 +606,27 @@ function initGacha({ client, db, saveData }) {
     const sideName = (x) => (x === 'heads' ? 'Heads' : 'Tails');
     const newBal = dinarOf(s, uid);
 
-    // stage 1 — public "flipping" with the spinning coin
+    // stage 1 — public "flipping" with the spinning coin (skinned overhead spin if equipped)
+    let spinFile, spinUrl;
+    try {
+      const coins = require('./coinskins');
+      const equipped = coins.getEquipped(db, guildId, uid);
+      if (equipped && equipped !== 'default') {
+        const gifBuf = coins.getSpinGif(equipped);
+        if (gifBuf) {
+          const sname = `spin-${equipped}.gif`;
+          spinFile = new AttachmentBuilder(gifBuf, { name: sname });
+          spinUrl = `attachment://${sname}`;
+        }
+      }
+    } catch (e) { /* fall back to the default spin */ }
+    if (!spinFile) { spinFile = coinFile('dinar-coin-spin.gif'); spinUrl = 'attachment://dinar-coin-spin.gif'; }
     const spinEmbed = new EmbedBuilder().setColor(0xE6B840)
       .setTitle('🪙 Libyan Coin Toss')
-      .setDescription(`**${name}** bet **${fmt(amount)} Dinar** on **${sideName(side)}**…\nThe coin is in the air! 🌀`)
-      .setImage('attachment://dinar-coin-spin.gif');
+      .setDescription(`**${name}** bet **${fmt(amount)} Dinar** on **${sideName(side)}**…\nThe coin is spinning! 🌀`)
+      .setImage(spinUrl);
     let msg;
-    try { msg = await channel.send({ embeds: [spinEmbed], files: [coinFile('dinar-coin-spin.gif')] }); }
+    try { msg = await channel.send({ embeds: [spinEmbed], files: [spinFile] }); }
     catch (e) { return { error: 'Could not post the flip here — check my permissions in this channel.' }; }
 
     await new Promise((r) => setTimeout(r, 2600));
