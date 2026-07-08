@@ -26,6 +26,7 @@ const coins = require('./coinskins');
 // ── prices & lifetime ──
 const PRICE_SOLID    = 800;
 const PRICE_GRADIENT = 1500;
+const ICON_PRICE     = 3000;   // custom image role icon (free for boosters)
 const ROLE_LIFETIME_MS = 30 * 24 * 60 * 60 * 1000;   // 1 month
 const NAME_MAX = 20;
 const CHECK_EVERY_MS = 10 * 60 * 1000;               // expiry sweep cadence
@@ -200,6 +201,28 @@ function parseHex(raw) {
   const m = String(raw || '').trim().replace(/^#/, '');
   if (!/^[0-9a-fA-F]{6}$/.test(m)) return null;
   return parseInt(m, 16);
+}
+
+// download an uploaded attachment for use as a role icon, auto-resized via Discord's own
+// media proxy (?width=&height=) so we never need an image library. Discord caps role icons
+// at 256KB; we request 128px which lands comfortably under it.
+async function fetchIconBuffer(att) {
+  if (typeof fetch !== 'function') return { error: 'Image fetching isn\'t available on this host right now.' };
+  const ct = (att.contentType || '').toLowerCase();
+  if (!/^image\/(png|jpe?g|webp)/.test(ct)) return { error: 'Please upload a **PNG or JPG** image (GIFs and other files can\'t be role icons).' };
+  const base = att.proxyURL || att.url;
+  const sep = base.includes('?') ? '&' : '?';
+  const candidates = [`${base}${sep}width=128&height=128`, `${base}${sep}width=64&height=64`];
+  if ((att.size || 0) <= 2 * 1024 * 1024) candidates.push(att.url);   // raw fallback only for smallish files
+  for (const u of candidates) {
+    try {
+      const res = await fetch(u);
+      if (!res || !res.ok) continue;
+      const buf = Buffer.from(await res.arrayBuffer());
+      if (buf.length > 0 && buf.length <= 256 * 1024) return { buf };
+    } catch { /* try the next candidate */ }
+  }
+  return { error: 'I couldn\'t get that image under Discord\'s **256KB** role-icon limit. Try a smaller, square image.' };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -438,20 +461,22 @@ function initShop({ client, db, saveData, runFlip }) {
   }
 
   // roles section
-  const rolesEmbed = (guildId, userId) => {
+  const rolesEmbed = (guildId, userId, isBooster) => {
     const rec = stateOf(guildId).roles[userId];
-    const owned = rec ? `\n\n🎟️ You currently own **${esc(rec.label)}** — expires <t:${Math.round(rec.expiresAt / 1000)}:R>. Buying again replaces it.` : '';
+    const owned = rec ? `\n\n🎟️ You currently own **${esc(rec.label)}**${rec.icon ? ' 🖼️' : ''} — ${rec.booster ? 'yours while you keep boosting' : `expires <t:${Math.round((rec.expiresAt || 0) / 1000)}:R>`}. Buying again replaces it.` : '';
     return new EmbedBuilder().setColor(0xE7B41A).setTitle('🎨 Custom Roles')
       .setDescription(
         `Stand out with your own custom-named role!\n\n` +
         `🎨 **Custom Solid Role** — pick a name + a colour · **${fmt(PRICE_SOLID)} Dinar**\n` +
-        `🌈 **Gradient Role** — pick a name + a gradient combo · **${fmt(PRICE_GRADIENT)} Dinar**\n\n` +
-        `⏳ *Both roles last **1 month**, then are removed automatically. Re-buy anytime to refresh.*${owned}`)
+        `🌈 **Gradient Role** — pick a name + a gradient combo · **${fmt(PRICE_GRADIENT)} Dinar**\n` +
+        `🖼️ **Role Icon** — add your own image next to your name · ${isBooster ? '**FREE** ⭐ (booster)' : `**${fmt(ICON_PRICE)} Dinar**`}\n\n` +
+        `⏳ *Roles last **1 month**, then are removed automatically. Re-buy anytime to refresh. The icon lives on your current role.*${owned}`)
       .setImage('attachment://palette.png');
   };
-  const rolesRow = () => new ActionRowBuilder().addComponents(
+  const rolesRow = (isBooster) => new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('shop:solid').setLabel(`Custom Solid — ${fmt(PRICE_SOLID)}`).setEmoji('🎨').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId('shop:grad').setLabel(`Gradient — ${fmt(PRICE_GRADIENT)}`).setEmoji('🌈').setStyle(ButtonStyle.Success));
+    new ButtonBuilder().setCustomId('shop:grad').setLabel(`Gradient — ${fmt(PRICE_GRADIENT)}`).setEmoji('🌈').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('shop:icon').setLabel(isBooster ? 'Role Icon — FREE ⭐' : `Role Icon — ${fmt(ICON_PRICE)}`).setEmoji('🖼️').setStyle(ButtonStyle.Secondary));
 
   // solid colours are split across two category selects (Discord caps a select at 25 options)
   const solidSelectBright = () => new ActionRowBuilder().addComponents(
@@ -518,6 +543,80 @@ function initShop({ client, db, saveData, runFlip }) {
     return { embeds: [hubEmbed()], components: [hubRow()], files: [] };
   };
 
+  // ── Role Icon flow: watch for an image upload in-channel, apply it to the user's hub role ──
+  const iconSessions = new Map();   // uid → { collector, done }
+  const iconRetryRow = () => new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('shop:icon').setLabel('Try Again').setEmoji('🖼️').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('hub:home').setLabel('← Back to Hub').setStyle(ButtonStyle.Secondary));
+
+  async function startIconFlow(interaction) {
+    const gid = interaction.guildId, uid = interaction.user.id;
+    const rec = stateOf(gid).roles[uid];
+    const free = isBoosting(interaction);
+    const backRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('hub:home').setLabel('← Back to Hub').setStyle(ButtonStyle.Secondary));
+    if (!rec) {
+      return interaction.update({ content: '', embeds: [new EmbedBuilder().setColor(0xE7B41A).setTitle('🖼️ Role Icon')
+        .setDescription(`You need an active hub role first! Grab a **Custom Role** from the Shop${free ? ' or a free **Booster** role' : ''}, then come back to add your icon to it.`)],
+        components: [backRow], files: [], attachments: [] });
+    }
+    if (!free && getDinar(db, gid, uid) < ICON_PRICE) {
+      return interaction.update({ content: '', embeds: [new EmbedBuilder().setColor(0xE74C3C).setTitle('🖼️ Role Icon')
+        .setDescription(`A custom role icon costs **${fmt(ICON_PRICE)} Dinar** and you have **${fmt(getDinar(db, gid, uid))}**. Keep earning and come back!`)],
+        components: [backRow], files: [], attachments: [] });
+    }
+    if (!interaction.guild.features.includes('ROLE_ICONS')) {
+      return interaction.update({ content: '', embeds: [new EmbedBuilder().setColor(0xE74C3C).setTitle('🖼️ Role Icon')
+        .setDescription('This server doesn\'t currently have the **Role Icons** feature unlocked (it comes with Boost Level 2).')],
+        components: [backRow], files: [], attachments: [] });
+    }
+    // one live session per user — replace any previous
+    const prev = iconSessions.get(uid);
+    if (prev) { prev.done = true; prev.collector.stop('replaced'); }
+
+    const embed = new EmbedBuilder().setColor(0x5865F2).setTitle('🖼️ Role Icon — upload your image')
+      .setDescription(
+        `Send your icon **as an image message in this channel** within **60 seconds** and I'll grab it.\n\n` +
+        `• Square **PNG or JPG** works best (it shows tiny, next to your name)\n` +
+        `• I'll resize it automatically\n` +
+        `• ${free ? '⭐ **Free** — booster perk!' : `💰 **${fmt(ICON_PRICE)} Dinar** — charged only once the icon is applied`}\n` +
+        `• The icon lasts as long as your current role does`);
+    const cancelRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('hub:iconCancel').setLabel('Cancel').setStyle(ButtonStyle.Danger));
+    await interaction.update({ content: '', embeds: [embed], components: [cancelRow], files: [], attachments: [] });
+
+    const collector = interaction.channel.createMessageCollector({
+      filter: (m) => m.author.id === uid && m.attachments.size > 0, time: 60_000, max: 1 });
+    const sess = { collector, done: false };
+    iconSessions.set(uid, sess);
+
+    collector.on('collect', async (m) => {
+      if (sess.done) return;
+      sess.done = true; iconSessions.delete(uid);
+      const finish = (color, text) => interaction.editReply({ content: '', embeds: [new EmbedBuilder().setColor(color).setTitle('🖼️ Role Icon').setDescription(text)], components: [iconRetryRow()], files: [], attachments: [] }).catch(() => {});
+      const got = await fetchIconBuffer(m.attachments.first());
+      if (got.error) return finish(0xE74C3C, `⚠️ ${got.error}\nNothing was charged — hit **Try Again** to have another go.`);
+      const role = interaction.guild.roles.cache.get(rec.roleId) || await interaction.guild.roles.fetch(rec.roleId).catch(() => null);
+      if (!role) return finish(0xE74C3C, '⚠️ I couldn\'t find your role anymore — grab a fresh one from the Shop, then add the icon.');
+      try { await role.setIcon(got.buf, `Role icon set by ${interaction.user.tag}`); }
+      catch (e) {
+        console.error('[hub icon]', e.message);
+        return finish(0xE74C3C, '⚠️ Discord rejected that image (too large or unsupported format). Nothing was charged — try a smaller, square PNG/JPG.');
+      }
+      if (!free) spendDinar(db, gid, uid, ICON_PRICE, saveData);
+      rec.icon = true; saveData(gid);
+      m.delete().catch(() => {});   // tidy the channel if we have permission
+      setAction(uid, `🖼️ Added a custom icon to **${esc(rec.label)}**${free ? ' (booster perk)' : ` (${fmt(ICON_PRICE)} Dinar)`}.`);
+      const balLine = free ? '⭐ Free booster perk.' : `💰 Paid **${fmt(ICON_PRICE)} Dinar** — new balance **${fmt(getDinar(db, gid, uid))}**.`;
+      return finish(0x2ECC71, `✅ Icon applied to **${esc(rec.label)}**! It now shows next to your name.\n${balLine}\n⏳ The icon lasts as long as this role does.`);
+    });
+    collector.on('end', (_collected, reason) => {
+      if (sess.done || reason === 'cancel' || reason === 'replaced' || reason === 'limit') return;
+      sess.done = true; iconSessions.delete(uid);
+      interaction.editReply({ content: '', embeds: [new EmbedBuilder().setColor(0xE7B41A).setTitle('🖼️ Role Icon').setDescription('⏳ Timed out — no image received. Nothing was charged.')], components: [iconRetryRow()], files: [], attachments: [] }).catch(() => {});
+    });
+  }
+
   // ── Help pages (mirrors /libyan-commands, plus a Hub page) ──
   function helpPages() {
     const P = (color, title, fields, desc) => {
@@ -579,10 +678,10 @@ function initShop({ client, db, saveData, runFlip }) {
       ], 'A lottery wheel that spins **twice a day** (11:00–23:00 Libya time). Winner takes the **entire pool** 💰.'),
       // NEW — the Hub itself
       P(0xF47FFF, '🏛️ Libyan Community Bot — Page 9/9: The Hub (/hub)', [
-        { name: '🎨 Custom Roles', value: ['Buy a personalised, custom-named role:', '• **Solid** — pick from 48 colours · **800 Dinar**', '• **Gradient** — preset combos · **1,500 Dinar**', 'Both last **1 month**, then renew from `/hub`.'].join('\n') },
+        { name: '🎨 Custom Roles', value: ['Buy a personalised, custom-named role:', '• **Solid** — pick from 48 colours · **800 Dinar**', '• **Gradient** — preset combos · **1,500 Dinar**', '• 🖼️ **Role Icon** — upload your own image · **3,000 Dinar** (free for boosters)', 'Both last **1 month**, then renew from `/hub`.'].join('\n') },
         { name: '🪙 Coin Flip', value: 'Bet **1–500 Dinar** on heads or tails, straight from the hub — the flip plays out publicly in the channel. One flip every 2h.' },
         { name: '🔥 Daily Streak', value: ['Check in once a day for a growing reward: **20 + 5 per day**, up to **100 Dinar**.', 'Miss a day and it resets. A leaderboard ranks the longest streaks.'].join('\n') },
-        { name: '⭐ Booster Perks', value: ['**Boosters only** — free premium roles:', '• ✨ **Holographic** — Discord\'s shimmer style', '• 🎨 **Custom Solid** — any colour by hex code', '• 🌈 **Custom Gradient** — blend any two hex colours', 'These stay while you keep boosting, and you can change them free anytime.'].join('\n') },
+        { name: '⭐ Booster Perks', value: ['**Boosters only** — free premium roles:', '• ✨ **Holographic** — Discord\'s shimmer style', '• 🎨 **Custom Solid** — any colour by hex code', '• 🌈 **Custom Gradient** — blend any two hex colours', '• 🖼️ **Role Icon** — upload your own image, free', 'These stay while you keep boosting, and you can change them free anytime.'].join('\n') },
       ], 'Your one-stop hub — open it with **`/hub`**.'),
     ];
     return pages;
@@ -613,7 +712,7 @@ function initShop({ client, db, saveData, runFlip }) {
       // ── Shop sub-menu: Custom Roles + Coin Designs ──
       if (interaction.isButton() && interaction.customId === 'hub:shop') {
         const embed = new EmbedBuilder().setColor(0xE7B41A).setTitle('🛒 The Shop')
-          .setDescription(`Spend your Dinar 💰\n\n🎨 **Custom Roles** — a personalised colour or gradient role\n🪙 **Coin Designs** — reskin your coin flip with themed coins`);
+          .setDescription(`Spend your Dinar 💰\n\n🎨 **Custom Roles** — a personalised colour or gradient role, plus your own 🖼️ image icon\n🪙 **Coin Designs** — reskin your coin flip with themed coins`);
         const row = new ActionRowBuilder().addComponents(
           new ButtonBuilder().setCustomId('hub:roles').setLabel('Custom Roles').setEmoji('🎨').setStyle(ButtonStyle.Primary),
           new ButtonBuilder().setCustomId('hub:coins').setLabel('Coin Designs').setEmoji('🪙').setStyle(ButtonStyle.Success));
@@ -678,8 +777,9 @@ function initShop({ client, db, saveData, runFlip }) {
       }
 
       if (interaction.isButton() && interaction.customId === 'hub:roles') {
+        const boosting = isBoosting(interaction);
         const png = renderSwatch(paletteSwatch());
-        return interaction.update({ content: '', embeds: [rolesEmbed(gid, uid)], components: [rolesRow(), backHubRow()],
+        return interaction.update({ content: '', embeds: [rolesEmbed(gid, uid, boosting)], components: [rolesRow(boosting), backHubRow()],
           files: [new AttachmentBuilder(png, { name: 'palette.png' })], attachments: [] });
       }
       if (interaction.isButton() && interaction.customId === 'hub:flip') {
@@ -731,15 +831,17 @@ function initShop({ client, db, saveData, runFlip }) {
           return interaction.reply({ content: '⭐ This is a **booster perk** — boost the server to unlock free premium roles!', flags: 64 });
         const embed = new EmbedBuilder().setColor(0xf47fff).setTitle('⭐ Booster Perks')
           .setDescription(
-            `Thank you for boosting! 💜 As a booster you get these **free** roles:\n\n` +
+            `Thank you for boosting! 💜 As a booster you get these **free** perks:\n\n` +
             `✨ **Holographic Role** — Discord's shimmering holographic style\n` +
             `🎨 **Custom Solid** — any colour you like, by hex code (e.g. \`#0fc0fc\`)\n` +
-            `🌈 **Custom Gradient** — blend any two hex colours\n\n` +
+            `🌈 **Custom Gradient** — blend any two hex colours\n` +
+            `🖼️ **Role Icon** — upload your own image, shown next to your name\n\n` +
             `Just name it — no Dinar needed. Your booster role stays as long as you keep boosting, and you can change it for free anytime.`);
         const row = new ActionRowBuilder().addComponents(
           new ButtonBuilder().setCustomId('boost:holo').setLabel('Holographic').setEmoji('✨').setStyle(ButtonStyle.Primary),
           new ButtonBuilder().setCustomId('boost:solid').setLabel('Custom Solid (hex)').setEmoji('🎨').setStyle(ButtonStyle.Success),
-          new ButtonBuilder().setCustomId('boost:grad').setLabel('Custom Gradient (hex)').setEmoji('🌈').setStyle(ButtonStyle.Success));
+          new ButtonBuilder().setCustomId('boost:grad').setLabel('Custom Gradient (hex)').setEmoji('🌈').setStyle(ButtonStyle.Success),
+          new ButtonBuilder().setCustomId('boost:icon').setLabel('Role Icon').setEmoji('🖼️').setStyle(ButtonStyle.Primary));
         return interaction.update({ embeds: [embed], components: [row, backHubRow()], files: [], attachments: [] });
       }
       // holographic → just a name modal
@@ -809,6 +911,19 @@ function initShop({ client, db, saveData, runFlip }) {
         const fallbackLine = res.usedFallback ? `\n*(Premium styling wasn't available right now, so a solid colour was applied instead.)*` : '';
         setAction(uid, `✨ Got a free **${styleName}** booster role — **${esc(rname)}**.`);
         return interaction.editReply({ content: `✨ **${esc(rname)}** is yours — a free **${styleName}** booster role! <@&${res.role.id}> has been added.\n💜 It stays as long as you keep boosting. Change it anytime for free from \`/hub\` → Booster Perks.${fallbackLine}` });
+      }
+
+      // ── Role Icon (image upload) — free for boosters, otherwise costs Dinar ──
+      if (interaction.isButton() && (interaction.customId === 'shop:icon' || interaction.customId === 'boost:icon')) {
+        if (interaction.customId === 'boost:icon' && !isBoosting(interaction))
+          return interaction.reply({ content: '⭐ Boosters only.', flags: 64 });
+        return startIconFlow(interaction);
+      }
+      if (interaction.isButton() && interaction.customId === 'hub:iconCancel') {
+        const sess = iconSessions.get(uid);
+        if (sess) { sess.done = true; sess.collector.stop('cancel'); iconSessions.delete(uid); }
+        const boosting = isBoosting(interaction);
+        return interaction.update({ content: '', embeds: [hubEmbed(boosting, uid, gid)], components: [hubRow(boosting)], files: [], attachments: [] });
       }
 
       if (interaction.isButton() && interaction.customId === 'hub:checkin') {
@@ -906,7 +1021,7 @@ function initShop({ client, db, saveData, runFlip }) {
   return { _test: {
     stateOf: () => stateOf, grantRole, sweep, nameProblem, paletteSwatch, choicePreview,
     renderSwatch, SOLID_COLORS, SOLID_BRIGHT, SOLID_SOFT, GRADIENTS, solidByKey, gradByKey,
-    PRICE_SOLID, PRICE_GRADIENT, ROLE_LIFETIME_MS,
+    PRICE_SOLID, PRICE_GRADIENT, ROLE_LIFETIME_MS, ICON_PRICE, fetchIconBuffer, startIconFlow, iconSessions,
     doCheckIn, streakStatus, streakLeaderboard, streakReward, streakView, libyaDayNumber, parseHex, helpPages, helpRow,
   } };
 }
