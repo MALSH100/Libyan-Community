@@ -543,7 +543,7 @@ const { getDiyarCommands, initDiyar } = require('./diyar');
 
 const { getLottoCommands, initLotto } = require('./lottery');
 
-const { getShopCommands, initShop } = require('./hub');
+//const { getShopCommands, initShop } = require('./hub');
 //const initTranslator = require('./translator');
 
 function getAllCommands() {
