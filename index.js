@@ -542,7 +542,8 @@ const initBlackMarketExchange = require('./black-market-exchange');
 //const initJobs = require('./jobs');
 const { initPOTD } = require('./potd');
 const { getLibyaChatCommands, initLibyaChat } = require('./libya-chat');
-const { getGachaCommands, initGacha, awardDinar, isAtDinarCap, dinarDailyCap } = require('./gacha');
+const { getGachaCommands, initGacha, awardDinar, isAtDinarCap, dinarDailyCap, getDinar, spendDinar } = require('./gacha');
+const { CLAN_CREATE_COST, CLAN_JOIN_COST, CLAN_CHANNEL_COST } = require('./clanfns');
 const { getBattleCardsCommands, initBattleCards } = require('./battlecards');
 const { getDiyarCommands, initDiyar } = require('./diyar');
 
@@ -1915,6 +1916,7 @@ async function handleCommand(interaction, commandName, user, guild) {
     if (getUserClan(guild.id, user.id)) return safeReply(interaction, { content: '❌ You are already in a clan.', flags: 64 });
     if (gc[name]) return safeReply(interaction, { content: `❌ A clan named **${name}** already exists.`, flags: 64 });
     if (name.length > 30) return safeReply(interaction, { content: '❌ Clan name must be 30 characters or fewer.', flags: 64 });
+    if (getDinar(db, guild.id, user.id) < CLAN_CREATE_COST) return safeReply(interaction, { content: `❌ Creating a clan costs **${CLAN_CREATE_COST.toLocaleString()} Dinar** — you have **${getDinar(db, guild.id, user.id).toLocaleString()}**.`, flags: 64 });
 
     await safeDefer(interaction);
 
@@ -1945,6 +1947,7 @@ async function handleCommand(interaction, commandName, user, guild) {
       createdAt: new Date().toISOString(), rankNames: rn,
     });
     saveData();
+    spendDinar(db, guild.id, user.id, CLAN_CREATE_COST, saveData);
 
     return safeReply(interaction, {
       embeds: [new EmbedBuilder().setColor(0x5865F2).setTitle(`⚔️ Clan Created: ${name}`).setDescription(description)
@@ -2139,12 +2142,14 @@ async function handleCommand(interaction, commandName, user, guild) {
     if (!invite) return safeReply(interaction, { content: '❌ You have no pending clan invite.', flags: 64 });
     if (Date.now() > invite.expiresAt) { delete pendingInvites[key]; return safeReply(interaction, { content: '❌ Your invite has expired.', flags: 64 }); }
     if (getUserClan(guild.id, user.id)) { delete pendingInvites[key]; return safeReply(interaction, { content: '❌ You are already in a clan.', flags: 64 }); }
+    if (getDinar(db, guild.id, user.id) < CLAN_JOIN_COST) return safeReply(interaction, { content: `❌ Joining a clan costs **${CLAN_JOIN_COST.toLocaleString()} Dinar** — you have **${getDinar(db, guild.id, user.id).toLocaleString()}**.`, flags: 64 });
     const clan = gc[invite.clanName];
     if (!clan) { delete pendingInvites[key]; return safeReply(interaction, { content: '❌ That clan no longer exists.', flags: 64 }); }
     await safeDefer(interaction);
     normaliseClan(clan);
     await assignRankRole(guild, clan, user.id, 'Member');
     clan.members.push(user.id); delete pendingInvites[key]; saveData();
+    spendDinar(db, guild.id, user.id, CLAN_JOIN_COST, saveData);
     return safeReply(interaction, { embeds: [new EmbedBuilder().setColor(0x57F287).setTitle('✅ Invite Accepted!').setDescription(`<@${user.id}> has joined **${invite.clanName}**! Welcome! 🎉`)] });
   }
 
@@ -2275,6 +2280,7 @@ async function handleCommand(interaction, commandName, user, guild) {
       if (existing) return safeReply(interaction, { content: `❌ Your clan already has a channel: ${existing}`, flags: 64 });
       result.clan.channelId = null; saveData();
     }
+    if (getDinar(db, guild.id, user.id) < CLAN_CHANNEL_COST) return safeReply(interaction, { content: `❌ A clan channel costs **${CLAN_CHANNEL_COST.toLocaleString()} Dinar** — you have **${getDinar(db, guild.id, user.id).toLocaleString()}**.`, flags: 64 });
     await safeDefer(interaction);
     const memberRole = guild.roles.cache.get(result.clan.memberRoleId || result.clan.roleId);
     const leaderRole = guild.roles.cache.get(result.clan.leaderRoleId);
@@ -2295,6 +2301,7 @@ async function handleCommand(interaction, commandName, user, guild) {
       });
     } catch { return safeReply(interaction, { content: '❌ Failed to create channel. Check Manage Channels permission.', flags: 64 }); }
     result.clan.channelId = channel.id; saveData();
+    spendDinar(db, guild.id, user.id, CLAN_CHANNEL_COST, saveData);
     await channel.send({ embeds: [new EmbedBuilder().setColor(0x5865F2).setTitle(`${result.clan.emoji || '⚔️'} Welcome to ${result.name}'s channel!`).setDescription('Only clan members can see this!')] }).catch(() => {});
     return safeReply(interaction, { embeds: [new EmbedBuilder().setColor(0x57F287).setTitle('✅ Clan Channel Created').setDescription(`Your private channel ${channel} is ready!`)] });
   }

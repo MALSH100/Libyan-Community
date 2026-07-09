@@ -15,13 +15,14 @@
 const {
   SlashCommandBuilder, EmbedBuilder, AttachmentBuilder, ActionRowBuilder,
   StringSelectMenuBuilder, ButtonBuilder, ButtonStyle, ModalBuilder,
-  TextInputBuilder, TextInputStyle,
+  TextInputBuilder, TextInputStyle, UserSelectMenuBuilder,
 } = require('discord.js');
 const path = require('path');
 const fs = require('fs');
 const { Resvg } = require('@resvg/resvg-js');
 const { getDinar, spendDinar, awardDinar } = require('./gacha');
 const coins = require('./coinskins');
+const clans = require('./clanfns');
 
 // ── prices & lifetime ──
 const PRICE_SOLID    = 800;
@@ -389,6 +390,7 @@ function initShop({ client, db, saveData, runFlip }) {
   const hubEmbed = (isBooster, uid, gid) => {
     const la = uid && lastAction.get(uid);
     const bal = (uid && gid) ? getDinar(db, gid, uid) : 0;
+    const inClan = (uid && gid) ? clans.userClan(db, gid, uid) : null;
     const e = new EmbedBuilder().setColor(0xE7B41A).setTitle('🏛️ The Community Hub')
       .setDescription(
         `Welcome! Pick an option below:\n\n` +
@@ -396,6 +398,7 @@ function initShop({ client, db, saveData, runFlip }) {
         `🪙 **Coin Flip** — bet your Dinar on a flip of the coin\n` +
         `🔥 **Daily Streak** — check in every day for a growing Dinar reward\n` +
         `⭐ **Booster Perks** — ${isBooster ? '**unlocked!** free holographic & custom-hex roles' : '_boost the server to unlock free premium roles_'}\n` +
+        `⚔️ **Clan** — ${inClan ? `manage **${esc(inClan.name)}**` : `create or join a clan (from **${fmt(clans.CLAN_CREATE_COST)} Dinar**)`}\n` +
         `❓ **Help** — how everything works\n\n` +
         `*More coming soon…*`);
     if (uid) e.setAuthor({ name: `💰 ${fmt(bal)} Dinar` });
@@ -408,6 +411,9 @@ function initShop({ client, db, saveData, runFlip }) {
     new ButtonBuilder().setCustomId('hub:streak').setLabel('Daily Streak').setEmoji('🔥').setStyle(ButtonStyle.Success),
     new ButtonBuilder().setCustomId('hub:booster').setLabel(isBooster ? 'Booster Perks' : 'Booster Perks (boost to unlock)').setEmoji('⭐').setStyle(ButtonStyle.Secondary).setDisabled(!isBooster),
     new ButtonBuilder().setCustomId('hub:help').setLabel('Help').setEmoji('❓').setStyle(ButtonStyle.Secondary));
+  const hubRow2 = () => new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('hub:clan').setLabel('Clan').setEmoji('⚔️').setStyle(ButtonStyle.Success));
+  const hubComponents = (isBooster) => [hubRow(isBooster), hubRow2()];
   const backHubRow = () => new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('hub:home').setLabel('← Back to Hub').setStyle(ButtonStyle.Secondary));
   const backRolesRow = () => new ActionRowBuilder().addComponents(
@@ -691,6 +697,145 @@ function initShop({ client, db, saveData, runFlip }) {
     new ButtonBuilder().setCustomId(`hub:help:${page + 1}`).setLabel('Next ▶').setStyle(ButtonStyle.Primary).setDisabled(page === total - 1),
     new ButtonBuilder().setCustomId('hub:home').setLabel('← Back to Hub').setStyle(ButtonStyle.Secondary));
 
+  // ═══════════════ CLAN UI ═══════════════
+  const backHubOnly = () => new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('hub:home').setLabel('← Back to Hub').setStyle(ButtonStyle.Secondary));
+
+  // entry: no clan → offer create/join; in a clan → dashboard
+  function clanEntryView(gid, uid) {
+    const mine = clans.userClan(db, gid, uid);
+    if (mine) return clanDashboard(gid, uid);
+    const all = clans.clanEntries(db, gid);
+    const count = Object.keys(all).length;
+    const bal = getDinar(db, gid, uid);
+    const embed = new EmbedBuilder().setColor(0x5865F2).setTitle('⚔️ Clans')
+      .setDescription(
+        `You're not in a clan yet.\n\n` +
+        `🏰 **Create your own clan** — become the Leader, get clan roles & a private channel\n` +
+        `   Cost: **${fmt(clans.CLAN_CREATE_COST)} Dinar**\n\n` +
+        `🤝 **Join an existing clan** — ${count > 0 ? `**${count}** on the server` : 'none yet — be the first!'}\n` +
+        `   Cost: **${fmt(clans.CLAN_JOIN_COST)} Dinar**\n\n` +
+        `💰 Your balance: **${fmt(bal)} Dinar**`);
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('clan:create').setLabel(`Create — ${fmt(clans.CLAN_CREATE_COST)}`).setEmoji('🏰').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId('clan:joinList').setLabel(`Join — ${fmt(clans.CLAN_JOIN_COST)}`).setEmoji('🤝').setStyle(ButtonStyle.Primary).setDisabled(count === 0));
+    return { embeds: [embed], components: [row, backHubOnly()], files: [], attachments: [] };
+  }
+
+  function clanDashboard(gid, uid) {
+    const mine = clans.userClan(db, gid, uid);
+    if (!mine) return clanEntryView(gid, uid);
+    const c = clans.normaliseClan(mine.clan);
+    const rank = clans.userRank(c, uid);
+    const isLeader = rank === 'Leader', isOfficerPlus = rank === 'Leader' || rank === 'Officer';
+    const memberCount = 1 + c.officers.length + c.members.length;
+    const winRate = (c.wins + c.losses) > 0 ? Math.round((c.wins / (c.wins + c.losses)) * 100) : 0;
+    const embed = new EmbedBuilder().setColor(0x5865F2).setTitle(`${c.emoji} ${esc(mine.name)}`)
+      .setDescription(c.description + (c.motto ? `\n\n*“${esc(c.motto)}”*` : ''))
+      .addFields(
+        { name: '👑 Leader', value: `<@${c.leader}>`, inline: true },
+        { name: '👥 Members', value: `${memberCount}`, inline: true },
+        { name: '🏅 Your Rank', value: clans.rankLabel(c, rank), inline: true },
+        { name: '⭐ XP', value: `${fmt(c.xp)}`, inline: true },
+        { name: '⚔️ Record', value: `${c.wins}W / ${c.losses}L (${winRate}%)`, inline: true },
+        { name: '📢 Channel', value: c.channelId ? `<#${c.channelId}>` : '*none*', inline: true },
+      );
+    // row 1: everyone — view members; officers+ requests & settings
+    const reqCount = isOfficerPlus ? clans.clanRequests(db, gid, mine.name).length : 0;
+    const row1 = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('clan:members').setLabel('Members').setEmoji('👥').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('clan:settings').setLabel('Settings').setEmoji('⚙️').setStyle(ButtonStyle.Secondary).setDisabled(!isOfficerPlus),
+      new ButtonBuilder().setCustomId('clan:requests').setLabel(`Join Requests${reqCount ? ` (${reqCount})` : ''}`).setEmoji('📥').setStyle(reqCount ? ButtonStyle.Success : ButtonStyle.Secondary).setDisabled(!isOfficerPlus));
+    // row 2: leader management
+    const row2 = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('clan:manage').setLabel('Manage Members').setEmoji('🛡️').setStyle(ButtonStyle.Secondary).setDisabled(!isOfficerPlus),
+      new ButtonBuilder().setCustomId('clan:channel').setLabel(c.channelId ? 'Channel' : `Create Channel — ${fmt(clans.CLAN_CHANNEL_COST)}`).setEmoji('📢').setStyle(ButtonStyle.Secondary).setDisabled(!isLeader));
+    // row 3: leave/disband + back
+    const row3 = new ActionRowBuilder().addComponents(
+      isLeader
+        ? new ButtonBuilder().setCustomId('clan:disband').setLabel('Disband').setEmoji('💥').setStyle(ButtonStyle.Danger)
+        : new ButtonBuilder().setCustomId('clan:leave').setLabel('Leave Clan').setEmoji('🚪').setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId('hub:home').setLabel('← Back to Hub').setStyle(ButtonStyle.Secondary));
+    return { content: '', embeds: [embed], components: [row1, row2, row3], files: [], attachments: [] };
+  }
+
+  function clanMembersView(gid, uid) {
+    const mine = clans.userClan(db, gid, uid);
+    if (!mine) return clanEntryView(gid, uid);
+    const c = clans.normaliseClan(mine.clan);
+    const line = (id) => `<@${id}>`;
+    const embed = new EmbedBuilder().setColor(0x5865F2).setTitle(`👥 ${esc(mine.name)} — Members`)
+      .setDescription(
+        `👑 **${clans.rankLabel(c, 'Leader')}**\n${line(c.leader)}\n\n` +
+        `🛡️ **${clans.rankLabel(c, 'Officer')}** (${c.officers.length})\n${c.officers.length ? c.officers.map(line).join('\n') : '*none*'}\n\n` +
+        `⚔️ **${clans.rankLabel(c, 'Member')}** (${c.members.length})\n${c.members.length ? c.members.map(line).join('\n') : '*none*'}`);
+    const back = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('hub:clan').setLabel('← Back to Clan').setStyle(ButtonStyle.Secondary));
+    return { content: '', embeds: [embed], components: [back], files: [], attachments: [] };
+  }
+
+  function clanSettingsView(gid, uid) {
+    const mine = clans.userClan(db, gid, uid);
+    if (!mine) return clanEntryView(gid, uid);
+    const c = clans.normaliseClan(mine.clan);
+    const isLeader = c.leader === uid;
+    const embed = new EmbedBuilder().setColor(0x5865F2).setTitle(`⚙️ ${esc(mine.name)} — Settings`)
+      .setDescription(`Update your clan's details.`)
+      .addFields(
+        { name: 'Description', value: c.description || '*none*' },
+        { name: 'Motto', value: c.motto || '*none*' },
+        { name: 'Emoji', value: c.emoji || '⚔️', inline: true },
+      );
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('clan:setDesc').setLabel('Edit Description').setEmoji('📝').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('clan:setMotto').setLabel('Edit Motto').setEmoji('💬').setStyle(ButtonStyle.Secondary));
+    const row2 = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('clan:rename').setLabel('Rename / Emoji').setEmoji('✏️').setStyle(ButtonStyle.Secondary).setDisabled(!isLeader),
+      new ButtonBuilder().setCustomId('hub:clan').setLabel('← Back to Clan').setStyle(ButtonStyle.Secondary));
+    return { content: '', embeds: [embed], components: [row, row2], files: [], attachments: [] };
+  }
+
+  function clanManageView(gid, uid) {
+    const mine = clans.userClan(db, gid, uid);
+    if (!mine) return clanEntryView(gid, uid);
+    const c = clans.normaliseClan(mine.clan);
+    const isLeader = c.leader === uid;
+    const embed = new EmbedBuilder().setColor(0x5865F2).setTitle(`🛡️ ${esc(mine.name)} — Manage Members`)
+      .setDescription(
+        `Pick an action, then choose the member.\n\n` +
+        `${isLeader ? '👑 As Leader you can promote, demote, kick and transfer leadership.' : '🛡️ As Officer you can kick Members.'}`);
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('clan:act:kick').setLabel('Kick').setEmoji('🥾').setStyle(ButtonStyle.Danger));
+    if (isLeader) row.addComponents(
+      new ButtonBuilder().setCustomId('clan:act:promote').setLabel('Promote').setEmoji('⬆️').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId('clan:act:demote').setLabel('Demote').setEmoji('⬇️').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('clan:act:transfer').setLabel('Transfer').setEmoji('👑').setStyle(ButtonStyle.Primary));
+    const back = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('hub:clan').setLabel('← Back to Clan').setStyle(ButtonStyle.Secondary));
+    return { content: '', embeds: [embed], components: [row, back], files: [], attachments: [] };
+  }
+
+  function clanRequestsView(gid, uid) {
+    const mine = clans.userClan(db, gid, uid);
+    if (!mine) return clanEntryView(gid, uid);
+    if (clans.userRank(mine.clan, uid) === 'Member') return clanDashboard(gid, uid);
+    const reqs = clans.clanRequests(db, gid, mine.name);
+    const embed = new EmbedBuilder().setColor(0x57F287).setTitle(`📥 ${esc(mine.name)} — Join Requests`)
+      .setDescription(reqs.length
+        ? `**${reqs.length}** pending request${reqs.length === 1 ? '' : 's'}. Accepting charges them **${fmt(clans.CLAN_JOIN_COST)} Dinar**; declining costs them nothing.\n\n` +
+          reqs.map(r => `• <@${r.uid}> — requested <t:${Math.round(r.requestedAt / 1000)}:R>, expires <t:${Math.round(r.expiresAt / 1000)}:R>`).join('\n')
+        : '*No pending requests right now.*');
+    const rows = [];
+    // one accept/decline row per request (max 4 to stay within component limits, + back row)
+    reqs.slice(0, 4).forEach(r => {
+      rows.push(new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`clan:reqAccept:${r.uid}`).setLabel('Accept').setEmoji('✅').setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId(`clan:reqDecline:${r.uid}`).setLabel('Decline').setEmoji('❌').setStyle(ButtonStyle.Danger)));
+    });
+    rows.push(new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('hub:clan').setLabel('← Back to Clan').setStyle(ButtonStyle.Secondary)));
+    return { content: reqs.length > 4 ? `Showing the first 4 of ${reqs.length} requests.` : '', embeds: [embed], components: rows, files: [], attachments: [] };
+  }
+
   // ═══════════════ INTERACTIONS ═══════════════
   client.on('interactionCreate', async (interaction) => {
     try {
@@ -698,7 +843,9 @@ function initShop({ client, db, saveData, runFlip }) {
       if (interaction.isChatInputCommand() && interaction.commandName === 'hub') {
         if (!interaction.guildId) return interaction.reply({ content: 'Use this in the server.', flags: 64 });
         const boosting = isBoosting(interaction);
-        return interaction.reply({ embeds: [hubEmbed(boosting, interaction.user.id, interaction.guildId)], components: [hubRow(boosting)], flags: 64 });
+        const uname = interaction.member?.displayName || interaction.user.username;
+        console.log(`🏛️ /hub opened by ${uname} (${interaction.user.id})${boosting ? ' [booster]' : ''}`);
+        return interaction.reply({ embeds: [hubEmbed(boosting, interaction.user.id, interaction.guildId)], components: hubComponents(boosting), flags: 64 });
       }
       if (!interaction.guildId) return;
       const gid = interaction.guildId, uid = interaction.user.id;
@@ -707,7 +854,7 @@ function initShop({ client, db, saveData, runFlip }) {
       // hub navigation
       if (interaction.isButton() && interaction.customId === 'hub:home') {
         const boosting = isBoosting(interaction);
-        return interaction.update({ embeds: [hubEmbed(boosting, uid, gid)], components: [hubRow(boosting)], files: [], attachments: [] });
+        return interaction.update({ embeds: [hubEmbed(boosting, uid, gid)], components: hubComponents(boosting), files: [], attachments: [] });
       }
       // ── Shop sub-menu: Custom Roles + Coin Designs ──
       if (interaction.isButton() && interaction.customId === 'hub:shop') {
@@ -923,7 +1070,7 @@ function initShop({ client, db, saveData, runFlip }) {
         const sess = iconSessions.get(uid);
         if (sess) { sess.done = true; sess.collector.stop('cancel'); iconSessions.delete(uid); }
         const boosting = isBoosting(interaction);
-        return interaction.update({ content: '', embeds: [hubEmbed(boosting, uid, gid)], components: [hubRow(boosting)], files: [], attachments: [] });
+        return interaction.update({ content: '', embeds: [hubEmbed(boosting, uid, gid)], components: hubComponents(boosting), files: [], attachments: [] });
       }
 
       if (interaction.isButton() && interaction.customId === 'hub:checkin') {
@@ -941,6 +1088,204 @@ function initShop({ client, db, saveData, runFlip }) {
             : `🔥 Day **1** — **+${fmt(res.reward)} Dinar**. Come back tomorrow!`;
         setAction(uid, `🔥 Checked in — ${res.wasReset ? 'started a new streak' : `day ${res.count}`} (+${fmt(res.reward)} Dinar).`);
         return interaction.followUp({ content: msg, flags: 64 }).catch(() => {});
+      }
+
+      // ═══════════════ CLAN HANDLERS ═══════════════
+      if (interaction.isButton() && interaction.customId === 'hub:clan') {
+        return interaction.update(clanEntryView(gid, uid));
+      }
+      // create clan → modal for name + description
+      if (interaction.isButton() && interaction.customId === 'clan:create') {
+        if (clans.userClan(db, gid, uid)) return interaction.reply({ content: 'You\'re already in a clan.', flags: 64 });
+        if (getDinar(db, gid, uid) < clans.CLAN_CREATE_COST)
+          return interaction.reply({ content: `💰 Creating a clan costs **${fmt(clans.CLAN_CREATE_COST)} Dinar** — you have **${fmt(getDinar(db, gid, uid))}**.`, flags: 64 });
+        const modal = new ModalBuilder().setCustomId('clan:createModal').setTitle('🏰 Create a Clan')
+          .addComponents(
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('cname').setLabel('Clan name (2–30 chars)').setStyle(TextInputStyle.Short).setMinLength(2).setMaxLength(30).setRequired(true)),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('cdesc').setLabel('Description (optional)').setStyle(TextInputStyle.Paragraph).setMaxLength(300).setRequired(false)));
+        return interaction.showModal(modal);
+      }
+      if (interaction.isModalSubmit() && interaction.customId === 'clan:createModal') {
+        if (clans.userClan(db, gid, uid)) return interaction.reply({ content: 'You\'re already in a clan.', flags: 64 });
+        if (getDinar(db, gid, uid) < clans.CLAN_CREATE_COST)
+          return interaction.reply({ content: `💰 You no longer have enough Dinar.`, flags: 64 });
+        const cname = interaction.fields.getTextInputValue('cname').trim();
+        const cdesc = interaction.fields.getTextInputValue('cdesc');
+        const problem = nameProblem(cname);
+        if (problem) return interaction.reply({ content: `⚠️ ${problem}`, flags: 64 });
+        await interaction.deferReply({ flags: 64 });
+        const res = await clans.createClan(db, saveData, interaction.guild, uid, interaction.user.tag, cname, cdesc);
+        if (res.error) return interaction.editReply({ content: `⚠️ ${res.error} No Dinar was taken.` });
+        spendDinar(db, gid, uid, clans.CLAN_CREATE_COST, saveData);
+        setAction(uid, `⚔️ Created the clan **${esc(res.name)}** (${fmt(clans.CLAN_CREATE_COST)} Dinar).`);
+        return interaction.editReply({ content: `⚔️ **${esc(res.name)}** founded — you're the Leader! Paid **${fmt(clans.CLAN_CREATE_COST)} Dinar**. Open the Clan menu from \`/hub\` to manage it.` });
+      }
+      // join → pick a clan from a dropdown
+      if (interaction.isButton() && interaction.customId === 'clan:joinList') {
+        if (clans.userClan(db, gid, uid)) return interaction.reply({ content: 'You\'re already in a clan.', flags: 64 });
+        const all = clans.clanEntries(db, gid);
+        const names = Object.keys(all).slice(0, 25);
+        if (!names.length) return interaction.reply({ content: 'There are no clans to join yet.', flags: 64 });
+        const existing = clans.getRequest(db, gid, uid);
+        const menu = new StringSelectMenuBuilder().setCustomId('clan:joinPick').setPlaceholder('Choose a clan to request…')
+          .addOptions(names.map(n => ({ label: n.slice(0, 100), value: n, emoji: all[n].emoji || '⚔️', description: `${1 + (all[n].officers || []).length + (all[n].members || []).length} members` })));
+        const note = existing ? `\n\n📤 You currently have a pending request to **${esc(existing.clanName)}** — picking another replaces it.` : '';
+        return interaction.update({ content: `🤝 **Request to join a clan** — a Leader or Officer must approve you. You're only charged **${fmt(clans.CLAN_JOIN_COST)} Dinar** if accepted.${note}`, embeds: [], components: [new ActionRowBuilder().addComponents(menu), backHubOnly()], files: [], attachments: [] });
+      }
+      if (interaction.isStringSelectMenu() && interaction.customId === 'clan:joinPick') {
+        if (clans.userClan(db, gid, uid)) return interaction.update(clanDashboard(gid, uid));
+        const cname = interaction.values[0];
+        const res = clans.requestJoin(db, saveData, gid, uid, cname);
+        if (res.error) return interaction.update({ content: `⚠️ ${res.error}`, embeds: [], components: [backHubOnly()], files: [], attachments: [] });
+        setAction(uid, `📤 Requested to join **${esc(cname)}**.`);
+        // ping the clan channel so leaders/officers see it, if the clan has one
+        const clan = db[gid][cname];
+        if (clan && clan.channelId) {
+          const ch = interaction.guild.channels.cache.get(clan.channelId);
+          if (ch) ch.send({ content: `📥 <@${uid}> has requested to join **${esc(cname)}**! A Leader or Officer can approve via \`/hub\` → Clan → Join Requests.` }).catch(() => {});
+        }
+        const msg = res.replaced && !res.sameClan ? ` (replaced your request to ${esc(res.replaced)})` : '';
+        return interaction.update({ content: `📤 Request sent to **${esc(cname)}**${msg}! You'll be added — and charged **${fmt(clans.CLAN_JOIN_COST)} Dinar** — once a Leader or Officer accepts. No charge if declined.`, embeds: [], components: [backHubOnly()], files: [], attachments: [] });
+      }
+      // dashboard sub-views
+      if (interaction.isButton() && interaction.customId === 'clan:members') return interaction.update(clanMembersView(gid, uid));
+      if (interaction.isButton() && interaction.customId === 'clan:settings') return interaction.update(clanSettingsView(gid, uid));
+      if (interaction.isButton() && interaction.customId === 'clan:manage')   return interaction.update(clanManageView(gid, uid));
+      if (interaction.isButton() && interaction.customId === 'clan:requests')  return interaction.update(clanRequestsView(gid, uid));
+
+      // accept / decline a join request
+      if (interaction.isButton() && interaction.customId.startsWith('clan:reqAccept:')) {
+        const requesterId = interaction.customId.split(':')[2];
+        await interaction.deferUpdate();
+        const res = await clans.acceptRequest(db, saveData, interaction.guild, uid, requesterId, clans.CLAN_JOIN_COST, getDinar, spendDinar);
+        if (res.error) return interaction.editReply(Object.assign(clanRequestsView(gid, uid), { content: `⚠️ ${res.error}` }));
+        setAction(uid, `✅ Accepted <@${requesterId}> into the clan.`);
+        // public ping in the clan channel (or current channel as fallback)
+        const clan = db[gid][res.clanName];
+        const pingCh = (clan && clan.channelId && interaction.guild.channels.cache.get(clan.channelId)) || interaction.channel;
+        if (pingCh) pingCh.send({ content: `🎉 <@${requesterId}> has been accepted into **${esc(res.clanName)}**! Welcome!`, allowedMentions: { users: [requesterId] } }).catch(() => {});
+        return interaction.editReply(clanRequestsView(gid, uid));
+      }
+      if (interaction.isButton() && interaction.customId.startsWith('clan:reqDecline:')) {
+        const requesterId = interaction.customId.split(':')[2];
+        await interaction.deferUpdate();
+        const res = clans.declineRequest(db, saveData, interaction.guild, uid, requesterId);
+        if (res.error) return interaction.editReply(Object.assign(clanRequestsView(gid, uid), { content: `⚠️ ${res.error}` }));
+        setAction(uid, `❌ Declined <@${requesterId}>'s join request.`);
+        const clan = db[gid][res.clanName];
+        const pingCh = (clan && clan.channelId && interaction.guild.channels.cache.get(clan.channelId)) || interaction.channel;
+        if (pingCh) pingCh.send({ content: `<@${requesterId}>, your request to join **${esc(res.clanName)}** was declined. No Dinar was charged.`, allowedMentions: { users: [requesterId] } }).catch(() => {});
+        return interaction.editReply(clanRequestsView(gid, uid));
+      }
+
+      // manage actions → user picker carrying the action
+      if (interaction.isButton() && interaction.customId.startsWith('clan:act:')) {
+        const action = interaction.customId.split(':')[2];   // kick|promote|demote|transfer
+        const mine = clans.userClan(db, gid, uid);
+        if (!mine) return interaction.update(clanEntryView(gid, uid));
+        const menu = new UserSelectMenuBuilder().setCustomId(`clan:actPick:${action}`).setPlaceholder(`Pick a member to ${action}…`);
+        return interaction.update({ content: `🛡️ Choose who to **${action}**.`, embeds: [], components: [new ActionRowBuilder().addComponents(menu), new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('clan:manage').setLabel('← Back').setStyle(ButtonStyle.Secondary))], files: [], attachments: [] });
+      }
+      if (interaction.isUserSelectMenu() && interaction.customId.startsWith('clan:actPick:')) {
+        const action = interaction.customId.split(':')[2];
+        const target = interaction.users.first();
+        if (!target) return interaction.reply({ content: 'Pick a member.', flags: 64 });
+        await interaction.deferUpdate();
+        let res;
+        if (action === 'kick') res = await clans.kickMember(db, saveData, interaction.guild, uid, target.id, target.username);
+        else if (action === 'promote') res = await clans.promoteMember(db, saveData, interaction.guild, uid, target.id, target.username);
+        else if (action === 'demote') res = await clans.demoteMember(db, saveData, interaction.guild, uid, target.id, target.username);
+        else if (action === 'transfer') res = await clans.transferLeader(db, saveData, interaction.guild, uid, target.id, target.username);
+        if (res.error) return interaction.editReply(Object.assign(clanManageView(gid, uid), { content: `⚠️ ${res.error}` }));
+        const verb = { kick: 'Kicked', promote: 'Promoted', demote: 'Demoted', transfer: 'Transferred leadership to' }[action];
+        setAction(uid, `🛡️ ${verb} <@${target.id}> in the clan.`);
+        return interaction.editReply(Object.assign(clanDashboard(gid, uid), { content: `✅ ${verb} <@${target.id}>.` }));
+      }
+
+      // settings edits
+      if (interaction.isButton() && (interaction.customId === 'clan:setDesc' || interaction.customId === 'clan:setMotto')) {
+        const isMotto = interaction.customId === 'clan:setMotto';
+        const modal = new ModalBuilder().setCustomId(isMotto ? 'clan:mottoModal' : 'clan:descModal').setTitle(isMotto ? 'Edit Motto' : 'Edit Description')
+          .addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('val').setLabel(isMotto ? 'Motto (max 100)' : 'Description (max 300)').setStyle(TextInputStyle.Paragraph).setMaxLength(isMotto ? 100 : 300).setRequired(true)));
+        return interaction.showModal(modal);
+      }
+      if (interaction.isModalSubmit() && (interaction.customId === 'clan:descModal' || interaction.customId === 'clan:mottoModal')) {
+        const field = interaction.customId === 'clan:mottoModal' ? 'motto' : 'description';
+        const val = interaction.fields.getTextInputValue('val');
+        const res = clans.setText(db, saveData, gid, uid, field, val);
+        if (res.error) return interaction.reply({ content: `⚠️ ${res.error}`, flags: 64 });
+        setAction(uid, `⚙️ Updated clan ${field}.`);
+        return interaction.update(clanSettingsView(gid, uid));
+      }
+      // rename
+      if (interaction.isButton() && interaction.customId === 'clan:rename') {
+        const mine = clans.userClan(db, gid, uid);
+        if (!mine || mine.clan.leader !== uid) return interaction.reply({ content: 'Only the Leader can rename.', flags: 64 });
+        const modal = new ModalBuilder().setCustomId('clan:renameModal').setTitle('Rename Clan')
+          .addComponents(
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('rn').setLabel('New clan name (2–30)').setStyle(TextInputStyle.Short).setMinLength(2).setMaxLength(30).setRequired(true).setValue(mine.name.slice(0, 30))),
+            new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('re').setLabel('New emoji (optional)').setStyle(TextInputStyle.Short).setMaxLength(8).setRequired(false)));
+        return interaction.showModal(modal);
+      }
+      if (interaction.isModalSubmit() && interaction.customId === 'clan:renameModal') {
+        const rn = interaction.fields.getTextInputValue('rn').trim();
+        const re = interaction.fields.getTextInputValue('re');
+        const problem = nameProblem(rn);
+        if (problem) return interaction.reply({ content: `⚠️ ${problem}`, flags: 64 });
+        await interaction.deferUpdate();
+        const res = await clans.renameClan(db, saveData, interaction.guild, uid, rn, re);
+        if (res.error) return interaction.editReply(Object.assign(clanSettingsView(gid, uid), { content: `⚠️ ${res.error}` }));
+        setAction(uid, `✏️ Renamed clan to **${esc(res.name)}**.`);
+        return interaction.editReply(clanSettingsView(gid, uid));
+      }
+      // channel create / view / delete
+      if (interaction.isButton() && interaction.customId === 'clan:channel') {
+        const mine = clans.userClan(db, gid, uid);
+        if (!mine || mine.clan.leader !== uid) return interaction.reply({ content: 'Only the Leader can manage the channel.', flags: 64 });
+        if (mine.clan.channelId) {
+          const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId('clan:channelDelete').setLabel('Delete Channel').setEmoji('🗑️').setStyle(ButtonStyle.Danger),
+            new ButtonBuilder().setCustomId('hub:clan').setLabel('← Back to Clan').setStyle(ButtonStyle.Secondary));
+          return interaction.update({ content: `📢 Your clan channel: <#${mine.clan.channelId}>`, embeds: [], components: [row], files: [], attachments: [] });
+        }
+        if (getDinar(db, gid, uid) < clans.CLAN_CHANNEL_COST)
+          return interaction.reply({ content: `💰 A clan channel costs **${fmt(clans.CLAN_CHANNEL_COST)} Dinar** — you have **${fmt(getDinar(db, gid, uid))}**.`, flags: 64 });
+        await interaction.deferUpdate();
+        const res = await clans.createChannel(db, saveData, interaction.guild, client, uid);
+        if (res.error) return interaction.editReply(Object.assign(clanDashboard(gid, uid), { content: `⚠️ ${res.error} No Dinar taken.` }));
+        spendDinar(db, gid, uid, clans.CLAN_CHANNEL_COST, saveData);
+        setAction(uid, `📢 Created a clan channel (${fmt(clans.CLAN_CHANNEL_COST)} Dinar).`);
+        return interaction.editReply(Object.assign(clanDashboard(gid, uid), { content: `✅ Channel ${res.channel} created! Paid **${fmt(clans.CLAN_CHANNEL_COST)} Dinar**.` }));
+      }
+      if (interaction.isButton() && interaction.customId === 'clan:channelDelete') {
+        await interaction.deferUpdate();
+        const res = await clans.deleteChannel(db, saveData, interaction.guild, uid);
+        if (res.error) return interaction.editReply(Object.assign(clanDashboard(gid, uid), { content: `⚠️ ${res.error}` }));
+        setAction(uid, `🗑️ Deleted the clan channel.`);
+        return interaction.editReply({ content: '✅ Clan channel deleted.', ...clanDashboard(gid, uid) });
+      }
+      // leave / disband
+      if (interaction.isButton() && interaction.customId === 'clan:leave') {
+        await interaction.deferUpdate();
+        const res = await clans.leaveClan(db, saveData, interaction.guild, uid);
+        if (res.error) return interaction.editReply(Object.assign(clanDashboard(gid, uid), { content: `⚠️ ${res.error}` }));
+        setAction(uid, `🚪 Left the clan **${esc(res.name)}**.`);
+        return interaction.editReply(Object.assign(clanEntryView(gid, uid), { content: `👋 You left **${esc(res.name)}**.` }));
+      }
+      if (interaction.isButton() && interaction.customId === 'clan:disband') {
+        const mine = clans.userClan(db, gid, uid);
+        if (!mine || mine.clan.leader !== uid) return interaction.reply({ content: 'Only the Leader can disband.', flags: 64 });
+        const row = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId('clan:disbandYes').setLabel('Yes, disband').setEmoji('💥').setStyle(ButtonStyle.Danger),
+          new ButtonBuilder().setCustomId('hub:clan').setLabel('Cancel').setStyle(ButtonStyle.Secondary));
+        return interaction.update({ content: `⚠️ **Disband ${esc(mine.name)}?** This deletes the clan, its roles and channel. This can't be undone.`, embeds: [], components: [row], files: [], attachments: [] });
+      }
+      if (interaction.isButton() && interaction.customId === 'clan:disbandYes') {
+        await interaction.deferUpdate();
+        const res = await clans.disbandClan(db, saveData, interaction.guild, uid);
+        if (res.error) return interaction.editReply(Object.assign(clanDashboard(gid, uid), { content: `⚠️ ${res.error}` }));
+        setAction(uid, `💥 Disbanded the clan **${esc(res.name)}**.`);
+        return interaction.editReply(Object.assign(clanEntryView(gid, uid), { content: `💥 **${esc(res.name)}** has been disbanded.` }));
       }
 
       // ── roles: choose colour category ──
