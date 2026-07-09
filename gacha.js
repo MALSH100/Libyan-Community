@@ -1124,7 +1124,69 @@ function initGacha({ client, db, saveData }) {
   }
 
   // expose the shared flip engine so /hub can post the same public flip
-  return { runFlip };
+  // ── Hub data API — read models + the daily claim, for the /hub Collection section ──
+  const hubApi = {
+    // daily claim (mirrors cmdDaily); returns {ok, total, base, bonus, balance} or {error, retryMs}
+    claimDaily(guildId, uid) {
+      const s = getState(db, guildId);
+      const cd = (s.cooldowns[uid] ||= {});
+      const since = Date.now() - (cd.daily || 0);
+      if (since < 22 * 60 * 60 * 1000) return { error: 'cooldown', retryMs: 22 * 60 * 60 * 1000 - since };
+      ensureFreshRarities(db, guildId);
+      const bonus = Math.floor(collectionOf(s, uid).reduce((sum, cid) => sum + (s.pool[cid]?.value || 0), 0) / 50);
+      const total = DAILY_BASE + bonus;
+      addDinar(s, uid, total); cd.daily = Date.now(); saveData(guildId);
+      return { ok: true, total, base: DAILY_BASE, bonus, balance: dinarOf(s, uid) };
+    },
+    dailyStatus(guildId, uid) {
+      const s = getState(db, guildId);
+      const since = Date.now() - ((s.cooldowns[uid] && s.cooldowns[uid].daily) || 0);
+      const ms = 22 * 60 * 60 * 1000;
+      return since < ms ? { ready: false, retryMs: ms - since } : { ready: true };
+    },
+    balance(guildId, uid) { return dinarOf(getState(db, guildId), uid); },
+    // a user's collection grouped by tier
+    collection(guildId, uid) {
+      const s = getState(db, guildId); ensureFreshRarities(db, guildId);
+      const owned = collectionOf(s, uid);
+      const totalValue = owned.reduce((sum, cid) => sum + (s.pool[cid]?.value || 0), 0);
+      const byTier = {};
+      for (const cid of owned) { const t = s.pool[cid]?.rarity || 'Common'; (byTier[t] ||= []).push(cid); }
+      return { owned, count: owned.length, totalValue, byTier, tiers: TIERS, emoji: TIER_EMOJI };
+    },
+    richest(guildId) {
+      const s = getState(db, guildId);
+      return Object.entries(s.dinar || {}).filter(([, b]) => b > 0).sort((a, b) => b[1] - a[1]).slice(0, 10)
+        .map(([id, bal]) => ({ id, bal }));
+    },
+    collectionBoard(guildId) {
+      const s = getState(db, guildId); ensureFreshRarities(db, guildId);
+      const owners = {};
+      for (const cid of Object.keys(s.owners)) { const o = s.owners[cid]; (owners[o] ||= { count: 0, value: 0 }); owners[o].count++; owners[o].value += s.pool[cid]?.value || 0; }
+      return Object.entries(owners).sort((a, b) => b[1].value - a[1].value).slice(0, 10).map(([id, d]) => ({ id, count: d.count, value: d.value }));
+    },
+    rarest(guildId) {
+      const s = getState(db, guildId); ensureFreshRarities(db, guildId);
+      return Object.keys(s.pool).map(id => ({ id, ...s.pool[id], owner: s.owners[id] || null }))
+        .sort((a, b) => (b.value - a.value) || (b.score - a.score)).slice(0, 15).map(e => ({ ...e, emoji: TIER_EMOJI[e.rarity] }));
+    },
+    flipBoard(guildId) {
+      const s = getState(db, guildId);
+      return Object.entries(s.flipStats || {}).map(([id, st]) => {
+        const wins = st.wins || 0, losses = st.losses || 0, games = wins + losses;
+        return { id, wins, losses, games, net: (st.won || 0) - (st.lost || 0), winPct: games ? (wins / games) * 100 : 0 };
+      }).filter(r => r.games > 0).sort((a, b) => b.net - a.net).slice(0, 10);
+    },
+    wishlist(guildId, uid) { return (getState(db, guildId).wishlists[uid] || []).slice(); },
+    removeWish(guildId, uid, targetId) {
+      const s = getState(db, guildId); const wl = (s.wishlists[uid] ||= []);
+      s.wishlists[uid] = wl.filter(x => x !== targetId); saveData(guildId); return true;
+    },
+    isOptedIn(guildId, uid) { const s = getState(db, guildId); return !!s.pool[uid]; },
+    fmtDur,
+  };
+
+  return { runFlip, hubApi };
 }
 
 module.exports = { getGachaCommands, initGacha, awardDinar, isAtDinarCap, dinarDailyCap, getDinar, spendDinar };

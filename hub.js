@@ -297,7 +297,7 @@ function getShopCommands() {
   ];
 }
 
-function initShop({ client, db, saveData, runFlip }) {
+function initShop({ client, db, saveData, runFlip, warApi, gachaApi }) {
   const stateOf = (gid) => shopState(db, gid);
 
   // ── create (or recreate) a member's shop role, removing their previous one ──
@@ -397,8 +397,9 @@ function initShop({ client, db, saveData, runFlip }) {
         `🛒 **Shop** — custom roles & coin designs, bought with Dinar\n` +
         `🪙 **Coin Flip** — bet your Dinar on a flip of the coin\n` +
         `🔥 **Daily Streak** — check in every day for a growing Dinar reward\n` +
-        `⭐ **Booster Perks** — ${isBooster ? '**unlocked!** free holographic & custom-hex roles' : '_boost the server to unlock free premium roles_'}\n` +
+        `⭐ **Boosters Only** — ${isBooster ? '**unlocked!** free holographic & custom-hex roles' : '_boost the server to unlock free premium roles_'}\n` +
         `⚔️ **Clan** — ${inClan ? `manage **${esc(inClan.name)}**` : `create or join a clan (from **${fmt(clans.CLAN_CREATE_COST)} Dinar**)`}\n` +
+        `🃏 **Collection** — your cards, daily Dinar, leaderboards & wishlist\n` +
         `❓ **Help** — how everything works\n\n` +
         `*More coming soon…*`);
     if (uid) e.setAuthor({ name: `💰 ${fmt(bal)} Dinar` });
@@ -409,10 +410,11 @@ function initShop({ client, db, saveData, runFlip }) {
     new ButtonBuilder().setCustomId('hub:shop').setLabel('Shop').setEmoji('🛒').setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId('hub:flip').setLabel('Coin Flip').setEmoji('🪙').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('hub:streak').setLabel('Daily Streak').setEmoji('🔥').setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId('hub:booster').setLabel(isBooster ? 'Booster Perks' : 'Booster Perks (boost to unlock)').setEmoji('⭐').setStyle(ButtonStyle.Secondary).setDisabled(!isBooster),
+    new ButtonBuilder().setCustomId('hub:booster').setLabel(isBooster ? 'Boosters Only' : 'Boosters Only (boost to unlock)').setEmoji('⭐').setStyle(ButtonStyle.Secondary).setDisabled(!isBooster),
     new ButtonBuilder().setCustomId('hub:help').setLabel('Help').setEmoji('❓').setStyle(ButtonStyle.Secondary));
   const hubRow2 = () => new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('hub:clan').setLabel('Clan').setEmoji('⚔️').setStyle(ButtonStyle.Success));
+    new ButtonBuilder().setCustomId('hub:clan').setLabel('Clan').setEmoji('⚔️').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('hub:collection').setLabel('Collection').setEmoji('🃏').setStyle(ButtonStyle.Primary));
   const hubComponents = (isBooster) => [hubRow(isBooster), hubRow2()];
   const backHubRow = () => new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('hub:home').setLabel('← Back to Hub').setStyle(ButtonStyle.Secondary));
@@ -687,7 +689,7 @@ function initShop({ client, db, saveData, runFlip }) {
         { name: '🎨 Custom Roles', value: ['Buy a personalised, custom-named role:', '• **Solid** — pick from 48 colours · **800 Dinar**', '• **Gradient** — preset combos · **1,500 Dinar**', '• 🖼️ **Role Icon** — upload your own image · **3,000 Dinar** (free for boosters)', 'Both last **1 month**, then renew from `/hub`.'].join('\n') },
         { name: '🪙 Coin Flip', value: 'Bet **1–500 Dinar** on heads or tails, straight from the hub — the flip plays out publicly in the channel. One flip every 2h.' },
         { name: '🔥 Daily Streak', value: ['Check in once a day for a growing reward: **20 + 5 per day**, up to **100 Dinar**.', 'Miss a day and it resets. A leaderboard ranks the longest streaks.'].join('\n') },
-        { name: '⭐ Booster Perks', value: ['**Boosters only** — free premium roles:', '• ✨ **Holographic** — Discord\'s shimmer style', '• 🎨 **Custom Solid** — any colour by hex code', '• 🌈 **Custom Gradient** — blend any two hex colours', '• 🖼️ **Role Icon** — upload your own image, free', 'These stay while you keep boosting, and you can change them free anytime.'].join('\n') },
+        { name: '⭐ Boosters Only', value: ['**Boosters only** — free premium roles:', '• ✨ **Holographic** — Discord\'s shimmer style', '• 🎨 **Custom Solid** — any colour by hex code', '• 🌈 **Custom Gradient** — blend any two hex colours', '• 🖼️ **Role Icon** — upload your own image, free', 'These stay while you keep boosting, and you can change them free anytime.'].join('\n') },
       ], 'Your one-stop hub — open it with **`/hub`**.'),
     ];
     return pages;
@@ -749,7 +751,8 @@ function initShop({ client, db, saveData, runFlip }) {
     // row 2: leader management
     const row2 = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId('clan:manage').setLabel('Manage Members').setEmoji('🛡️').setStyle(ButtonStyle.Secondary).setDisabled(!isOfficerPlus),
-      new ButtonBuilder().setCustomId('clan:channel').setLabel(c.channelId ? 'Channel' : `Create Channel — ${fmt(clans.CLAN_CHANNEL_COST)}`).setEmoji('📢').setStyle(ButtonStyle.Secondary).setDisabled(!isLeader));
+      new ButtonBuilder().setCustomId('clan:channel').setLabel(c.channelId ? 'Channel' : `Create Channel — ${fmt(clans.CLAN_CHANNEL_COST)}`).setEmoji('📢').setStyle(ButtonStyle.Secondary).setDisabled(!isLeader),
+      new ButtonBuilder().setCustomId('clan:wars').setLabel('Wars').setEmoji('⚔️').setStyle(ButtonStyle.Danger).setDisabled(!isOfficerPlus || !warApi));
     // row 3: leave/disband + back
     const row3 = new ActionRowBuilder().addComponents(
       isLeader
@@ -834,6 +837,111 @@ function initShop({ client, db, saveData, runFlip }) {
     });
     rows.push(new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('hub:clan').setLabel('← Back to Clan').setStyle(ButtonStyle.Secondary)));
     return { content: reqs.length > 4 ? `Showing the first 4 of ${reqs.length} requests.` : '', embeds: [embed], components: rows, files: [], attachments: [] };
+  }
+
+  function clanWarsView(gid, uid) {
+    const mine = clans.userClan(db, gid, uid);
+    if (!mine) return clanEntryView(gid, uid);
+    if (clans.userRank(mine.clan, uid) === 'Member' || !warApi) return clanDashboard(gid, uid);
+    const st = warApi.getState(gid, mine.name);
+    const rows = [];
+    let desc;
+    if (st.state === 'incoming') {
+      desc = `⚔️ **${esc(st.challenger)}** has challenged you to war!\nAccept to pick a game and fight, or decline.`;
+      rows.push(new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('clan:warAccept').setLabel('Accept War').setEmoji('⚔️').setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId('clan:warDecline').setLabel('Decline').setEmoji('🏳️').setStyle(ButtonStyle.Danger)));
+    } else if (st.state === 'outgoing') {
+      desc = `⏳ Your challenge to **${esc(st.defender)}** is pending their response (expires within 2 minutes).`;
+    } else if (st.state === 'active') {
+      desc = `🔥 A war is currently underway: **${esc(st.challenger)}** vs **${esc(st.defender)}**. Watch the channel!`;
+    } else if (st.state === 'busy') {
+      desc = `⚔️ Another clan war is in progress on the server. Wait for it to finish before starting yours.`;
+    } else {
+      const targets = warApi.targets(gid, mine.name);
+      if (!targets.length) {
+        desc = `There are no other clans to challenge yet.`;
+      } else {
+        desc = `Challenge another clan to war! The winner earns XP, LP and glory.\nPick an opponent below (Leaders & Officers only).`;
+        const menu = new StringSelectMenuBuilder().setCustomId('clan:warPick').setPlaceholder('Choose a clan to challenge…')
+          .addOptions(targets.slice(0, 25).map(n => ({ label: n.slice(0, 100), value: n, emoji: (db[gid][n] && db[gid][n].emoji) || '⚔️' })));
+        rows.push(new ActionRowBuilder().addComponents(menu));
+      }
+    }
+    const embed = new EmbedBuilder().setColor(0xFF0000).setTitle(`⚔️ ${esc(mine.name)} — Clan Wars`).setDescription(desc);
+    rows.push(new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('hub:clan').setLabel('← Back to Clan').setStyle(ButtonStyle.Secondary)));
+    return { content: '', embeds: [embed], components: rows, files: [], attachments: [] };
+  }
+
+  // ═══════════════ COLLECTION (gacha) UI ═══════════════
+  function collectionHome(gid, uid) {
+    if (!gachaApi) return { content: 'The collection game is unavailable right now.', embeds: [], components: [backHubOnly()], files: [], attachments: [] };
+    const bal = gachaApi.balance(gid, uid);
+    const col = gachaApi.collection(gid, uid);
+    const daily = gachaApi.dailyStatus(gid, uid);
+    const embed = new EmbedBuilder().setColor(0x9B59B6).setTitle('🃏 Your Collection')
+      .setDescription(
+        `💰 **Balance:** ${fmt(bal)} Dinar\n` +
+        `🎴 **Cards owned:** ${col.count}  ·  **Value:** ${fmt(col.totalValue)} Dinar\n` +
+        `🎁 **Daily:** ${daily.ready ? '**ready to claim!**' : `claimed — back in ${gachaApi.fmtDur(daily.retryMs)}`}\n\n` +
+        `Roll for new cards with \`/gacha-roll\` in the channel.`);
+    const row1 = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('col:daily').setLabel(daily.ready ? 'Claim Daily' : 'Daily Claimed').setEmoji('🎁').setStyle(daily.ready ? ButtonStyle.Success : ButtonStyle.Secondary).setDisabled(!daily.ready),
+      new ButtonBuilder().setCustomId('col:mine').setLabel('My Cards').setEmoji('🎴').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('col:wishlist').setLabel('Wishlist').setEmoji('⭐').setStyle(ButtonStyle.Secondary));
+    const row2 = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('col:boardCollectors').setLabel('Top Collectors').setEmoji('🏆').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('col:boardRichest').setLabel('Richest').setEmoji('💰').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('col:rarest').setLabel('Rarest Cards').setEmoji('💎').setStyle(ButtonStyle.Secondary));
+    return { content: '', embeds: [embed], components: [row1, row2, backHubOnly()], files: [], attachments: [] };
+  }
+  const colBack = () => new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('hub:collection').setLabel('← Back to Collection').setStyle(ButtonStyle.Secondary));
+
+  function myCardsView(gid, uid) {
+    const col = gachaApi.collection(gid, uid);
+    const lines = [];
+    for (const t of [...col.tiers].reverse()) {
+      const arr = col.byTier[t];
+      if (arr && arr.length) lines.push(`${col.emoji[t]} **${t}** (${arr.length}): ${arr.map(c => `<@${c}>`).join(', ')}`);
+    }
+    const embed = new EmbedBuilder().setColor(0x9B59B6).setTitle('🎴 My Cards')
+      .setDescription(col.count ? lines.join('\n') : '_Empty — roll with `/gacha-roll` and claim someone!_')
+      .addFields({ name: 'Owned', value: `${col.count}`, inline: true }, { name: 'Total value', value: `💰 ${fmt(col.totalValue)}`, inline: true });
+    return { content: '', embeds: [embed], components: [colBack()], files: [], attachments: [] };
+  }
+  function boardView(gid, kind) {
+    const medals = ['🥇', '🥈', '🥉'];
+    let embed;
+    if (kind === 'collectors') {
+      const rows = gachaApi.collectionBoard(gid);
+      embed = new EmbedBuilder().setColor(0xF1C40F).setTitle('🏆 Collection Leaderboard')
+        .setDescription(rows.length ? rows.map((r, i) => `${medals[i] || `**${i + 1}.**`} <@${r.id}> — ${r.count} cards · 💰 ${fmt(r.value)}`).join('\n') : '_No collections yet._');
+    } else if (kind === 'richest') {
+      const rows = gachaApi.richest(gid);
+      embed = new EmbedBuilder().setColor(0xF1C40F).setTitle('💰 Richest — Top 10')
+        .setDescription(rows.length ? rows.map((r, i) => `${medals[i] || `**${i + 1}.**`} <@${r.id}> — **${fmt(r.bal)}** Dinar`).join('\n') : '_Nobody has Dinar yet._');
+    } else {
+      const rows = gachaApi.rarest(gid);
+      embed = new EmbedBuilder().setColor(0xE74C3C).setTitle('💎 Top 15 Rarest Cards')
+        .setDescription(rows.length ? rows.map((e, i) => `**${i + 1}.** ${e.emoji} <@${e.id}> · ${e.rarity} · 💰 ${fmt(e.value)} · ${e.owner ? `owned by <@${e.owner}>` : '_unclaimed_'}`).join('\n') : '_Nobody has opted in yet._');
+    }
+    return { content: '', embeds: [embed], components: [colBack()], files: [], attachments: [] };
+  }
+  function wishlistView(gid, uid) {
+    const wl = gachaApi.wishlist(gid, uid);
+    const embed = new EmbedBuilder().setColor(0xE7B41A).setTitle('⭐ Your Wishlist')
+      .setDescription(wl.length ? wl.map(w => `• <@${w}>`).join('\n') : '_Empty — add someone with `/gacha-wish @user`._');
+    const rows = [];
+    if (wl.length) {
+      const menu = new StringSelectMenuBuilder().setCustomId('col:wishRemove').setPlaceholder('Remove someone…')
+        .addOptions(wl.slice(0, 25).map(w => ({ label: `Remove`, value: w, description: w })));
+      // labels can't be a mention; use ids
+      menu.setOptions(wl.slice(0, 25).map(w => ({ label: `User ${w.slice(-4)}`, value: w })));
+      rows.push(new ActionRowBuilder().addComponents(menu));
+    }
+    rows.push(colBack());
+    return { content: '', embeds: [embed], components: rows, files: [], attachments: [] };
   }
 
   // ═══════════════ INTERACTIONS ═══════════════
@@ -976,7 +1084,7 @@ function initShop({ client, db, saveData, runFlip }) {
       if (interaction.isButton() && interaction.customId === 'hub:booster') {
         if (!isBoosting(interaction))
           return interaction.reply({ content: '⭐ This is a **booster perk** — boost the server to unlock free premium roles!', flags: 64 });
-        const embed = new EmbedBuilder().setColor(0xf47fff).setTitle('⭐ Booster Perks')
+        const embed = new EmbedBuilder().setColor(0xf47fff).setTitle('⭐ Boosters Only')
           .setDescription(
             `Thank you for boosting! 💜 As a booster you get these **free** perks:\n\n` +
             `✨ **Holographic Role** — Discord's shimmering holographic style\n` +
@@ -1152,6 +1260,63 @@ function initShop({ client, db, saveData, runFlip }) {
       if (interaction.isButton() && interaction.customId === 'clan:settings') return interaction.update(clanSettingsView(gid, uid));
       if (interaction.isButton() && interaction.customId === 'clan:manage')   return interaction.update(clanManageView(gid, uid));
       if (interaction.isButton() && interaction.customId === 'clan:requests')  return interaction.update(clanRequestsView(gid, uid));
+      if (interaction.isButton() && interaction.customId === 'clan:wars')      return interaction.update(clanWarsView(gid, uid));
+
+      // war: challenge a chosen clan
+      if (interaction.isStringSelectMenu() && interaction.customId === 'clan:warPick') {
+        if (!warApi) return interaction.reply({ content: 'Wars are unavailable right now.', flags: 64 });
+        const mine = clans.userClan(db, gid, uid);
+        if (!mine) return interaction.update(clanEntryView(gid, uid));
+        const defenderName = interaction.values[0];
+        await interaction.deferUpdate();
+        const res = await warApi.challenge(interaction.guild, interaction.channel, mine.name, defenderName, uid);
+        if (res.error) return interaction.editReply(Object.assign(clanWarsView(gid, uid), { content: `⚠️ ${res.error}` }));
+        setAction(uid, `⚔️ Challenged **${esc(defenderName)}** to a clan war.`);
+        return interaction.editReply(Object.assign(clanWarsView(gid, uid), { content: `⚔️ Challenge sent to **${esc(defenderName)}**! They have 2 minutes to respond.` }));
+      }
+      // war: accept (this launches the actual war engine in the channel)
+      if (interaction.isButton() && interaction.customId === 'clan:warAccept') {
+        if (!warApi) return interaction.reply({ content: 'Wars are unavailable right now.', flags: 64 });
+        const mine = clans.userClan(db, gid, uid);
+        if (!mine) return interaction.update(clanEntryView(gid, uid));
+        await interaction.update(Object.assign(clanDashboard(gid, uid), { content: '⚔️ War accepted — head to the channel, it\'s starting now!' }));
+        const res = await warApi.accept(interaction.guild, interaction.channel, mine.name, uid);
+        if (res && res.error) return interaction.followUp({ content: `⚠️ ${res.error}`, flags: 64 }).catch(() => {});
+        setAction(uid, `⚔️ Accepted a clan war.`);
+        return;
+      }
+      // war: decline
+      if (interaction.isButton() && interaction.customId === 'clan:warDecline') {
+        if (!warApi) return interaction.reply({ content: 'Wars are unavailable right now.', flags: 64 });
+        const mine = clans.userClan(db, gid, uid);
+        if (!mine) return interaction.update(clanEntryView(gid, uid));
+        await interaction.deferUpdate();
+        const res = await warApi.decline(interaction.guild, mine.name, uid);
+        if (res.error) return interaction.editReply(Object.assign(clanWarsView(gid, uid), { content: `⚠️ ${res.error}` }));
+        setAction(uid, `🏳️ Declined a war challenge.`);
+        interaction.channel.send(`🏳️ **${esc(mine.name)}** declined the war challenge from **${esc(res.challengerName)}**.`).catch(() => {});
+        return interaction.editReply(Object.assign(clanWarsView(gid, uid), { content: `🏳️ You declined the challenge from **${esc(res.challengerName)}**.` }));
+      }
+
+      // ═══════════════ COLLECTION HANDLERS ═══════════════
+      if (interaction.isButton() && interaction.customId === 'hub:collection') return interaction.update(collectionHome(gid, uid));
+      if (interaction.isButton() && interaction.customId === 'col:mine')       return interaction.update(myCardsView(gid, uid));
+      if (interaction.isButton() && interaction.customId === 'col:wishlist')   return interaction.update(wishlistView(gid, uid));
+      if (interaction.isButton() && interaction.customId === 'col:boardCollectors') return interaction.update(boardView(gid, 'collectors'));
+      if (interaction.isButton() && interaction.customId === 'col:boardRichest')    return interaction.update(boardView(gid, 'richest'));
+      if (interaction.isButton() && interaction.customId === 'col:rarest')          return interaction.update(boardView(gid, 'rarest'));
+      if (interaction.isButton() && interaction.customId === 'col:daily') {
+        if (!gachaApi) return interaction.reply({ content: 'Unavailable right now.', flags: 64 });
+        const res = gachaApi.claimDaily(gid, uid);
+        if (res.error === 'cooldown') return interaction.reply({ content: `⏳ Already claimed — come back in ${gachaApi.fmtDur(res.retryMs)}.`, flags: 64 });
+        setAction(uid, `🎁 Claimed daily — +${fmt(res.total)} Dinar.`);
+        return interaction.update(Object.assign(collectionHome(gid, uid), { content: `💰 Daily claimed: **+${fmt(res.total)} Dinar** (${fmt(res.base)} base${res.bonus ? ` + ${fmt(res.bonus)} collection bonus` : ''})! Balance: **${fmt(res.balance)}**.` }));
+      }
+      if (interaction.isStringSelectMenu() && interaction.customId === 'col:wishRemove') {
+        gachaApi.removeWish(gid, uid, interaction.values[0]);
+        setAction(uid, `⭐ Updated wishlist.`);
+        return interaction.update(wishlistView(gid, uid));
+      }
 
       // accept / decline a join request
       if (interaction.isButton() && interaction.customId.startsWith('clan:reqAccept:')) {

@@ -1456,6 +1456,101 @@ async function promptGameSelection(guild, channel, challengerClanName) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// HUB WAR API — lets the /hub Clan section drive the existing war engine.
+// All war state + logic stays here in index.js; the hub just calls these.
+// ═══════════════════════════════════════════════════════════════════════════════
+const hubWarApi = {
+  // current war state for a guild, from the perspective of `clanName`
+  getState(guildId, clanName) {
+    const war = activeWars[guildId];
+    if (!war) return { state: 'none' };
+    if (war.pending) {
+      if (war.defenderClan === clanName) return { state: 'incoming', challenger: war.challengerClan };
+      if (war.challengerClan === clanName) return { state: 'outgoing', defender: war.defenderClan };
+      return { state: 'busy' };   // someone else's war pending
+    }
+    return { state: 'active', challenger: war.challengerClan, defender: war.defenderClan };
+  },
+  // list clans this clan could challenge
+  targets(guildId, clanName) {
+    const gc = getGuildClans(guildId);
+    return Object.keys(gc).filter(n => n !== clanName && !n.startsWith('__'));
+  },
+  // start a challenge (mirrors /clan-war). actorId must be leader/officer of challengerName.
+  async challenge(guild, channel, challengerName, defenderName, actorId) {
+    const gc = getGuildClans(guild.id);
+    const challenger = gc[challengerName];
+    if (!challenger) return { error: 'Your clan no longer exists.' };
+    const rank = getUserRank(challenger, actorId);
+    if (rank !== 'Leader' && rank !== 'Officer') return { error: 'Only the Leader or Officers can declare war.' };
+    if (defenderName === challengerName) return { error: 'You cannot war your own clan.' };
+    if (activeWars[guild.id]) return { error: 'A war is already in progress on this server.' };
+    const defender = gc[defenderName];
+    if (!defender) return { error: `No clan named **${defenderName}** found.` };
+    activeWars[guild.id] = { challengerClan: challengerName, defenderClan: defenderName, channelId: channel.id, pending: true };
+    const responders = [defender.leader, ...(defender.officers || [])].filter(Boolean);
+    const pings = responders.map(id => `<@${id}>`).join(' ');
+    await channel.send({
+      content: responders.length ? `${pings} — your clan has been challenged to war!` : undefined,
+      embeds: [new EmbedBuilder().setColor(0xFF0000).setTitle('⚔️ Clan War Challenge!')
+        .setDescription(`**${challengerName}** challenged **${defenderName}** to a clan war!\n\nA **Leader** or **Officer** of **${defenderName}** can accept or decline from \`/hub\` → Clan → Wars (or \`/clan-war-accept\`).\n\n⏰ Expires in **2 minutes**.`)],
+      allowedMentions: { users: responders },
+    }).catch(() => {});
+    setTimeout(() => {
+      if (activeWars[guild.id]?.pending && activeWars[guild.id]?.challengerClan === challengerName) {
+        const ex = activeWars[guild.id]; delete activeWars[guild.id];
+        if (ex.eventId) guild.scheduledEvents.delete(ex.eventId).catch(() => {});
+        channel.send(`⏰ War challenge from **${challengerName}** to **${defenderName}** has expired.`).catch(() => {});
+      }
+    }, 120_000);
+    try {
+      const start = new Date(Date.now() + 5 * 60_000), end = new Date(Date.now() + 35 * 60_000);
+      const event = await guild.scheduledEvents.create({
+        name: `⚔️ Clan War: ${challengerName} vs ${defenderName}`,
+        scheduledStartTime: start, scheduledEndTime: end, privacyLevel: 2, entityType: 3,
+        entityMetadata: { location: `#${channel.name}` },
+        description: `Clan war between ${challengerName} and ${defenderName}!`,
+      });
+      activeWars[guild.id].eventId = event.id;
+    } catch {}
+    return { ok: true, defenderName };
+  },
+  // accept (mirrors /clan-war-accept) — actor must be leader/officer of the defender clan
+  async accept(guild, channel, clanName, actorId) {
+    const gc = getGuildClans(guild.id);
+    const clan = gc[clanName];
+    if (!clan) return { error: 'Your clan no longer exists.' };
+    const rank = getUserRank(clan, actorId);
+    if (rank !== 'Leader' && rank !== 'Officer') return { error: 'Only the Leader or an Officer can accept a war.' };
+    const war = activeWars[guild.id];
+    if (!war || !war.pending) return { error: 'No pending war challenge found.' };
+    if (war.defenderClan !== clanName) return { error: `This challenge is for **${war.defenderClan}**, not your clan.` };
+    war.pending = false;
+    const warChannel = guild.channels.cache.get(war.channelId) || channel;
+    await warChannel.send({ embeds: [new EmbedBuilder().setColor(0xFF0000).setTitle('⚔️ War Accepted!').setDescription(`**${clanName}** accepted! The challenger now picks the game...`)] }).catch(() => {});
+    const gameChoice = await promptGameSelection(guild, warChannel, war.challengerClan);
+    if (war.eventId) guild.scheduledEvents.delete(war.eventId).catch(() => {});
+    await runWar(guild, warChannel, war.challengerClan, war.defenderClan, gameChoice);
+    return { ok: true };
+  },
+  // decline (mirrors /clan-war-decline)
+  async decline(guild, clanName, actorId) {
+    const gc = getGuildClans(guild.id);
+    const clan = gc[clanName];
+    if (!clan) return { error: 'Your clan no longer exists.' };
+    const rank = getUserRank(clan, actorId);
+    if (rank !== 'Leader' && rank !== 'Officer') return { error: 'Only the Leader or an Officer can decline a war.' };
+    const war = activeWars[guild.id];
+    if (!war || !war.pending) return { error: 'No pending war challenge found.' };
+    if (war.defenderClan !== clanName) return { error: `This challenge is for **${war.defenderClan}**, not your clan.` };
+    if (war.eventId) guild.scheduledEvents.delete(war.eventId).catch(() => {});
+    const challengerName = war.challengerClan;
+    delete activeWars[guild.id];
+    return { ok: true, challengerName };
+  },
+};
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // INTERACTION HANDLER
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -2455,7 +2550,7 @@ initBattleCards({ client, db, saveData, awardLP });
 // Diyar — Libyan conquest game (Dinar economy)
 initDiyar({ client, db, saveData, awardLP });
 initLotto({ client, db, saveData });
-initShop({ client, db, saveData, runFlip: gachaApi && gachaApi.runFlip });
+initShop({ client, db, saveData, runFlip: gachaApi && gachaApi.runFlip, warApi: hubWarApi, gachaApi: gachaApi && gachaApi.hubApi });
 
 // Translator (reaction-based Arabic → English)
 //initTranslator(client, db, saveData);
