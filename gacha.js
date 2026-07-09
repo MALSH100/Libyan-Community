@@ -637,7 +637,15 @@ function initGacha({ client, db, saveData }) {
     try {
       const coins = require('./coinskins');
       const equipped = coins.getEquipped(db, guildId, uid);
-      if (equipped && equipped !== 'default') {
+      if (equipped === 'custom') {
+        const img = coins.getCustomImage(db, guildId, uid);
+        if (img) {
+          const png = coins.renderCustomFace(Buffer.from(img.data, 'base64'), img.mime, landed);
+          const fname = `coin-custom-${landed}.png`;
+          faceAttachment = new AttachmentBuilder(png, { name: fname });
+          faceUrl = `attachment://${fname}`;
+        }
+      } else if (equipped && equipped !== 'default') {
         const png = coins.renderFace(equipped, landed);
         const fname = `coin-${equipped}-${landed}.png`;
         faceAttachment = new AttachmentBuilder(png, { name: fname });

@@ -217,68 +217,129 @@ function equip(db, guildId, uid, key, saveData) {
 module.exports = { SKINS, skinByKey, RARITY_COLOR, renderFace, coinState, getOwned, isOwned, addOwned, getEquipped, equip };
 
 // ── overhead spinning-coin animation (per skin) ──
-// Top-down view: the disc squishes horizontally (scaleX 1→0→1) like a coin spinning on its
-// edge, so you see the skin's colours/rim rotating but never a readable HEADS/TAILS face.
+// Top-down view of a coin spinning on its EDGE: the camera looks straight down, so only the
+// coin's thin rim is visible, rotating around the vertical axis. The faces never show — which
+// means ONE universal spin works for every coin (default, skins, and custom uploads).
 const { GIFEncoder, quantize, applyPalette } = require('gifenc');
 
-// one spin frame at horizontal scale sx (1 = full face-ish, ~0 = edge-on)
-function spinFrameSVG(skinKey, sx, edgeShade) {
-  const W = 320, H = 320, cx = W / 2, cy = H / 2, R = 130;
-  const p = skinPalette(skinKey);
-  // when nearly edge-on, show the coin's "side" (a thin shaded ellipse) instead of the face
-  const faceW = Math.max(2, R * Math.abs(sx));
-  const showFace = Math.abs(sx) > 0.12;
-  const grad = `<defs>${p.defs}<clipPath id="disc"><ellipse cx="${cx}" cy="${cy}" rx="${faceW}" ry="${R}"/></clipPath></defs>`;
-  let body;
-  if (showFace) {
-    // squished disc showing skin background + decoration + emblem hint (no readable text)
-    body =
-      `<ellipse cx="${cx}" cy="${cy}" rx="${faceW + 6}" ry="${R + 6}" fill="${p.ring}"/>` +
-      `<g clip-path="url(#disc)"><g transform="translate(${cx},${cy}) scale(${sx},1) translate(${-cx},${-cy})">${p.bg}${skinDecoration(skinKey, cx, cy, R)}</g></g>` +
-      // faint emblem, scaled with the squish so it rotates with the face but stays unreadable
-      `<g clip-path="url(#disc)" opacity="0.9"><g transform="translate(${cx},${cy}) scale(${sx},1) translate(${-cx},${-cy})">${emblem(cx - 10, cy, R * 0.4, p.emblem, p.ring, 3)}</g></g>` +
-      `<ellipse cx="${cx}" cy="${cy}" rx="${faceW + 6}" ry="${R + 6}" fill="none" stroke="${p.ring}" stroke-width="5"/>`;
-  } else {
-    // edge-on: a thin bright sliver (the coin's rim catching light)
-    body = `<ellipse cx="${cx}" cy="${cy}" rx="6" ry="${R + 6}" fill="${p.ring}"/>` +
-           `<ellipse cx="${cx}" cy="${cy}" rx="3" ry="${R}" fill="${edgeShade}"/>`;
+// one frame of the edge-spin at rotation angle `ang` (radians). The rim is a thin ellipse whose
+// width breathes as it turns (widest when the edge faces us, thin when seen end-on), with a
+// couple of trailing ghosts for the rapid-spin blur, plus a soft contact shadow underneath.
+function edgeSpinFrameSVG(ang) {
+  const W = 320, H = 320, cx = W / 2, cy = H / 2;
+  const R = 128;                        // coin radius (the tall dimension of the rim ellipse)
+  const rimMax = 30;                    // max apparent thickness when edge faces the camera
+  const widthAt = (a) => Math.max(3, Math.abs(Math.cos(a)) * rimMax);   // breathing thickness
+  // metallic rim gradient
+  const defs =
+    `<radialGradient id="floor" cx="50%" cy="50%" r="50%"><stop offset="0" stop-color="#00000055"/><stop offset="1" stop-color="#00000000"/></radialGradient>` +
+    `<linearGradient id="rim" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#9a9da3"/><stop offset="0.5" stop-color="#eef0f3"/><stop offset="1" stop-color="#9a9da3"/></linearGradient>`;
+  // contact shadow on the "surface"
+  const shadow = `<ellipse cx="${cx}" cy="${cy + R * 0.9}" rx="${R * 0.75}" ry="18" fill="url(#floor)"/>`;
+  // trailing ghosts (motion blur) — the rim a few steps behind, faded
+  let ghosts = '';
+  for (let k = 1; k <= 3; k++) {
+    const ga = ang - k * 0.28;
+    const gw = widthAt(ga);
+    ghosts += `<g transform="rotate(${(ga * 180 / Math.PI).toFixed(1)} ${cx} ${cy})"><ellipse cx="${cx}" cy="${cy}" rx="${gw.toFixed(1)}" ry="${R}" fill="#ccced3" opacity="${(0.16 - k * 0.04).toFixed(2)}"/></g>`;
   }
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}">${grad}${body}</svg>`;
+  // the rim itself, rotated around the vertical axis (we simulate the turn by rotating the
+  // whole thin ellipse slightly and breathing its width)
+  const w = widthAt(ang);
+  const spin = ang * 180 / Math.PI;
+  const rim =
+    `<g transform="rotate(${spin.toFixed(1)} ${cx} ${cy})">` +
+      `<ellipse cx="${cx}" cy="${cy}" rx="${w.toFixed(1)}" ry="${R}" fill="url(#rim)" stroke="#7a7d82" stroke-width="1.5"/>` +
+      // a highlight streak down the rim to sell the metal
+      `<ellipse cx="${cx - w * 0.25}" cy="${cy}" rx="${Math.max(1, w * 0.18).toFixed(1)}" ry="${R * 0.9}" fill="#ffffff" opacity="0.5"/>` +
+    `</g>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}"><defs>${defs}</defs>${shadow}${ghosts}${rim}</svg>`;
 }
 
-// build the spin GIF for one skin (seamless loop: face → edge → face → edge …)
-function renderSpinGif(skinKey) {
-  const font = resolveFont();
-  const opts = { fitTo: { mode: 'width', value: 320 },
-    font: font ? { fontFiles: [font], loadSystemFonts: false, defaultFontFamily: 'DejaVu Sans' } : { loadSystemFonts: true },
-    background: 'rgba(0,0,0,0)' };
-  const p = skinPalette(skinKey);
-  const edge = p.ring;
+// build the ONE universal edge-spin GIF (seamless loop over a full rotation)
+function renderUniversalSpinGif() {
+  const opts = { fitTo: { mode: 'width', value: 320 }, font: { loadSystemFonts: false }, background: 'rgba(0,0,0,0)' };
   const gif = GIFEncoder();
-  const STEPS = 16;               // frames for a half-turn; full cycle mirrors it
+  const FRAMES = 24;
   let first = true;
-  // scaleX sweeps 1 → -1 → 1 over a full rotation; sign flip = the back coming around
-  for (let i = 0; i < STEPS * 2; i++) {
-    const ang = (i / (STEPS * 2)) * Math.PI * 2;
-    const sx = Math.cos(ang);     // 1 → 0 → -1 → 0 → 1
-    const img = new Resvg(spinFrameSVG(skinKey, sx, edge), opts).render();
-    const palette = quantize(img.pixels, 64);
+  for (let i = 0; i < FRAMES; i++) {
+    const ang = (i / FRAMES) * Math.PI * 2;   // full rotation → seamless loop
+    const img = new Resvg(edgeSpinFrameSVG(ang), opts).render();
+    const palette = quantize(img.pixels, 48);
     const indexed = applyPalette(img.pixels, palette);
-    const o = { palette, delay: 55 };
-    if (first) { o.repeat = 0; first = false; }   // loop forever
+    const o = { palette, delay: 45 };
+    if (first) { o.repeat = 0; first = false; }
     gif.writeFrame(indexed, img.width, img.height, o);
   }
   gif.finish();
   return Buffer.from(gif.bytes());
 }
 
-// lazy cache: render each skin's spin GIF once on first use, then reuse (Option 2 — no per-flip cost)
-const _spinCache = {};
+// cache the single universal spin (rendered once, reused by every non-default coin)
+let _universalSpin = null;
 function getSpinGif(skinKey) {
-  if (skinKey === 'default') return null;             // default uses the existing committed GIF
-  if (_spinCache[skinKey]) return _spinCache[skinKey];
-  try { _spinCache[skinKey] = renderSpinGif(skinKey); return _spinCache[skinKey]; }
+  if (skinKey === 'default') return null;     // default keeps its committed Libyan-coin GIF
+  if (_universalSpin) return _universalSpin;
+  try { _universalSpin = renderUniversalSpinGif(); return _universalSpin; }
   catch (e) { return null; }
 }
 
-module.exports = { SKINS, skinByKey, RARITY_COLOR, renderFace, coinState, getOwned, isOwned, addOwned, getEquipped, equip, renderSpinGif, getSpinGif };
+// ── booster custom coins: a user-uploaded image becomes their coin faces ──
+// Stored as a base64 PNG/JPG in db[gid].__coinskins.custom[uid]. Equipping uses the key 'custom'.
+function setCustomImage(db, guildId, uid, base64, mime, saveData) {
+  const st = coinState(db, guildId);
+  if (!st.custom) st.custom = {};
+  st.custom[uid] = { data: base64, mime: mime || 'image/png', setAt: Date.now() };
+  // ensure they "own" the custom slot and equip it
+  addOwned(db, guildId, uid, 'custom', saveData);
+  st.equipped[uid] = 'custom';
+  if (saveData) saveData(guildId);
+  return true;
+}
+function getCustomImage(db, guildId, uid) {
+  const st = coinState(db, guildId);
+  return (st.custom && st.custom[uid]) || null;
+}
+function clearCustomImage(db, guildId, uid, saveData) {
+  const st = coinState(db, guildId);
+  if (st.custom) delete st.custom[uid];
+  if (st.owned[uid]) st.owned[uid] = st.owned[uid].filter(k => k !== 'custom');
+  if (st.equipped[uid] === 'custom') st.equipped[uid] = 'default';
+  if (saveData) saveData(guildId);
+}
+
+// render a custom face: the uploaded image, circular-cropped, with HEADS/TAILS text over it.
+// A soft dark band behind the text guarantees the label is readable over any image.
+function renderCustomFace(imageBuffer, mime, side) {
+  const W = 400, H = 400, cx = W / 2, cy = H / 2, R = 150;
+  const label = side === 'heads' ? 'HEADS' : 'TAILS';
+  const font = resolveFont();
+  const b64 = Buffer.isBuffer(imageBuffer) ? imageBuffer.toString('base64') : imageBuffer;
+  const href = `data:${mime || 'image/png'};base64,${b64}`;
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" font-family="DejaVu Sans, sans-serif">` +
+    `<defs><clipPath id="disc"><circle cx="${cx}" cy="${cy}" r="${R + 6}"/></clipPath>` +
+    `<linearGradient id="tband" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#00000000"/><stop offset="0.5" stop-color="#00000088"/><stop offset="1" stop-color="#00000000"/></linearGradient></defs>` +
+    // metallic rim
+    `<circle cx="${cx}" cy="${cy}" r="${R + 14}" fill="#c9ccd1"/>` +
+    `<circle cx="${cx}" cy="${cy}" r="${R + 11}" fill="#e9ebee"/>` +
+    // the uploaded image, cropped to the coin disc, scaled to cover
+    `<g clip-path="url(#disc)">` +
+      `<image href="${href}" x="${cx - R - 6}" y="${cy - R - 6}" width="${(R + 6) * 2}" height="${(R + 6) * 2}" preserveAspectRatio="xMidYMid slice"/>` +
+      // readability bands behind top + bottom text
+      `<rect x="0" y="${cy - R * 0.9}" width="${W}" height="70" fill="url(#tband)"/>` +
+      `<rect x="0" y="${cy + R * 0.45}" width="${W}" height="70" fill="url(#tband)"/>` +
+    `</g>` +
+    `<circle cx="${cx}" cy="${cy}" r="${R + 6}" fill="none" stroke="#c9ccd1" stroke-width="6"/>` +
+    // HEADS/TAILS with a strong outline for legibility over any image
+    `<text x="${cx}" y="${cy - R * 0.6}" font-size="52" font-weight="bold" fill="#ffffff" text-anchor="middle" dominant-baseline="middle" style="paint-order:stroke;stroke:#000000;stroke-width:7px;">${label}</text>` +
+    `<text x="${cx}" y="${cy + R * 0.66}" font-size="40" font-weight="bold" fill="#ffffff" text-anchor="middle" dominant-baseline="middle" style="paint-order:stroke;stroke:#000000;stroke-width:6px;">${label}</text>` +
+    `</svg>`;
+  return new Resvg(svg, {
+    fitTo: { mode: 'width', value: W },
+    font: font ? { fontFiles: [font], loadSystemFonts: false, defaultFontFamily: 'DejaVu Sans' } : { loadSystemFonts: true },
+    background: 'rgba(0,0,0,0)',
+  }).render().asPng();
+}
+
+module.exports = { SKINS, skinByKey, RARITY_COLOR, renderFace, coinState, getOwned, isOwned, addOwned, getEquipped, equip, getSpinGif, renderUniversalSpinGif, setCustomImage, getCustomImage, clearCustomImage, renderCustomFace };

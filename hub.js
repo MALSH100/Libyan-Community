@@ -368,6 +368,14 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi }) {
         } catch { /* ignore */ }
         delete state.roles[uid]; changed = true;
       }
+      // custom coins are a booster perk — remove them if the owner stops boosting
+      const cs = db[gid] && db[gid].__coinskins;
+      if (cs && cs.custom) {
+        for (const uid of Object.keys(cs.custom)) {
+          const member = guild.members.cache.get(uid) || await guild.members.fetch(uid).catch(() => null);
+          if (!member || !member.premiumSince) { coins.clearCustomImage(db, gid, uid, saveData); changed = true; }
+        }
+      }
       if (changed) saveData(gid);
     }
   }
@@ -622,6 +630,88 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi }) {
       if (sess.done || reason === 'cancel' || reason === 'replaced' || reason === 'limit') return;
       sess.done = true; iconSessions.delete(uid);
       interaction.editReply({ content: '', embeds: [new EmbedBuilder().setColor(0xE7B41A).setTitle('🖼️ Role Icon').setDescription('⏳ Timed out — no image received. Nothing was charged.')], components: [iconRetryRow()], files: [], attachments: [] }).catch(() => {});
+    });
+  }
+
+  // ── Booster Custom Coin: upload an image → becomes your coin's heads/tails faces ──
+  const coinSessions = new Map();
+  const coinRetryRow = () => new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('boost:coin').setLabel('Try Again').setEmoji('🪙').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('hub:home').setLabel('← Back to Hub').setStyle(ButtonStyle.Secondary));
+
+  // fetch an uploaded image for the coin face (larger allowance than a role icon; we render it big)
+  async function fetchCoinBuffer(att) {
+    if (typeof fetch !== 'function') return { error: 'Image fetching isn\'t available on this host right now.' };
+    const ct = (att.contentType || '').toLowerCase();
+    if (!/^image\/(png|jpe?g|webp)/.test(ct)) return { error: 'Please upload a **PNG or JPG** image.' };
+    const base = att.proxyURL || att.url;
+    const sep = base.includes('?') ? '&' : '?';
+    const candidates = [`${base}${sep}width=400&height=400`, `${base}${sep}width=256&height=256`, att.url];
+    for (const u of candidates) {
+      try {
+        const res = await fetch(u);
+        if (!res || !res.ok) continue;
+        const buf = Buffer.from(await res.arrayBuffer());
+        if (buf.length > 0 && buf.length <= 3 * 1024 * 1024) return { buf, mime: ct.startsWith('image/jp') ? 'image/jpeg' : 'image/png' };
+      } catch { /* next */ }
+    }
+    return { error: 'I couldn\'t fetch that image (must be a PNG/JPG under 3MB). Try a smaller, square image.' };
+  }
+
+  async function startCoinFlow(interaction) {
+    const gid = interaction.guildId, uid = interaction.user.id;
+    const backRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('hub:home').setLabel('← Back to Hub').setStyle(ButtonStyle.Secondary));
+    if (!isBoosting(interaction)) {
+      return interaction.reply({ content: '⭐ Custom coins are a booster-only perk.', flags: 64 });
+    }
+    const prev = coinSessions.get(uid);
+    if (prev) { prev.done = true; prev.collector.stop('replaced'); }
+
+    const has = coins.getCustomImage(db, gid, uid);
+    const embed = new EmbedBuilder().setColor(0xE6B840).setTitle('🪙 Custom Coin — upload your image')
+      .setDescription(
+        `Send an image **as a message in this channel** within **60 seconds** and it becomes your coin!\n\n` +
+        `• Square **PNG or JPG** works best (it fills the coin face)\n` +
+        `• **HEADS** / **TAILS** text is added on top automatically\n` +
+        `• The spin animation stays the same — your image shows when the coin lands\n` +
+        `• ⭐ **Free** booster perk${has ? '\n• This replaces your current custom coin' : ''}\n` +
+        `• Lasts while you keep boosting`);
+    const cancelRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('hub:coinCancel').setLabel('Cancel').setStyle(ButtonStyle.Danger));
+    await interaction.update({ content: '', embeds: [embed], components: [cancelRow], files: [], attachments: [] });
+
+    const collector = interaction.channel.createMessageCollector({
+      filter: (m) => m.author.id === uid && m.attachments.size > 0, time: 60_000, max: 1 });
+    const sess = { collector, done: false };
+    coinSessions.set(uid, sess);
+
+    collector.on('collect', async (m) => {
+      if (sess.done) return;
+      sess.done = true; coinSessions.delete(uid);
+      const finish = (color, text, files, attachments) => interaction.editReply({ content: '', embeds: [new EmbedBuilder().setColor(color).setTitle('🪙 Custom Coin').setDescription(text)], components: [coinRetryRow()], files: files || [], attachments: attachments || [] }).catch(() => {});
+      const got = await fetchCoinBuffer(m.attachments.first());
+      if (got.error) return finish(0xE74C3C, `⚠️ ${got.error}\nNothing changed — hit **Try Again**.`);
+      let previewPng;
+      try {
+        // store it, then render a heads preview to confirm
+        coins.setCustomImage(db, gid, uid, got.buf.toString('base64'), got.mime, saveData);
+        previewPng = coins.renderCustomFace(got.buf, got.mime, 'heads');
+      } catch (e) {
+        console.error('[hub coin]', e.message);
+        return finish(0xE74C3C, '⚠️ I couldn\'t process that image. Try a different PNG/JPG.');
+      }
+      m.delete().catch(() => {});
+      setAction(uid, `🪙 Set a custom coin design (booster perk).`);
+      const prev = new AttachmentBuilder(previewPng, { name: 'coin-preview.png' });
+      return finish(0x2ECC71,
+        `✅ Your custom coin is set and equipped! Here's how **heads** will look — **tails** uses the same image.\nIt'll show whenever you win or lose a coin flip. ⭐ Free booster perk.\n*Switch back anytime from Shop → Coin Designs.*`,
+        [prev]);
+    });
+    collector.on('end', (_c, reason) => {
+      if (sess.done || reason === 'cancel' || reason === 'replaced' || reason === 'limit') return;
+      sess.done = true; coinSessions.delete(uid);
+      interaction.editReply({ content: '', embeds: [new EmbedBuilder().setColor(0xE7B41A).setTitle('🪙 Custom Coin').setDescription('⏳ Timed out — no image received. Nothing changed.')], components: [coinRetryRow()], files: [], attachments: [] }).catch(() => {});
     });
   }
 
@@ -1096,7 +1186,8 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi }) {
           new ButtonBuilder().setCustomId('boost:holo').setLabel('Holographic').setEmoji('✨').setStyle(ButtonStyle.Primary),
           new ButtonBuilder().setCustomId('boost:solid').setLabel('Custom Solid (hex)').setEmoji('🎨').setStyle(ButtonStyle.Success),
           new ButtonBuilder().setCustomId('boost:grad').setLabel('Custom Gradient (hex)').setEmoji('🌈').setStyle(ButtonStyle.Success),
-          new ButtonBuilder().setCustomId('boost:icon').setLabel('Role Icon').setEmoji('🖼️').setStyle(ButtonStyle.Primary));
+          new ButtonBuilder().setCustomId('boost:icon').setLabel('Role Icon').setEmoji('🖼️').setStyle(ButtonStyle.Primary),
+          new ButtonBuilder().setCustomId('boost:coin').setLabel('Custom Coin').setEmoji('🪙').setStyle(ButtonStyle.Primary));
         return interaction.update({ embeds: [embed], components: [row, backHubRow()], files: [], attachments: [] });
       }
       // holographic → just a name modal
@@ -1177,6 +1268,17 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi }) {
       if (interaction.isButton() && interaction.customId === 'hub:iconCancel') {
         const sess = iconSessions.get(uid);
         if (sess) { sess.done = true; sess.collector.stop('cancel'); iconSessions.delete(uid); }
+        const boosting = isBoosting(interaction);
+        return interaction.update({ content: '', embeds: [hubEmbed(boosting, uid, gid)], components: hubComponents(boosting), files: [], attachments: [] });
+      }
+      // Booster Custom Coin upload
+      if (interaction.isButton() && interaction.customId === 'boost:coin') {
+        if (!isBoosting(interaction)) return interaction.reply({ content: '⭐ Custom coins are a booster-only perk.', flags: 64 });
+        return startCoinFlow(interaction);
+      }
+      if (interaction.isButton() && interaction.customId === 'hub:coinCancel') {
+        const sess = coinSessions.get(uid);
+        if (sess) { sess.done = true; sess.collector.stop('cancel'); coinSessions.delete(uid); }
         const boosting = isBoosting(interaction);
         return interaction.update({ content: '', embeds: [hubEmbed(boosting, uid, gid)], components: hubComponents(boosting), files: [], attachments: [] });
       }
