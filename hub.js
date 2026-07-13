@@ -297,7 +297,7 @@ function getShopCommands() {
   ];
 }
 
-function initShop({ client, db, saveData, runFlip, warApi, gachaApi }) {
+function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeView }) {
   const stateOf = (gid) => shopState(db, gid);
 
   // ── create (or recreate) a member's shop role, removing their previous one ──
@@ -408,6 +408,7 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi }) {
         `⭐ **Boosters Only** — ${isBooster ? '**unlocked!** free holographic & custom-hex roles' : '_boost the server to unlock free premium roles_'}\n` +
         `⚔️ **Clan** — ${inClan ? `manage **${esc(inClan.name)}**` : `create or join a clan (from **${fmt(clans.CLAN_CREATE_COST)} Dinar**)`}\n` +
         `🃏 **Collection** — your cards, daily Dinar, leaderboards & wishlist\n` +
+        `💱 **Exchange Rate** — latest Libyan black-market currency rates\n` +
         `❓ **Help** — how everything works\n\n` +
         `*More coming soon…*`);
     if (uid) e.setAuthor({ name: `💰 ${fmt(bal)} Dinar` });
@@ -422,7 +423,8 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi }) {
     new ButtonBuilder().setCustomId('hub:help').setLabel('Help').setEmoji('❓').setStyle(ButtonStyle.Secondary));
   const hubRow2 = () => new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('hub:clan').setLabel('Clan').setEmoji('⚔️').setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId('hub:collection').setLabel('Collection').setEmoji('🃏').setStyle(ButtonStyle.Primary));
+    new ButtonBuilder().setCustomId('hub:collection').setLabel('Collection').setEmoji('🃏').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('hub:exchange').setLabel('Exchange Rate').setEmoji('💱').setStyle(ButtonStyle.Secondary).setDisabled(!exchangeView));
   const hubComponents = (isBooster) => [hubRow(isBooster), hubRow2()];
   const backHubRow = () => new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('hub:home').setLabel('← Back to Hub').setStyle(ButtonStyle.Secondary));
@@ -1402,6 +1404,22 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi }) {
 
       // ═══════════════ COLLECTION HANDLERS ═══════════════
       if (interaction.isButton() && interaction.customId === 'hub:collection') return interaction.update(collectionHome(gid, uid));
+      // Exchange Rate — shows the last pulled rates instantly (no refresh)
+      if (interaction.isButton() && interaction.customId === 'hub:exchange') {
+        if (!exchangeView) return interaction.reply({ content: 'The exchange rate feature isn\'t available right now.', flags: 64 });
+        await interaction.deferUpdate();
+        let view;
+        try { view = await exchangeView(db, gid); }
+        catch (e) { view = null; }
+        if (!view) {
+          return interaction.editReply({ content: '💱 No exchange rate has been saved yet — an admin needs to set it up with `/exchange-set-channel` first.', embeds: [], components: [backHubOnly()], files: [], attachments: [] });
+        }
+        // append a back-to-hub row beneath the currency chart buttons (respecting the 5-row max)
+        const rows = (view.components || []).slice(0, 4);
+        rows.push(new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId('hub:home').setLabel('← Back to Hub').setStyle(ButtonStyle.Secondary)));
+        return interaction.editReply({ content: '', embeds: view.embeds, files: view.files || [], attachments: [], components: rows });
+      }
       if (interaction.isButton() && interaction.customId === 'col:mine')       return interaction.update(myCardsView(gid, uid));
       if (interaction.isButton() && interaction.customId === 'col:wishlist')   return interaction.update(wishlistView(gid, uid));
       if (interaction.isButton() && interaction.customId === 'col:boardCollectors') return interaction.update(boardView(gid, 'collectors'));
