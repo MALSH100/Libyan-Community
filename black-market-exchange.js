@@ -21,9 +21,9 @@ const MAX_HISTORY        = 72;              // up to 72 stored rate CHANGES (his
 // All currencies from the dollar2day API. Flags/symbols are for Discord embeds;
 // the SVG chart uses only ASCII-safe symbols (SYM below) since it has no emoji font.
 const CURRENCY_META = {
-  USD: { flag: '💵', name: 'US Dollar' },
-  EUR: { flag: '💶', name: 'Euro' },
-  GBP: { flag: '💷', name: 'British Pound' },
+  USD: { flag: '🇺🇸', name: 'US Dollar' },
+  EUR: { flag: '🇪🇺', name: 'Euro' },
+  GBP: { flag: '🇬🇧', name: 'British Pound' },
   TRY: { flag: '🇹🇷', name: 'Turkish Lira' },
   TND: { flag: '🇹🇳', name: 'Tunisian Dinar' },
   EGP: { flag: '🇪🇬', name: 'Egyptian Pound' },
@@ -261,7 +261,6 @@ function buildRateEmbed(exchangeData, latest, forced = false) {
   const siteNote   = latest.siteTimestamp
     ? `\nSource last updated: ${latest.siteTimestamp}`
     : '';
-  const srcName    = latest.source || 'dollar2day.com';
 
   const embed = new EmbedBuilder()
     .setColor(0x1B8F5A)
@@ -274,7 +273,7 @@ function buildRateEmbed(exchangeData, latest, forced = false) {
     )
     .setTimestamp(new Date(latest.scrapedAt || Date.now()))
     .setFooter({
-      text: `Source: ${srcName} • Checked every 5h, posts when USD/EUR/GBP move • Created & Designed by Captain`,
+      text: `Checked every 5h • Created & Designed by Captain`,
     });
 
   for (const currency of CURRENCIES) {
@@ -289,7 +288,7 @@ function buildRateEmbed(exchangeData, latest, forced = false) {
       const off = latest.official && latest.official[currency];
       if (off != null && off > 0) {
         const gap = Math.round(((value - off) / off) * 100);
-        line += `\nOfficial: ${fmtRate(off)} (${gap >= 0 ? '+' : ''}${gap}%)`;
+        line += `\nOfficial Rate: ${fmtRate(off)} (${gap >= 0 ? '+' : ''}${gap}%)`;
       }
     }
     embed.addFields({ name: `${meta.flag} ${currency}`, value: line, inline: true });
@@ -497,14 +496,14 @@ function buildChartSvg(history, mainCurrency = 'USD') {
     : `${last.ts.getUTCDate()} ${MONTHS[last.ts.getUTCMonth()]} ${last.ts.getUTCFullYear()}`)
     + `  ·  last change ${staleTxt}`;
 
-  // Legend
+  // Legend — green on the left half, red on the right half, with a clear gap between them
   const legY  = H - 14;
   const legCX = W / 2;
   const legend = [
-    `<rect x="${legCX - 170}" y="${legY - 10}" width="12" height="12" rx="2" fill="${GREEN}"/>`,
-    `<text x="${legCX - 154}" y="${legY}" font-family="'Segoe UI',Arial,sans-serif" font-size="11" fill="${GREEN}">Green = Dinar Strengthens (Rate Falls)</text>`,
-    `<rect x="${legCX + 60}" y="${legY - 10}" width="12" height="12" rx="2" fill="${RED}"/>`,
-    `<text x="${legCX + 76}" y="${legY}" font-family="'Segoe UI',Arial,sans-serif" font-size="11" fill="${RED}">Red = Dinar Weakens (Rate Rises)</text>`,
+    `<rect x="${legCX - 250}" y="${legY - 10}" width="12" height="12" rx="2" fill="${GREEN}"/>`,
+    `<text x="${legCX - 234}" y="${legY}" font-family="'Segoe UI',Arial,sans-serif" font-size="11" fill="${GREEN}">Green = Dinar Strengthens (Rate Falls)</text>`,
+    `<rect x="${legCX + 40}" y="${legY - 10}" width="12" height="12" rx="2" fill="${RED}"/>`,
+    `<text x="${legCX + 56}" y="${legY}" font-family="'Segoe UI',Arial,sans-serif" font-size="11" fill="${RED}">Red = Dinar Weakens (Rate Rises)</text>`,
   ].join('\n');
 
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -525,7 +524,7 @@ function buildChartSvg(history, mainCurrency = 'USD') {
   </g>
   ${priceTag.join('\n  ')}
   ${xLabels.join('\n  ')}
-  <text x="${pad.left}" y="26" font-family="'Segoe UI',Arial,sans-serif" font-size="15" font-weight="700" fill="#f9fafb">${svgEscape(cName)} / LYD</text>
+  <text x="${pad.left}" y="26" font-family="'Segoe UI',Arial,sans-serif" font-size="15" font-weight="700" fill="#f9fafb">Black Market Rate - ${svgEscape(cName)} / Libyan Dinar</text>
   <text x="${pad.left}" y="46" font-family="'Segoe UI',Arial,sans-serif" font-size="11" fill="#6b7280">${svgEscape(dateRange)}</text>
   <text x="${pad.left + plotW}" y="26" text-anchor="end" font-family="'Segoe UI',Arial,sans-serif" font-size="20" font-weight="700" fill="#f9fafb">${sym}${fmtRate(last.close)} LYD</text>
   <text x="${pad.left + plotW}" y="46" text-anchor="end" font-family="'Segoe UI',Arial,sans-serif" font-size="12" font-weight="600" fill="${deltaColor}">${deltaArrow} ${svgEscape(deltaTxt)}</text>
@@ -810,6 +809,22 @@ module.exports = function initBlackMarketExchange({ client, db, saveData }) {
 };
 
 module.exports.commands         = exchangeCommands;
+// Hub API: render the latest saved rate (embed + USD chart + currency buttons).
+// The hub calls this so its Exchange button shows the last pulled rates instantly, no new fetch.
+module.exports.getHubView = async function (db, guildId) {
+  const exchangeData = getExchangeData(db, guildId);
+  const latest = exchangeData.lastRates;
+  if (!latest) return null;
+  const embed = buildRateEmbed(exchangeData, latest, false);
+  const payload = { embeds: [embed], components: chartButtonRows(guildId) };
+  try {
+    const att = await chartAttachment(exchangeData, 'USD');
+    embed.setImage(`attachment://${att.name}`);
+    payload.files = [att];
+  } catch (e) { /* show without chart if render fails */ }
+  return payload;
+};
+
 module.exports.parseRatesFromHtml = async function (html) {
   const cheerio = require('cheerio');
   const $       = cheerio.load(html);
