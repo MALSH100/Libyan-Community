@@ -13,10 +13,31 @@ const {
   ButtonStyle,
 } = require('discord.js');
 
-const SOURCE_URL        = 'https://en.blackmarketlive.org/lyd/';
-const SCRAPE_INTERVAL_MS = 5 * 60 * 60 * 1000; // 5 hours — source updates only ~1-2x/week, so hourly was wasteful
+const SOURCE_URL        = 'https://en.blackmarketlive.org/lyd/';   // fallback scrape source (USD/EUR/GBP only)
+const API_URL           = 'https://www.dollar2day.com/wp-json/dollar2day/v1/rates'; // primary source — parallel + official, 11 currencies
+const SCRAPE_INTERVAL_MS = 5 * 60 * 60 * 1000; // 5 hours
 const MAX_HISTORY        = 72;              // up to 72 stored rate CHANGES (history only grows when the rate moves)
-const CURRENCIES         = ['USD', 'EUR', 'GBP'];
+
+// All currencies from the dollar2day API. Flags/symbols are for Discord embeds;
+// the SVG chart uses only ASCII-safe symbols (SYM below) since it has no emoji font.
+const CURRENCY_META = {
+  USD: { flag: '💵', name: 'US Dollar' },
+  EUR: { flag: '💶', name: 'Euro' },
+  GBP: { flag: '💷', name: 'British Pound' },
+  TRY: { flag: '🇹🇷', name: 'Turkish Lira' },
+  TND: { flag: '🇹🇳', name: 'Tunisian Dinar' },
+  EGP: { flag: '🇪🇬', name: 'Egyptian Pound' },
+  AED: { flag: '🇦🇪', name: 'UAE Dirham' },
+  SAR: { flag: '🇸🇦', name: 'Saudi Riyal' },
+  CNY: { flag: '🇨🇳', name: 'Chinese Yuan' },
+  DZD: { flag: '🇩🇿', name: 'Algerian Dinar' },
+  MAD: { flag: '🇲🇦', name: 'Moroccan Dirham' },
+};
+const CURRENCIES       = Object.keys(CURRENCY_META);
+const MAJOR_CURRENCIES = ['USD', 'EUR', 'GBP'];   // auto-posts trigger only when one of these moves
+
+// small rates (DZD 0.042, TRY 0.22) need 3 decimals to be meaningful
+const fmtRate = (v) => (v == null ? null : (v >= 1 ? v.toFixed(2) : v.toFixed(3)));
 
 // ---------------------------------------------------------------------------
 // Slash commands (unchanged from original — no breaking changes)
@@ -70,6 +91,12 @@ function getExchangeData(db, guildId) {
 function rateKey(rates) {
   return CURRENCIES.map(c => `${c}:${rates[c] ?? 'na'}`).join('|');
 }
+// Auto-posts trigger only on major-currency moves — otherwise tiny TRY/DZD
+// fluctuations would spam the channel several times a day. This key matches the
+// old stored lastPostedKey format exactly, so deploys don't cause a false repost.
+function majorKey(rates) {
+  return MAJOR_CURRENCIES.map(c => `${c}:${rates[c] ?? 'na'}`).join('|');
+}
 
 // ---------------------------------------------------------------------------
 // Scraper — simple HTTP fetch + cheerio, no browser required
@@ -79,6 +106,59 @@ function rateKey(rates) {
  * Fetches the exchange rate page and parses the USD, EUR, and GBP rates.
  * Returns { rates: { USD, EUR, GBP }, scrapedAt, sourceUrl, siteTimestamp }
  */
+// ---------------------------------------------------------------------------
+// Primary source: the dollar2day.com public JSON API (parallel + official, 11 currencies).
+// Attribution is required by their terms — the embed footer credits dollar2day.com.
+// ---------------------------------------------------------------------------
+async function fetchDollar2Day() {
+  const res = await fetch(API_URL, {
+    headers: {
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ' +
+        'AppleWebKit/537.36 (KHTML, like Gecko) ' +
+        'Chrome/124.0.0.0 Safari/537.36',
+      'Accept': 'application/json',
+    },
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status} fetching dollar2day API`);
+  const json = await res.json();
+  if (!json || !json.rates) throw new Error('dollar2day API returned no rates object');
+
+  const rates = {}, official = {};
+  for (const c of CURRENCIES) {
+    const r = json.rates[c.toLowerCase()];
+    rates[c]    = (r && typeof r.parallel === 'number' && r.parallel > 0) ? Math.round(r.parallel * 1000) / 1000 : null;
+    official[c] = (r && typeof r.official === 'number' && r.official > 0) ? Math.round(r.official * 1000) / 1000 : null;
+  }
+  if (CURRENCIES.every(c => rates[c] == null)) throw new Error('dollar2day API returned no usable parallel rates');
+
+  console.log(`[Exchange] dollar2day rates: USD=${rates.USD}, EUR=${rates.EUR}, GBP=${rates.GBP} (+${CURRENCIES.filter(c => rates[c] != null).length - 3} more)`);
+  return {
+    rates,
+    official,
+    scrapedAt:     new Date().toISOString(),
+    sourceUrl:     'https://www.dollar2day.com/',
+    source:        'dollar2day.com',
+    siteTimestamp: json.last_update || null,
+  };
+}
+
+// Try the API first; if it's down or unusable, fall back to the old HTML scrape
+// (which only covers USD/EUR/GBP — the other currencies show as unavailable).
+async function getLatestRates() {
+  try {
+    return await fetchDollar2Day();
+  } catch (err) {
+    console.warn(`[Exchange] dollar2day API failed (${err.message}) — falling back to ${SOURCE_URL}`);
+    const scraped = await scrapeRates();
+    for (const c of CURRENCIES) if (!(c in scraped.rates)) scraped.rates[c] = null;
+    scraped.official = {};
+    scraped.source   = 'blackmarketlive.org';
+    return scraped;
+  }
+}
+
 async function scrapeRates() {
   const cheerio = require('cheerio');
 
@@ -135,8 +215,8 @@ async function scrapeRates() {
     }
   });
 
-  const missing = CURRENCIES.filter(c => rates[c] === null);
-  if (missing.length === CURRENCIES.length) {
+  const missing = MAJOR_CURRENCIES.filter(c => rates[c] === null);
+  if (missing.length === MAJOR_CURRENCIES.length) {
     throw new Error(
       `Could not parse any rates from ${SOURCE_URL}. ` +
       'The page structure may have changed.'
@@ -179,31 +259,40 @@ function buildRateEmbed(exchangeData, latest, forced = false) {
   const pulledAt   = new Date(latest.scrapedAt || Date.now())
     .toLocaleString('en-GB', { dateStyle: 'full', timeStyle: 'short' });
   const siteNote   = latest.siteTimestamp
-    ? `\nLast updated: ${latest.siteTimestamp}`
+    ? `\nSource last updated: ${latest.siteTimestamp}`
     : '';
+  const srcName    = latest.source || 'dollar2day.com';
 
   const embed = new EmbedBuilder()
     .setColor(0x1B8F5A)
     .setTitle('🇱🇾 Libyan Black Market Exchange Rate')
     .setDescription(
       (forced ? `Manual refresh — pulled on ` : `Rates pulled on `) +
-      pulledAt + siteNote
+      pulledAt + siteNote +
+      `\nParallel-market prices in LYD${latest.official && Object.values(latest.official).some(v => v != null) ? ' · official Central Bank rate shown underneath' : ''}` +
+      `\n*Tap a currency button below for its chart.*`
     )
     .setTimestamp(new Date(latest.scrapedAt || Date.now()))
     .setFooter({
-      text: 'Live Libyan Black Market Rates • Checked every 5h, posts on change • Created & Designed by Captain',
+      text: `Source: ${srcName} • Checked every 5h, posts when USD/EUR/GBP move • Created & Designed by Captain`,
     });
 
   for (const currency of CURRENCIES) {
+    const meta  = CURRENCY_META[currency];
     const value = latest.rates[currency];
     const t     = trend(history.slice(0, -1), currency, value);
-    embed.addFields({
-      name:   currency,
-      value:  value == null
-        ? 'Not available'
-        : `**${value.toFixed(2)} LYD**\n${t.label}`,
-      inline: true,
-    });
+    let line;
+    if (value == null) {
+      line = 'Not available';
+    } else {
+      line = `**${fmtRate(value)} LYD**\n${t.label}`;
+      const off = latest.official && latest.official[currency];
+      if (off != null && off > 0) {
+        const gap = Math.round(((value - off) / off) * 100);
+        line += `\nOfficial: ${fmtRate(off)} (${gap >= 0 ? '+' : ''}${gap}%)`;
+      }
+    }
+    embed.addFields({ name: `${meta.flag} ${currency}`, value: line, inline: true });
   }
 
   return embed;
@@ -387,14 +476,13 @@ function buildChartSvg(history, mainCurrency = 'USD') {
   const priceTag  = [
     `<line x1="${pad.left}" y1="${lastY.toFixed(1)}" x2="${(TAG_X - 2).toFixed(1)}" y2="${lastY.toFixed(1)}" stroke="${tagColor}" stroke-width="1" stroke-dasharray="3,3" opacity="0.55"/>`,
     `<rect x="${TAG_X}" y="${(lastY - TAG_H / 2).toFixed(1)}" width="${TAG_W}" height="${TAG_H}" rx="4" fill="${tagColor}"/>`,
-    `<text x="${(TAG_X + TAG_W / 2).toFixed(1)}" y="${(lastY + 5).toFixed(1)}" text-anchor="middle" font-family="'Segoe UI',Arial,sans-serif" font-size="12" font-weight="700" fill="#ffffff">${last.close.toFixed(2)}</text>`,
+    `<text x="${(TAG_X + TAG_W / 2).toFixed(1)}" y="${(lastY + 5).toFixed(1)}" text-anchor="middle" font-family="'Segoe UI',Arial,sans-serif" font-size="12" font-weight="700" fill="#ffffff">${fmtRate(last.close)}</text>`,
   ];
 
-  // Header
-  const SYM   = { USD: '$', EUR: '€', GBP: '£' };
-  const NAMES = { USD: 'US Dollar', EUR: 'Euro', GBP: 'British Pound' };
+  // Header — symbols limited to glyphs DejaVu Sans definitely has; others show the code
+  const SYM   = { USD: '$', EUR: '€', GBP: '£', CNY: '¥' };
   const sym   = SYM[mainCurrency] || '';
-  const cName = NAMES[mainCurrency] || mainCurrency;
+  const cName = (CURRENCY_META[mainCurrency] && CURRENCY_META[mainCurrency].name) || mainCurrency;
 
   const periodDelta = candles.length > 1 ? last.close - candles[0].close : 0;
   const deltaTxt    = (periodDelta > 0 ? '+' : '') + periodDelta.toFixed(3);
@@ -439,13 +527,17 @@ function buildChartSvg(history, mainCurrency = 'USD') {
   ${xLabels.join('\n  ')}
   <text x="${pad.left}" y="26" font-family="'Segoe UI',Arial,sans-serif" font-size="15" font-weight="700" fill="#f9fafb">${svgEscape(cName)} / LYD</text>
   <text x="${pad.left}" y="46" font-family="'Segoe UI',Arial,sans-serif" font-size="11" fill="#6b7280">${svgEscape(dateRange)}</text>
-  <text x="${pad.left + plotW}" y="26" text-anchor="end" font-family="'Segoe UI',Arial,sans-serif" font-size="20" font-weight="700" fill="#f9fafb">${sym}${last.close.toFixed(2)} LYD</text>
+  <text x="${pad.left + plotW}" y="26" text-anchor="end" font-family="'Segoe UI',Arial,sans-serif" font-size="20" font-weight="700" fill="#f9fafb">${sym}${fmtRate(last.close)} LYD</text>
   <text x="${pad.left + plotW}" y="46" text-anchor="end" font-family="'Segoe UI',Arial,sans-serif" font-size="12" font-weight="600" fill="${deltaColor}">${deltaArrow} ${svgEscape(deltaTxt)}</text>
   ${legend}
 </svg>`;
 }
 
-const FONT_PATH = require('path').join(__dirname, 'fonts', 'DejaVuSans.ttf');
+const FONT_CANDIDATES = [
+  require('path').join(__dirname, 'fonts', 'DejaVuSans.ttf'),
+  require('path').join(__dirname, 'DejaVuSans.ttf'),          // repo root (where it's committed)
+];
+const FONT_PATH = FONT_CANDIDATES.find(f => { try { return require('fs').existsSync(f); } catch { return false; } }) || FONT_CANDIDATES[0];
 
 async function svgToPngBuffer(svgString) {
   // Lightweight SVG → PNG rasterizer (replaces the old headless-Chromium one,
@@ -471,6 +563,23 @@ async function chartAttachment(exchangeData, currency = 'USD') {
   return new AttachmentBuilder(pngBuffer, { name: `libya-exchange-chart-${currency}.png` });
 }
 
+// one chart button per currency, rows of 5 (Discord's per-row limit)
+function chartButtonRows(guildId) {
+  const rows = [];
+  let row = new ActionRowBuilder();
+  CURRENCIES.forEach((c, i) => {
+    if (i > 0 && i % 5 === 0) { rows.push(row); row = new ActionRowBuilder(); }
+    row.addComponents(
+      new ButtonBuilder()
+        .setCustomId(`chart_${c.toLowerCase()}_${guildId}`)
+        .setLabel(c)
+        .setEmoji(CURRENCY_META[c].flag)
+        .setStyle(ButtonStyle.Secondary));
+  });
+  rows.push(row);
+  return rows;
+}
+
 // ---------------------------------------------------------------------------
 // Post to Discord channel
 // ---------------------------------------------------------------------------
@@ -479,12 +588,17 @@ async function postUpdate(client, guildId, exchangeData, latest, forced = false)
   const channel = await client.channels.fetch(exchangeData.channelId).catch(() => null);
   if (!channel || !channel.isTextBased()) return false;
 
-  // Chart and buttons removed for a clean usage test — post only the text rate
-  // embed (USD / EUR / GBP). Because chartAttachment() is no longer called, the
-  // SVG renderer (@resvg/resvg-js) never loads at runtime. To bring the chart
-  // back, restore the chartAttachment / setImage / button-row block here.
   const embed = buildRateEmbed(exchangeData, latest, forced);
-  await channel.send({ embeds: [embed] });
+  const payload = { embeds: [embed], components: chartButtonRows(guildId) };
+  // attach the USD chart by default; buttons swap it to any other currency
+  try {
+    const att = await chartAttachment(exchangeData, 'USD');
+    embed.setImage(`attachment://${att.name}`);
+    payload.files = [att];
+  } catch (err) {
+    console.warn(`[Exchange] Chart render failed (posting without it): ${err.message}`);
+  }
+  await channel.send(payload);
   return true;
 }
 
@@ -497,19 +611,22 @@ async function updateRates({ client, db, saveData, guildId, forcePost = false })
 
   let latest;
   try {
-    latest = await scrapeRates();
+    latest = await getLatestRates();
   } catch (err) {
-    console.error(`[Exchange] Scrape failed: ${err.message}`);
+    console.error(`[Exchange] Rate fetch failed: ${err.message}`);
     throw err;
   }
 
-  const key     = rateKey(latest.rates);
-  const changed = key !== exchangeData.lastPostedKey;
+  const fullKey     = rateKey(latest.rates);
+  const prevFullKey = exchangeData.lastRates ? rateKey(exchangeData.lastRates.rates) : null;
+  const changedAny  = fullKey !== prevFullKey;                 // any of the 11 moved → record history
+  const mKey        = majorKey(latest.rates);
+  const changed     = mKey !== exchangeData.lastPostedKey;     // USD/EUR/GBP moved → auto-post
 
   exchangeData.lastRates = latest;
   exchangeData.history   = exchangeData.history || [];
 
-  if (forcePost || changed) {
+  if (forcePost || changedAny) {
     // One entry per hour: replace today's existing entry if rates are
     // the same hour, otherwise append.
     const thisHour = new Date(latest.scrapedAt).toISOString().slice(0, 13); // "YYYY-MM-DDTHH"
@@ -523,7 +640,7 @@ async function updateRates({ client, db, saveData, guildId, forcePost = false })
   let posted = false;
   if (forcePost || changed) {
     posted = await postUpdate(client, guildId, exchangeData, latest, forcePost);
-    if (posted) exchangeData.lastPostedKey = key;
+    if (posted) exchangeData.lastPostedKey = mKey;
   }
 
   saveData(guildId);
@@ -582,24 +699,32 @@ module.exports = function initBlackMarketExchange({ client, db, saveData }) {
   });
 
   client.on('interactionCreate', async interaction => {
-    // --- Chart button handler ---
-    if (interaction.isButton()) {
-      const { customId } = interaction;
-      if (
-        customId.startsWith('chart_usd_') ||
-        customId.startsWith('chart_eur_') ||
-        customId.startsWith('chart_gbp_')
-      ) {
-        // Charts are disabled. These buttons only exist on messages posted
-        // before the chart was removed. Acknowledge them without rendering, so
-        // the SVG renderer never loads. (Delete this block once no old chart
-        // messages remain in the channel.)
-        await interaction.reply({
-          content: 'Charts are currently disabled — only the live rates are posted.',
-          ephemeral: true,
-        }).catch(() => {});
-        return;
+    // --- Chart button handler (all currencies; also revives old chart_usd_/eur_/gbp_ buttons) ---
+    if (interaction.isButton() && /^chart_[a-z]{3}_/.test(interaction.customId)) {
+      const cur = interaction.customId.split('_')[1].toUpperCase();
+      if (!CURRENCIES.includes(cur)) {
+        return interaction.reply({ content: 'Unknown currency.', flags: 64 }).catch(() => {});
       }
+      const exchangeData = getExchangeData(db, interaction.guildId);
+      if (!exchangeData.lastRates) {
+        return interaction.reply({ content: 'No rate data saved yet.', flags: 64 }).catch(() => {});
+      }
+      try {
+        await interaction.deferUpdate();
+        const att   = await chartAttachment(exchangeData, cur);
+        const embed = buildRateEmbed(exchangeData, exchangeData.lastRates, false)
+          .setImage(`attachment://${att.name}`);
+        await interaction.editReply({
+          embeds: [embed],
+          files: [att],
+          attachments: [],   // drop the previous chart attachment
+          components: chartButtonRows(interaction.guildId),
+        });
+      } catch (err) {
+        console.error(`[Exchange] Chart button failed (${cur}): ${err.message}`);
+        await interaction.followUp({ content: `❌ Couldn't render the ${cur} chart: ${err.message?.slice(0, 150)}`, flags: 64 }).catch(() => {});
+      }
+      return;
     }
 
     // --- Slash commands ---
@@ -634,7 +759,14 @@ module.exports = function initBlackMarketExchange({ client, db, saveData }) {
         const latest = exchangeData.lastRates;
         if (!latest)
           return safeReply(interaction, { content: 'No exchange rate has been saved yet.', flags: 64 });
-        return safeReply(interaction, { embeds: [buildRateEmbed(exchangeData, latest, true)], flags: 64 });
+        const embed = buildRateEmbed(exchangeData, latest, true);
+        const payload = { embeds: [embed], components: chartButtonRows(guild.id), flags: 64 };
+        try {
+          const att = await chartAttachment(exchangeData, 'USD');
+          embed.setImage(`attachment://${att.name}`);
+          payload.files = [att];
+        } catch { /* post without chart if render fails */ }
+        return safeReply(interaction, payload);
       }
 
       // ── /exchange-refresh ──────────────────────────────────────────────────
@@ -664,7 +796,8 @@ module.exports = function initBlackMarketExchange({ client, db, saveData }) {
         let msg = '**Last 5 exchange rate entries (oldest → newest):**\n';
         lastFew.forEach((entry, i) => {
           const d = new Date(entry.scrapedAt);
-          msg += `\n${i + 1}. ${d.toLocaleString('en-GB')}: USD=${entry.rates.USD ?? 'N/A'}, EUR=${entry.rates.EUR ?? 'N/A'}, GBP=${entry.rates.GBP ?? 'N/A'}`;
+          const stored = CURRENCIES.filter(c => entry.rates && entry.rates[c] != null).length;
+          msg += `\n${i + 1}. ${d.toLocaleString('en-GB')}: USD=${entry.rates.USD ?? 'N/A'}, EUR=${entry.rates.EUR ?? 'N/A'}, GBP=${entry.rates.GBP ?? 'N/A'} (${stored}/${CURRENCIES.length} currencies stored)`;
         });
         return safeReply(interaction, { content: msg, flags: 64 });
       }
