@@ -2550,7 +2550,7 @@ initBattleCards({ client, db, saveData, awardLP });
 // Diyar — Libyan conquest game (Dinar economy)
 initDiyar({ client, db, saveData, awardLP });
 initLotto({ client, db, saveData });
-initShop({ client, db, saveData, runFlip: gachaApi && gachaApi.runFlip, warApi: hubWarApi, gachaApi: gachaApi && gachaApi.hubApi });
+initShop({ client, db, saveData, runFlip: gachaApi && gachaApi.runFlip, warApi: hubWarApi, gachaApi: gachaApi && gachaApi.hubApi, exchangeView: initBlackMarketExchange.getHubView });
 
 // Translator (reaction-based Arabic → English)
 //initTranslator(client, db, saveData);
