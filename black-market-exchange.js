@@ -16,7 +16,7 @@ const {
 const SOURCE_URL        = 'https://en.blackmarketlive.org/lyd/';   // legacy scrape (unused now, kept for reference)
 const API_URL           = 'https://libyadollar.usdtoegp.com/api/api_blackmarket_all.php'; // primary — parallel rates by id
 const DOLLAR2DAY_URL    = 'https://www.dollar2day.com/wp-json/dollar2day/v1/rates';        // fallback source
-const SCRAPE_INTERVAL_MS = 5 * 60 * 60 * 1000; // 5 hours
+const SCRAPE_INTERVAL_MS = 1 * 60 * 60 * 1000; // 1 hour
 const MAX_HISTORY        = 72;              // up to 72 stored rate CHANGES (history only grows when the rate moves)
 
 // The 7 currencies we display, mapped to the libyadollar API's numeric id.
@@ -297,8 +297,10 @@ function trend(history, currency, latestValue) {
 // ---------------------------------------------------------------------------
 function buildRateEmbed(exchangeData, latest, forced = false) {
   const history    = exchangeData.history || [];
-  const pulledAt   = new Date(latest.scrapedAt || Date.now())
-    .toLocaleString('en-GB', { dateStyle: 'full', timeStyle: 'short' });
+  // Discord renders <t:UNIX:...> in each viewer's OWN local timezone automatically,
+  // so everyone sees their own clock. :F = full date+time, :R = "2 hours ago".
+  const unix       = Math.floor(new Date(latest.scrapedAt || Date.now()).getTime() / 1000);
+  const pulledAt   = `<t:${unix}:F> (<t:${unix}:R>)`;
   const siteNote   = latest.siteTimestamp
     ? `\nSource last updated: ${latest.siteTimestamp}`
     : '';
@@ -307,14 +309,14 @@ function buildRateEmbed(exchangeData, latest, forced = false) {
     .setColor(0x1B8F5A)
     .setTitle('🇱🇾 Libyan Black Market Exchange Rate')
     .setDescription(
-      (forced ? `Manual refresh — pulled on ` : `Rates pulled on `) +
+      (forced ? `Manual refresh — pulled ` : `Rates pulled `) +
       pulledAt + siteNote +
       `\nParallel-market prices in LYD` +
       `\n*Tap a currency button below for its chart.*`
     )
     .setTimestamp(new Date(latest.scrapedAt || Date.now()))
     .setFooter({
-      text: `USD shown is the Tripoli rate • Checked every 5h • Created & Designed by Captain`,
+      text: `USD shown is the Tripoli rate • Checked hourly • Created & Designed by Captain`,
     });
 
   for (const currency of CURRENCIES) {
