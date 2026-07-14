@@ -24,6 +24,10 @@ const { getDinar, spendDinar, awardDinar } = require('./gacha');
 const coins = require('./coinskins');
 const clans = require('./clanfns');
 
+// Channel where clan join-request alerts (new request / accepted / declined) are posted,
+// and where leaders/officers get pinged. Set to null to disable the dedicated alerts channel.
+const CLAN_ALERTS_CHANNEL_ID = '908343919287341096';
+
 // ── prices & lifetime ──
 const PRICE_SOLID    = 800;
 const PRICE_GRADIENT = 1500;
@@ -299,6 +303,23 @@ function getShopCommands() {
 
 function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeView }) {
   const stateOf = (gid) => shopState(db, gid);
+
+  // Post a clan alert. Prefers the dedicated alerts channel; falls back to the clan's own
+  // channel, then the interaction channel. `pingIds` are mentioned (leaders/officers or requester).
+  async function clanAlert(guild, clan, content, pingIds, fallbackChannel) {
+    let channel = null;
+    if (CLAN_ALERTS_CHANNEL_ID) {
+      channel = guild.channels.cache.get(CLAN_ALERTS_CHANNEL_ID)
+        || await guild.channels.fetch(CLAN_ALERTS_CHANNEL_ID).catch(() => null);
+    }
+    if (!channel && clan && clan.channelId) channel = guild.channels.cache.get(clan.channelId) || null;
+    if (!channel) channel = fallbackChannel || null;
+    if (!channel || typeof channel.send !== 'function') return;
+    await channel.send({
+      content,
+      allowedMentions: { users: (pingIds || []).slice(0, 20) },
+    }).catch((e) => console.error('[clan alert] send failed:', e.message));
+  }
 
   // ── create (or recreate) a member's shop role, removing their previous one ──
   // kind: 'solid' | 'gradient' | 'holo' | 'customSolid' | 'customGrad'
@@ -1350,11 +1371,16 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
         const res = clans.requestJoin(db, saveData, gid, uid, cname);
         if (res.error) return interaction.update({ content: `⚠️ ${res.error}`, embeds: [], components: [backHubOnly()], files: [], attachments: [] });
         setAction(uid, `📤 Requested to join **${esc(cname)}**.`);
-        // ping the clan channel so leaders/officers see it, if the clan has one
+        // Alert the clan's leader + officers in the alerts channel (and/or clan channel)
         const clan = db[gid][cname];
-        if (clan && clan.channelId) {
-          const ch = interaction.guild.channels.cache.get(clan.channelId);
-          if (ch) ch.send({ content: `📥 <@${uid}> has requested to join **${esc(cname)}**! A Leader or Officer can approve via \`/hub\` → Clan → Join Requests.` }).catch(() => {});
+        if (clan) {
+          const officers = [clan.leader, ...(clan.officers || [])].filter(Boolean);
+          await clanAlert(
+            interaction.guild, clan,
+            `📥 ${officers.map(id => `<@${id}>`).join(' ')} — <@${uid}> has requested to join **${esc(cname)}**!\nApprove or decline via \`/hub\` → Clan → 📥 Join Requests.`,
+            officers.concat(uid),
+            interaction.channel,
+          );
         }
         const msg = res.replaced && !res.sameClan ? ` (replaced your request to ${esc(res.replaced)})` : '';
         return interaction.update({ content: `📤 Request sent to **${esc(cname)}**${msg}! You'll be added — and charged **${fmt(clans.CLAN_JOIN_COST)} Dinar** — once a Leader or Officer accepts. No charge if declined.`, embeds: [], components: [backHubOnly()], files: [], attachments: [] });
@@ -1445,11 +1471,14 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
         const res = await clans.acceptRequest(db, saveData, interaction.guild, uid, requesterId, clans.CLAN_JOIN_COST, getDinar, spendDinar);
         if (res.error) return interaction.editReply(Object.assign(clanRequestsView(gid, uid), { content: `⚠️ ${res.error}` }));
         setAction(uid, `✅ Accepted <@${requesterId}> into the clan.`);
-        // public ping in the clan channel (or current channel as fallback)
         const clan = db[gid][res.clanName];
-        const pingCh = (clan && clan.channelId && interaction.guild.channels.cache.get(clan.channelId)) || interaction.channel;
-        if (pingCh) pingCh.send({ content: `🎉 <@${requesterId}> has been accepted into **${esc(res.clanName)}**! Welcome!`, allowedMentions: { users: [requesterId] } }).catch(() => {});
-        return interaction.editReply(clanRequestsView(gid, uid));
+        await clanAlert(
+          interaction.guild, clan,
+          `🎉 <@${requesterId}> has been accepted into **${esc(res.clanName)}**! Welcome!` + (res.roleWarning ? `\n⚠️ (${res.roleWarning})` : ''),
+          [requesterId],
+          interaction.channel,
+        );
+        return interaction.editReply(Object.assign(clanRequestsView(gid, uid), res.roleWarning ? { content: `✅ Accepted <@${requesterId}> — but ${res.roleWarning}` } : {}));
       }
       if (interaction.isButton() && interaction.customId.startsWith('clan:reqDecline:')) {
         const requesterId = interaction.customId.split(':')[2];
@@ -1458,8 +1487,12 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
         if (res.error) return interaction.editReply(Object.assign(clanRequestsView(gid, uid), { content: `⚠️ ${res.error}` }));
         setAction(uid, `❌ Declined <@${requesterId}>'s join request.`);
         const clan = db[gid][res.clanName];
-        const pingCh = (clan && clan.channelId && interaction.guild.channels.cache.get(clan.channelId)) || interaction.channel;
-        if (pingCh) pingCh.send({ content: `<@${requesterId}>, your request to join **${esc(res.clanName)}** was declined. No Dinar was charged.`, allowedMentions: { users: [requesterId] } }).catch(() => {});
+        await clanAlert(
+          interaction.guild, clan,
+          `<@${requesterId}>, your request to join **${esc(res.clanName)}** was declined. No Dinar was charged.`,
+          [requesterId],
+          interaction.channel,
+        );
         return interaction.editReply(clanRequestsView(gid, uid));
       }
 

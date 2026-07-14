@@ -333,16 +333,28 @@ async function acceptRequest(db, saveData, guild, actorId, requesterId, joinCost
   if (!req || req.clanName !== mine.name) return { error: 'That request no longer exists.' };
   if (req.expiresAt <= Date.now()) { delete store[requesterId]; saveData(guild.id); return { error: 'That request has expired.' }; }
   if (userClan(db, guild.id, requesterId)) { delete store[requesterId]; saveData(guild.id); return { error: 'That user is already in a clan.' }; }
-  if (getDinar(db, guild.id, requesterId) < joinCost) {
+  let bal = 0;
+  try { bal = getDinar(db, guild.id, requesterId); } catch (e) { console.error('[clan accept] getDinar failed:', e.message); }
+  if (bal < joinCost) {
     return { error: `That member no longer has the **${joinCost.toLocaleString()} Dinar** join fee — request kept pending.`, insufficient: true };
   }
   normaliseClan(mine.clan);
-  await assignRankRole(guild, mine.clan, requesterId, 'Member');
-  mine.clan.members.push(requesterId);
-  spendDinar(db, guild.id, requesterId, joinCost, saveData);   // charged only on accept
+  // Add to the clan + charge + clear the request FIRST, so the join always completes even if
+  // Discord role assignment fails (e.g. missing Manage Roles / role hierarchy). The role is
+  // best-effort and must never block or silently abort the accept.
+  if (!mine.clan.members.includes(requesterId)) mine.clan.members.push(requesterId);
+  try { spendDinar(db, guild.id, requesterId, joinCost, saveData); }
+  catch (e) { console.error('[clan accept] spendDinar failed:', e.message); }
   delete store[requesterId];
   saveData(guild.id);
-  return { ok: true, clanName: mine.name };
+  let roleWarning = null;
+  try {
+    await assignRankRole(guild, mine.clan, requesterId, 'Member');
+  } catch (e) {
+    console.error('[clan accept] assignRankRole threw:', e.message);
+    roleWarning = 'joined, but I couldn\'t assign the clan role — check my Manage Roles permission and role position.';
+  }
+  return { ok: true, clanName: mine.name, roleWarning };
 }
 function declineRequest(db, saveData, guild, actorId, requesterId) {
   const mine = userClan(db, guild.id, actorId);
