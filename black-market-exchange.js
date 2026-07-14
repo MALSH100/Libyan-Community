@@ -13,30 +13,28 @@ const {
   ButtonStyle,
 } = require('discord.js');
 
-const SOURCE_URL        = 'https://en.blackmarketlive.org/lyd/';   // fallback scrape source (USD/EUR/GBP only)
-const API_URL           = 'https://www.dollar2day.com/wp-json/dollar2day/v1/rates'; // primary source — parallel + official, 11 currencies
+const SOURCE_URL        = 'https://en.blackmarketlive.org/lyd/';   // legacy scrape (unused now, kept for reference)
+const API_URL           = 'https://libyadollar.usdtoegp.com/api/api_blackmarket_all.php'; // primary — parallel rates by id
+const DOLLAR2DAY_URL    = 'https://www.dollar2day.com/wp-json/dollar2day/v1/rates';        // fallback source
 const SCRAPE_INTERVAL_MS = 5 * 60 * 60 * 1000; // 5 hours
 const MAX_HISTORY        = 72;              // up to 72 stored rate CHANGES (history only grows when the rate moves)
 
-// All currencies from the dollar2day API. Flags/symbols are for Discord embeds;
-// the SVG chart uses only ASCII-safe symbols (SYM below) since it has no emoji font.
+// The 7 currencies we display, mapped to the libyadollar API's numeric id.
+// USD uses id 1 (the Tripoli rate) and is shown simply as "USD".
+// d2d = the currency key on the dollar2day fallback API.
 const CURRENCY_META = {
-  USD: { flag: '🇺🇸', name: 'US Dollar' },
-  EUR: { flag: '🇪🇺', name: 'Euro' },
-  GBP: { flag: '🇬🇧', name: 'British Pound' },
-  TRY: { flag: '🇹🇷', name: 'Turkish Lira' },
-  TND: { flag: '🇹🇳', name: 'Tunisian Dinar' },
-  EGP: { flag: '🇪🇬', name: 'Egyptian Pound' },
-  AED: { flag: '🇦🇪', name: 'UAE Dirham' },
-  SAR: { flag: '🇸🇦', name: 'Saudi Riyal' },
-  CNY: { flag: '🇨🇳', name: 'Chinese Yuan' },
-  DZD: { flag: '🇩🇿', name: 'Algerian Dinar' },
-  MAD: { flag: '🇲🇦', name: 'Moroccan Dirham' },
+  USD: { flag: '🇺🇸', name: 'US Dollar',       id: 1,  d2d: 'usd' },
+  EUR: { flag: '🇪🇺', name: 'Euro',            id: 12, d2d: 'eur' },
+  GBP: { flag: '🇬🇧', name: 'British Pound',   id: 13, d2d: 'gbp' },
+  EGP: { flag: '🇪🇬', name: 'Egyptian Pound',  id: 11, d2d: 'egp' },
+  TND: { flag: '🇹🇳', name: 'Tunisian Dinar',  id: 15, d2d: 'tnd' },
+  TRY: { flag: '🇹🇷', name: 'Turkish Lira',    id: 16, d2d: 'try' },
+  JOD: { flag: '🇯🇴', name: 'Jordanian Dinar', id: 14, d2d: null },
 };
 const CURRENCIES       = Object.keys(CURRENCY_META);
 const MAJOR_CURRENCIES = ['USD', 'EUR', 'GBP'];   // auto-posts trigger only when one of these moves
 
-// small rates (DZD 0.042, TRY 0.22) need 3 decimals to be meaningful
+// small rates (EGP 0.17, TRY 0.18) need 3 decimals to be meaningful
 const fmtRate = (v) => (v == null ? null : (v >= 1 ? v.toFixed(2) : v.toFixed(3)));
 
 // ---------------------------------------------------------------------------
@@ -107,11 +105,53 @@ function majorKey(rates) {
  * Returns { rates: { USD, EUR, GBP }, scrapedAt, sourceUrl, siteTimestamp }
  */
 // ---------------------------------------------------------------------------
-// Primary source: the dollar2day.com public JSON API (parallel + official, 11 currencies).
-// Attribution is required by their terms — the embed footer credits dollar2day.com.
+// Primary source: the libyadollar.usdtoegp.com app API. Returns an array of
+// { id, p (price/parallel rate in LYD), d (daily change) } keyed by numeric id.
+// This feed has no official rate — only the parallel/black-market price.
 // ---------------------------------------------------------------------------
-async function fetchDollar2Day() {
+async function fetchLibyaDollar() {
   const res = await fetch(API_URL, {
+    headers: {
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ' +
+        'AppleWebKit/537.36 (KHTML, like Gecko) ' +
+        'Chrome/124.0.0.0 Safari/537.36',
+      'Accept': 'application/json, text/plain, */*',
+      'Accept-Language': 'en-US,en;q=0.9,ar;q=0.8',
+    },
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status} fetching libyadollar API`);
+  const json = await res.json();
+  if (!Array.isArray(json)) throw new Error('libyadollar API did not return an array');
+
+  // index the array by id for quick lookup
+  const byId = {};
+  for (const row of json) if (row && typeof row.id === 'number') byId[row.id] = row;
+
+  const rates = {}, changes = {};
+  for (const c of CURRENCIES) {
+    const row = byId[CURRENCY_META[c].id];
+    rates[c]   = (row && typeof row.p === 'number' && row.p > 0) ? row.p : null;
+    changes[c] = (row && typeof row.d === 'number') ? row.d : null;
+  }
+  if (CURRENCIES.every(c => rates[c] == null)) throw new Error('libyadollar API returned no usable rates');
+
+  console.log(`[Exchange] libyadollar rates: USD(Tripoli)=${rates.USD}, EUR=${rates.EUR}, GBP=${rates.GBP} (+${CURRENCIES.filter(c => rates[c] != null).length - 3} more)`);
+  return {
+    rates,
+    changes,                 // source's own daily delta per currency
+    official: {},            // this feed has no official rate
+    scrapedAt:     new Date().toISOString(),
+    sourceUrl:     'https://libyadollar.usdtoegp.com/',
+    source:        'libyadollar',
+    siteTimestamp: null,
+  };
+}
+
+// Fallback source: dollar2day.com public API (used only if libyadollar is down).
+async function fetchDollar2Day() {
+  const res = await fetch(DOLLAR2DAY_URL, {
     headers: {
       'User-Agent':
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ' +
@@ -129,37 +169,34 @@ async function fetchDollar2Day() {
   const json = await res.json();
   if (!json || !json.rates) throw new Error('dollar2day API returned no rates object');
 
-  const rates = {}, official = {};
+  const rates = {}, changes = {};
   for (const c of CURRENCIES) {
-    const r = json.rates[c.toLowerCase()];
-    rates[c]    = (r && typeof r.parallel === 'number' && r.parallel > 0) ? Math.round(r.parallel * 1000) / 1000 : null;
-    official[c] = (r && typeof r.official === 'number' && r.official > 0) ? Math.round(r.official * 1000) / 1000 : null;
+    const key = CURRENCY_META[c].d2d;           // JOD isn't on dollar2day → null
+    const r   = key && json.rates[key];
+    rates[c]   = (r && typeof r.parallel === 'number' && r.parallel > 0) ? Math.round(r.parallel * 1000) / 1000 : null;
+    changes[c] = null;
   }
   if (CURRENCIES.every(c => rates[c] == null)) throw new Error('dollar2day API returned no usable parallel rates');
 
-  console.log(`[Exchange] dollar2day rates: USD=${rates.USD}, EUR=${rates.EUR}, GBP=${rates.GBP} (+${CURRENCIES.filter(c => rates[c] != null).length - 3} more)`);
+  console.log(`[Exchange] (fallback) dollar2day rates: USD=${rates.USD}, EUR=${rates.EUR}, GBP=${rates.GBP}`);
   return {
     rates,
-    official,
+    changes,
+    official:      {},
     scrapedAt:     new Date().toISOString(),
     sourceUrl:     'https://www.dollar2day.com/',
-    source:        'dollar2day.com',
+    source:        'dollar2day',
     siteTimestamp: json.last_update || null,
   };
 }
 
-// Try the API first; if it's down or unusable, fall back to the old HTML scrape
-// (which only covers USD/EUR/GBP — the other currencies show as unavailable).
+// Try the primary (libyadollar) first; fall back to dollar2day if it's down.
 async function getLatestRates() {
   try {
-    return await fetchDollar2Day();
+    return await fetchLibyaDollar();
   } catch (err) {
-    console.warn(`[Exchange] dollar2day API failed (${err.message}) — falling back to ${SOURCE_URL}`);
-    const scraped = await scrapeRates();
-    for (const c of CURRENCIES) if (!(c in scraped.rates)) scraped.rates[c] = null;
-    scraped.official = {};
-    scraped.source   = 'blackmarketlive.org';
-    return scraped;
+    console.warn(`[Exchange] libyadollar API failed (${err.message}) — falling back to dollar2day`);
+    return await fetchDollar2Day();
   }
 }
 
@@ -272,28 +309,33 @@ function buildRateEmbed(exchangeData, latest, forced = false) {
     .setDescription(
       (forced ? `Manual refresh — pulled on ` : `Rates pulled on `) +
       pulledAt + siteNote +
-      `\nParallel-market prices in LYD${latest.official && Object.values(latest.official).some(v => v != null) ? ' · official Central Bank rate shown underneath' : ''}` +
+      `\nParallel-market prices in LYD` +
       `\n*Tap a currency button below for its chart.*`
     )
     .setTimestamp(new Date(latest.scrapedAt || Date.now()))
     .setFooter({
-      text: `Checked every 5h • Created & Designed by Captain`,
+      text: `USD shown is the Tripoli rate • Checked every 5h • Created & Designed by Captain`,
     });
 
   for (const currency of CURRENCIES) {
-    const meta  = CURRENCY_META[currency];
-    const value = latest.rates[currency];
-    const t     = trend(history.slice(0, -1), currency, value);
+    const meta   = CURRENCY_META[currency];
+    const value  = latest.rates[currency];
     let line;
     if (value == null) {
       line = 'Not available';
     } else {
-      line = `**${fmtRate(value)} LYD**\n${t.label}`;
-      const off = latest.official && latest.official[currency];
-      if (off != null && off > 0) {
-        const gap = Math.round(((value - off) / off) * 100);
-        line += `\nOfficial Rate: ${fmtRate(off)} (${gap >= 0 ? '+' : ''}${gap}%)`;
+      // Prefer the source's own daily change (d); fall back to computed trend from history
+      const d = latest.changes && latest.changes[currency];
+      let trendLabel;
+      if (typeof d === 'number' && d !== 0) {
+        const arrow = d > 0 ? '🔺' : '🔻';
+        trendLabel = `${arrow} ${d > 0 ? '+' : '−'}${fmtRate(Math.abs(d))} today`;
+      } else if (typeof d === 'number' && d === 0) {
+        trendLabel = '➖ No change today';
+      } else {
+        trendLabel = trend(history.slice(0, -1), currency, value).label;
       }
+      line = `**${fmtRate(value)} LYD**\n${trendLabel}`;
     }
     embed.addFields({ name: `${meta.flag} ${currency}`, value: line, inline: true });
   }
