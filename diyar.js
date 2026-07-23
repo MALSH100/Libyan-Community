@@ -31,7 +31,7 @@ const MATCH_BAND          = 3.0;                   // can't punch down: target s
 const LOOT_BY_LEVEL       = [0, 50, 80, 120];       // minted raid loot by city level (defender loses nothing)
 const INCOME_BY_LEVEL     = [0, 15, 20, 40];       // Dinar/hour by city level (small/med/big)
 const INCOME_CAP_HRS      = 12;                    // accrual caps at 12h, so you must collect
- const COLLECT_COOLDOWN_MS = 90 * 60 * 1000;       // can only collect once per 90 min
+const COLLECT_COOLDOWN_MS = 2 * 24 * 60 * 60 * 1000; // can only collect once per 2 days
 const UPG_MAX             = 10;
 const UPG_BASE            = { mil: 240, for: 200, eco: 180 };   // cost = base × (level+1)
 const TRIBUTE_BASE        = 40;                    // daily login reward (capped mint, async-friendly)
@@ -47,12 +47,12 @@ const upgCost = (track, lvl) => UPG_BASE[track] * (lvl + 1) * (lvl >= 3 ? 2 : 1)
 const BOSS_DURATION_MS    = 20 * 60 * 1000;       // the siege lasts 20 minutes
 const BOSS_STRIKE_CD_MS   = 3 * 1000;             // per-player strike cooldown (3s)
 const THREAT_TICK_MS      = 3000;                  // live message edit + siege damage tick
-const THREAT_DMG_MIN      = 1;                     // garrison damage per tick per city (min)
-const THREAT_DMG_MAX      = 2;                     // garrison damage per tick per city (max)
-const THREAT_CITY_DMG_CAP = 800;                   // total damage cap per city — it weakens, never demolishes
+const THREAT_DMG_MIN      = 4;                     // garrison damage per tick per city (min)
+const THREAT_DMG_MAX      = 5;                     // garrison damage per tick per city (max)
+const THREAT_CITY_DMG_CAP = 900;                   // total damage cap per city — it weakens, never demolishes
 const THREAT_GARRISON_FLOOR = 20;                  // never grinds a garrison below this
-const BOSS_HP_MIN         = 1000;                  // threat HP rolls randomly between these
-const BOSS_HP_MAX         = 3000;
+const BOSS_HP_MIN         = 3000;                  // threat HP rolls randomly between these
+const BOSS_HP_MAX         = 8000;
 const BOSS_HP_PER_PLAYER  = 0;                     // flat HP (raise this to scale with player count)
 const BOSS_SPAWNS_PER_DAY = 2;
 const BOSS_WIN_START      = 11;                    // Libya-time window for spawns
