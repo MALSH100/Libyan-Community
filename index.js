@@ -514,16 +514,8 @@ new SlashCommandBuilder()
   new SlashCommandBuilder().setName('clan-transfer').setDescription('Transfer leadership to another member (Leader only)')
     .addUserOption(o => o.setName('user').setDescription('Member to transfer to').setRequired(true)),
   new SlashCommandBuilder().setName('clan-channel-create').setDescription('Create a private clan channel (Leader only)'),
-  new SlashCommandBuilder().setName('clan-channel-link').setDescription('Set THIS channel as your clan\'s Pokémon spawn channel (Leader only)'),
   new SlashCommandBuilder().setName('clan-channel-delete').setDescription('Delete the private clan channel (Leader only)'),
-  new SlashCommandBuilder().setName('clan-pokemon').setDescription('Turn Pokémon spawns & item drops on/off in your clan channel (Leader/Officer)')
-    .setDMPermission(false)
-    .addStringOption(o => o.setName('state').setDescription('Turn spawns & item drops on or off').setRequired(true)
-      .addChoices(
-        { name: 'off — disable spawns & item drops', value: 'off' },
-        { name: 'on — enable spawns & item drops',  value: 'on'  },
-      )),
-  new SlashCommandBuilder().setName('clan-war').setDescription('Challenge another clan to a war (Leader/Officer)')
+    new SlashCommandBuilder().setName('clan-war').setDescription('Challenge another clan to a war (Leader/Officer)')
     .addStringOption(o => o.setName('clan').setDescription('Name of the clan to challenge').setRequired(true)),
   new SlashCommandBuilder().setName('clan-war-accept').setDescription('Accept a pending clan war challenge (Leader/Officer)'),
   new SlashCommandBuilder().setName('clan-war-decline').setDescription('Decline a pending clan war challenge (Leader/Officer)'),
@@ -535,7 +527,7 @@ new SlashCommandBuilder()
 
 let _allCommands = null; // reset on each startup — always re-registers
 
-const getPokemonCommands = require('./pokemon-commands');
+// Pokémon removed — pokemon-commands no longer required.
 const initYarayt = require('./yarayt');
 const initBlackMarketExchange = require('./black-market-exchange');
 //const initLibyaNews = require('./libya-news');
@@ -554,18 +546,14 @@ const { getShopCommands, initShop } = require('./hub');
 
 function getAllCommands() {
   if (_allCommands) return _allCommands;
-  let pokeCommands = [];
+  let pokeCommands = [];   // Pokémon removed — no commands registered
   let yaraytCommands = [];
   let exchangeCommands = [];
   let newsCommands = [];
   let jobsCommands = [];
   let translatorCommands = [];   // ADD
   let potdCommands = [];
-  try {
-    pokeCommands = getPokemonCommands();
-  } catch (e) {
-    console.error('⚠️ Could not load pokemon-commands.js:', e.message);
-  }
+  // Pokémon feature removed (unused). Command loading intentionally skipped to free command slots.
   try {
     exchangeCommands = initBlackMarketExchange.commands || [];
   } catch (e) {
@@ -703,8 +691,7 @@ client.once('clientReady', async () => {
   // Small delay for Railway network to stabilise
   setTimeout(() => registerCommands(), 2000);
 
-  // Start pokemon spawn timers now that db is fully loaded
-  startSpawnTimers();
+  // Pokémon removed — spawn timers no longer started.
 });
 
 // No need for guildCreate registration with global commands
@@ -1766,18 +1753,12 @@ async function handleCommand(interaction, commandName, user, guild) {
           { name: '🏰 Management', value: ['`/clan-create <name>` — Create a clan', '`/clan-disband` — Delete your clan *(Leader)*', '`/clan-rename <name> [emoji]` *(Leader)*', '`/clan-description <text>` *(Leader/Officer)*', '`/clan-motto <text>` *(Leader/Officer)*', '`/clan-ranks <member> <officer> <leader>` *(Leader)*'].join('\n') },
           { name: '👥 Membership', value: ['`/clan-invite @user` *(Leader/Officer)*', '`/clan-invite-accept`', '`/clan-invite-decline`', '`/clan-kick @user` *(Leader/Officer)*', '`/clan-leave`'].join('\n') },
           { name: '🛡️ Ranks', value: ['`/clan-promote @user` *(Leader)*', '`/clan-demote @user` *(Leader)*', '`/clan-transfer @user` *(Leader)*'].join('\n') },
-          { name: '📢 Channel & Wars', value: ['`/clan-channel-create` *(Leader)*', '`/clan-channel-link` — set spawn channel *(Leader)*', '`/clan-channel-delete` *(Leader)*', '`/clan-war <clan>` *(Leader/Officer)*', '`/clan-war-accept` *(Leader/Officer)*', '`/clan-war-decline` *(Leader/Officer)*'].join('\n') },
+          { name: '📢 Channel & Wars', value: ['`/clan-channel-create` *(Leader)*', '`/clan-channel-delete` *(Leader)*', '`/clan-war <clan>` *(Leader/Officer)*', '`/clan-war-accept` *(Leader/Officer)*', '`/clan-war-decline` *(Leader/Officer)*'].join('\n') },
         ).setFooter({ text: 'Page 1 of 8 — use buttons to navigate' }),
 
-      new EmbedBuilder().setColor(0xFF0000).setTitle('🎮 Libyan Community Bot — Page 2/8: Pokémon')
+      new EmbedBuilder().setColor(0xFF0000).setTitle('🎴 Libyan Community Bot — Page 2/8: Card Games')
         .addFields(
-          { name: '🌿 Catching', value: ['`/pokemon-team` — Your Pokémon', '`/pokemon-stats <slot>` — Detailed stats + XP bar', '`/pokemon-view @user` — View someone\'s Pokémon', '`/pokemon-release <slot>` — Release a Pokémon', '`/pokemon-nickname <slot> <name>` — Nickname', '`/pokemon-info <name>` — Look up any Pokémon'].join('\n') },
-          { name: '⚔️ Battles', value: ['`/pokemon-challenge @user <slot>` — Challenge to 1v1', '`/pokemon-accept <slot>` — Accept challenge', '`/pokemon-decline` — Decline challenge'].join('\n') },
-          { name: '🎒 Items', value: ['`/pokemon-bag` — Your item bag', '`/pokemon-claim` — Claim item drop in clan channel'].join('\n') },
-          { name: '🎴 Card Games', value: ['`/battlecards @user [target] [bet]` — Duel: secret cards, highest wins, first to 3 or 5', '`/battlecards-leaderboard` — Top duelists', '`/battlecards-stats [user]` — Win/loss record', '*Wins give LP 🏅 + optional Dinar wager 💰*'].join('\n') },
-          { name: '⚙️ Clan Channel', value: '`/clan-pokemon <on/off>` — Turn spawns & item drops on or off in your clan channel *(Leader/Officer)*' },
-          { name: '📊 Stats', value: ['`/pokemon-leaderboard` — Clan Pokémon rankings', '`/pokemon-server` — Server top Pokémon by wins', '`/pokedex` — Clan Pokédex completion'].join('\n') },
-          { name: '⏱️ Timings', value: 'Wild Pokémon spawn every **5 hours**, flee after **3 hours**\nItem drops every **7 hours**, expire after **5 hours**\nShiny chance: 1 in 50 🌟' },
+          { name: '🎴 Battle Cards', value: ['`/battlecards @user [target] [bet]` — Duel: secret cards, highest wins, first to 3 or 5', '`/battlecards-leaderboard` — Top duelists', '`/battlecards-stats [user]` — Win/loss record', '*Wins give LP 🏅 + optional Dinar wager 💰*'].join('\n') },
         ).setFooter({ text: 'Page 2 of 8 — use buttons to navigate' }),
 
       new EmbedBuilder().setColor(0xFFD700).setTitle('🏅 Libyan Community Bot — Page 3/8: Rank Permissions')
@@ -2520,9 +2501,11 @@ function shutdown(signal) {
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT',  () => shutdown('SIGINT'));
 
-// ─── Pokemon System ───────────────────────────────────────────────────────────
-
-const { startSpawnTimers, scheduleSpawnFor } = require('./pokemon')({ client, db, saveData, getGuildClans, getUserClan, awardLP });
+// ─── Pokemon System (REMOVED) ──────────────────────────────────────────────────
+// The Pokémon feature was removed (unused). Engine no longer loaded; no spawns.
+// Stubs kept so any lingering references are harmless no-ops.
+const startSpawnTimers = () => {};
+const scheduleSpawnFor = () => {};
 
 // ─── Ya Rayt System ───────────────────────────────────────────────────────────
 
