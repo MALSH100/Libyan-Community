@@ -240,6 +240,49 @@ function shopState(db, guildId) {
   return data.__shop;
 }
 
+// Work out where a bot-created custom role should sit so mods can still moderate the
+// people who own it. Discord rule: you can only action a member whose HIGHEST role is
+// BELOW your own highest role. So custom roles must sit below the mod role, not just
+// below the bot. We find the lowest-positioned role that carries a moderation
+// permission (ModerateMembers / KickMembers / BanMembers / ManageRoles, but NOT the
+// bot's own role) and place the custom role just beneath it. Falls back to just-under-
+// the-bot only if no such role exists.
+//
+// `db[gid].__shop.modRoleId` (set via /hub-mod-role) overrides auto-detection if present.
+function customRoleTargetPosition(guild, db) {
+  const me = guild.members.me;
+  const botTop = me ? me.roles.highest.position : 1;
+  let ceiling = botTop; // never at/above the bot (it must stay able to manage the role)
+
+  // explicit override
+  let lowestModPos = null;
+  const overrideId = db && db[guild.id] && db[guild.id].__shop && db[guild.id].__shop.modRoleId;
+  if (overrideId) {
+    const r = guild.roles.cache.get(overrideId);
+    if (r) lowestModPos = r.position;
+  }
+
+  if (lowestModPos == null) {
+    // auto-detect: lowest role (above @everyone) that can moderate, excluding the bot's own managed role
+    const modPerms = ['ModerateMembers', 'KickMembers', 'BanMembers', 'ManageRoles', 'Administrator'];
+    for (const role of guild.roles.cache.values()) {
+      if (role.id === guild.id) continue;                       // @everyone
+      if (me && role.id === me.roles.highest.id) continue;      // the bot's top role
+      if (role.managed && me && role.members && role.members.has(me.id)) continue; // bot integration roles
+      const canMod = modPerms.some(p => { try { return role.permissions.has(p); } catch { return false; } });
+      if (!canMod) continue;
+      if (lowestModPos == null || role.position < lowestModPos) lowestModPos = role.position;
+    }
+  }
+
+  // We want to sit BELOW the mod role. Target = one under the lowest mod role, but still
+  // under the bot. If no mod role found, fall back to just under the bot (old behaviour).
+  let target;
+  if (lowestModPos != null) target = Math.min(ceiling - 1, lowestModPos - 1);
+  else                      target = ceiling - 1;
+  return Math.max(1, target);
+}
+
 // ── daily-streak helpers (Libya-time calendar day with a one-day grace window) ──
 function libyaDayNumber(nowMs) {
   // integer day index in Libya time; consecutive days differ by exactly 1
@@ -298,6 +341,12 @@ function streakLeaderboard(state, nowMs) {
 function getShopCommands() {
   return [
     new SlashCommandBuilder().setName('hub').setDescription('Open the community hub — custom roles, coin flip, daily streak & more').toJSON(),
+    new SlashCommandBuilder()
+      .setName('hub-mod-role')
+      .setDescription('Set the moderator role — bot-made custom roles will always sit below it (admin only)')
+      .addRoleOption(o => o.setName('role').setDescription('Your moderator role (custom roles go below this). Leave empty to auto-detect.').setRequired(false))
+      .setDefaultMemberPermissions(0)   // admins only (Manage Server / Administrator via 0 = no default, admin override)
+      .toJSON(),
   ];
 }
 
@@ -351,11 +400,12 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
     } else {
       role = await guild.roles.create({ ...baseOpts, colors: { primaryColor: solid.hex } });
     }
-    // position just under the bot's highest role so the colour actually shows and can be assigned
+    // Position the role BELOW the mod role so moderators can still punish people who own
+    // it (Discord only lets you action members whose highest role is below yours). Falls
+    // back to just-under-the-bot if no mod role can be identified.
     try {
-      const me = guild.members.me;
-      const top = me.roles.highest.position;
-      await role.setPosition(Math.max(1, top - 1)).catch(() => {});
+      const target = customRoleTargetPosition(guild, db);
+      await role.setPosition(target).catch(() => {});
     } catch { /* best effort */ }
     await member.roles.add(role, 'Hub role').catch(() => { throw new Error('assign-failed'); });
     // booster roles have no timed expiry — the sweep removes them if the member stops boosting
@@ -1153,6 +1203,23 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
   client.on('interactionCreate', async (interaction) => {
     try {
       // /hub
+      if (interaction.isChatInputCommand() && interaction.commandName === 'hub-mod-role') {
+        if (!interaction.guildId) return interaction.reply({ content: 'Use this in the server.', flags: 64 });
+        // admin check
+        const isAdmin = interaction.memberPermissions?.has('Administrator') || interaction.memberPermissions?.has('ManageGuild');
+        if (!isAdmin) return interaction.reply({ content: '❌ You need **Manage Server** or **Administrator** to set the mod role.', flags: 64 });
+        const role = interaction.options.getRole('role');
+        const st = shopState(db, interaction.guildId);
+        if (role) {
+          st.modRoleId = role.id;
+          saveData(interaction.guildId);
+          return interaction.reply({ content: `✅ Mod role set to **${esc(role.name)}**. New custom roles from the hub will always be placed **below** it so moderators can act on their owners.\n\n*Note: this only affects roles created from now on. Existing custom roles that sit too high may need repositioning once — I can add a re-sort if you want.*`, flags: 64 });
+        } else {
+          delete st.modRoleId;
+          saveData(interaction.guildId);
+          return interaction.reply({ content: '✅ Cleared the manual mod role. I\'ll **auto-detect** it instead — I place custom roles below the lowest role that can moderate (kick/ban/timeout/manage roles).', flags: 64 });
+        }
+      }
       if (interaction.isChatInputCommand() && interaction.commandName === 'hub') {
         if (!interaction.guildId) return interaction.reply({ content: 'Use this in the server.', flags: 64 });
         const boosting = isBoosting(interaction);
