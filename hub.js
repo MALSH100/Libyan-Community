@@ -1280,21 +1280,35 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
     try {
       if (message.author?.bot || !message.guild) return;
       const content = (message.content || '').trim().toLowerCase();
-      if (content !== '!cardimg' && !content.startsWith('!cardimg')) return;
+      if (!content.startsWith('!cardimg')) return;
+      console.log(`[profile] !cardimg from ${message.author.id} — attachments: ${message.attachments?.size || 0}`);
       const att = message.attachments?.first();
-      if (!att || !att.contentType || !att.contentType.startsWith('image/')) {
-        return message.reply('Attach an image (PNG/JPG/GIF) with the message `!cardimg` to add it to your card.').catch(()=>{});
+      if (!att) {
+        return message.reply('📎 Attach an image **in the same message** as `!cardimg` (drag the image in, then type `!cardimg` as the caption before sending).').catch(()=>{});
       }
-      if (att.size > 4 * 1024 * 1024) return message.reply('That image is too large — please keep it under 4MB.').catch(()=>{});
-      const res = await fetch(att.url, { signal: AbortSignal.timeout(10000) }).catch(()=>null);
-      if (!res || !res.ok) return message.reply('Couldn\'t download that image, try again.').catch(()=>{});
+      // contentType is sometimes null on Discord — fall back to the filename extension
+      const name = (att.name || '').toLowerCase();
+      const extOk = /\.(png|jpe?g|gif|webp)$/.test(name);
+      const typeOk = att.contentType && att.contentType.startsWith('image/');
+      if (!typeOk && !extOk) {
+        return message.reply(`That doesn't look like an image (got \`${att.contentType || name || 'unknown'}\`). Use a PNG, JPG, GIF or WEBP.`).catch(()=>{});
+      }
+      if (att.size > 8 * 1024 * 1024) return message.reply('That image is too large — please keep it under 8MB.').catch(()=>{});
+      const res = await fetch(att.url, { signal: AbortSignal.timeout(12000) }).catch((e)=>{ console.error('[profile] image fetch error:', e.message); return null; });
+      if (!res || !res.ok) return message.reply('Couldn\'t download that image — try uploading it again.').catch(()=>{});
       const buf = Buffer.from(await res.arrayBuffer());
-      const mime = att.contentType.split(';')[0];
+      // derive mime from contentType, else from extension
+      let mime = att.contentType && att.contentType.startsWith('image/') ? att.contentType.split(';')[0] : null;
+      if (!mime) mime = name.endsWith('.png') ? 'image/png' : name.endsWith('.gif') ? 'image/gif' : name.endsWith('.webp') ? 'image/webp' : 'image/jpeg';
       const dataUri = `data:${mime};base64,${buf.toString('base64')}`;
       const key = profileApi.addUserImage(message.guild.id, message.author.id, dataUri);
       profileApi.addElement(message.guild.id, message.author.id, 'sticker', { imageKey: key, circle: false });
-      await message.reply('🖼️ Added to your card! Open **/hub → 🪪 My Profile → Edit Layout** to position and resize it.').catch(()=>{});
-    } catch (e) { console.error('[profile] image upload failed:', e.message); }
+      console.log(`[profile] image stored for ${message.author.id} (key=${key}, ${(buf.length/1024).toFixed(0)}KB, ${mime})`);
+      await message.reply('🖼️ **Added to your card!** Open **/hub → 🪪 My Profile → Edit Layout** to position and resize it (it starts near the top-left).').catch(()=>{});
+    } catch (e) {
+      console.error('[profile] image upload failed:', e.message, e.stack?.split('\n')[1]);
+      try { await message.reply('⚠️ Something went wrong adding that image. Check the logs or try again.'); } catch {}
+    }
   });
 
   client.on('interactionCreate', async (interaction) => {
