@@ -169,6 +169,136 @@ function toggleHeart(db, gid, uid, voterId, saveData) {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
+// LAYOUT / EDITOR SYSTEM  (Path A — customizable card)
+//
+// Each user has a `layout` describing a free-form card:
+//   { elements: [ {id, type, x, y, w, h, rot, z, data} ], stats: [statKeys...] }
+// Elements render in z-order on top of the equipped background+frame. Types:
+//   'text'    data:{ text, font, size, color, bold }
+//   'sticker' data:{ imageKey }            (custom uploaded image, stored base64)
+//   'stat'    data:{ stat }                (a live stat block: dinar, flips, etc.)
+//   'image'   data:{ imageKey, circle }    (uploaded background/photo element)
+// Custom uploaded images live in p.images[uid][imageKey] = dataURI (base64), so the
+// renderer is fully self-contained (resvg embeds them; no network at render time).
+//
+// Fonts available to text elements (all must exist as files, else fall back to DejaVu):
+const FONTS = [
+  { key: 'sans',    name: 'Sans',        family: 'DejaVu Sans' },
+  { key: 'serif',   name: 'Serif',       family: 'DejaVu Serif' },
+  { key: 'mono',    name: 'Monospace',   family: 'DejaVu Sans Mono' },
+];
+const fontByKey = (k) => FONTS.find(f => f.key === k) || FONTS[0];
+
+// Which live stats a user can place as stat elements
+const STAT_DEFS = {
+  dinar:     { label: 'DINAR',       accent: '#fbbf24', get: (s) => fmt(s.dinar) },
+  rank:      { label: 'WEALTH RANK', accent: '#f9fafb', get: (s) => s.wealthRank ? `#${s.wealthRank}` : 'Unranked' },
+  flips:     { label: 'COIN FLIPS',  accent: '#34d399', get: (s) => `${(s.flip||{}).wins||0}W / ${(s.flip||{}).losses||0}L` },
+  winrate:   { label: 'WIN RATE',    accent: '#38bdf8', get: (s) => `${((s.flip||{}).winPct||0).toFixed(0)}%` },
+  net:       { label: 'NET FLIP',    accent: '#34d399', get: (s) => { const n=(s.flip||{}).net||0; return `${n>=0?'+':''}${fmt(n)}`; } },
+  streak:    { label: 'STREAK',      accent: '#f472b6', get: (s) => { const k=(s.flip||{}).streak||0; return k>0?`${k}W`:k<0?`${Math.abs(k)}L`:'—'; } },
+  cards:     { label: 'CARDS',       accent: '#c4b5fd', get: (s) => `${(s.collection||{}).count||0}` },
+  coin:      { label: 'COIN DESIGN', accent: '#fcd34d', get: (s) => truncate(s.coin || 'Default', 12) },
+  clan:      { label: 'CLAN',        accent: '#a5b4fc', get: (s) => s.clan ? truncate(s.clan.name, 12) : 'None' },
+};
+const STAT_KEYS = Object.keys(STAT_DEFS);
+
+let __eid = 0;
+const newElementId = () => `e${Date.now().toString(36)}${(__eid++).toString(36)}`;
+
+function getLayout(db, gid, uid) {
+  const p = pState(db, gid);
+  const layouts = (p.layouts ||= {});
+  if (!layouts[uid]) layouts[uid] = defaultLayout();
+  return layouts[uid];
+}
+function defaultLayout() {
+  // a sensible starting layout mirroring the classic card: a name text + a row of stat boxes
+  return {
+    custom: false,   // becomes true once the user edits — until then we render the classic template
+    elements: [],
+    stats: ['dinar', 'rank', 'flips', 'winrate', 'net', 'streak', 'cards', 'coin'],
+  };
+}
+function userImages(db, gid, uid) {
+  const p = pState(db, gid);
+  const imgs = (p.images ||= {});
+  return (imgs[uid] ||= {});
+}
+function addUserImage(db, gid, uid, dataUri, saveData) {
+  const imgs = userImages(db, gid, uid);
+  const key = `img${Date.now().toString(36)}${Math.floor(Math.random()*1e4).toString(36)}`;
+  imgs[key] = dataUri;
+  if (saveData) saveData(gid);
+  return key;
+}
+function clampEl(el) {
+  el.x = Math.max(-40, Math.min(CARD_W - 10, el.x));
+  el.y = Math.max(-40, Math.min(CARD_H - 10, el.y));
+  el.w = Math.max(16, Math.min(CARD_W, el.w));
+  el.h = Math.max(16, Math.min(CARD_H, el.h));
+  el.rot = ((el.rot % 360) + 360) % 360;
+  return el;
+}
+function addElement(db, gid, uid, type, data, saveData) {
+  const layout = getLayout(db, gid, uid);
+  layout.custom = true;
+  const maxZ = layout.elements.reduce((m, e) => Math.max(m, e.z || 0), 0);
+  // sensible default size per type
+  const size = type === 'text' ? { w: 240, h: 44 } : type === 'stat' ? { w: 198, h: 70 } : { w: 140, h: 140 };
+  const el = clampEl({ id: newElementId(), type, x: 60, y: 60, ...size, rot: 0, z: maxZ + 1, data: data || {} });
+  layout.elements.push(el);
+  if (saveData) saveData(gid);
+  return el;
+}
+function getElement(db, gid, uid, elId) {
+  return getLayout(db, gid, uid).elements.find(e => e.id === elId) || null;
+}
+function updateElement(db, gid, uid, elId, patch, saveData) {
+  const el = getElement(db, gid, uid, elId);
+  if (!el) return null;
+  Object.assign(el, patch);
+  if (patch.data) el.data = { ...el.data, ...patch.data };
+  clampEl(el);
+  getLayout(db, gid, uid).custom = true;
+  if (saveData) saveData(gid);
+  return el;
+}
+function removeElement(db, gid, uid, elId, saveData) {
+  const layout = getLayout(db, gid, uid);
+  const before = layout.elements.length;
+  layout.elements = layout.elements.filter(e => e.id !== elId);
+  if (saveData) saveData(gid);
+  return layout.elements.length < before;
+}
+function reorderElement(db, gid, uid, elId, dir, saveData) {
+  // dir: 'front' | 'back'
+  const layout = getLayout(db, gid, uid);
+  const el = layout.elements.find(e => e.id === elId);
+  if (!el) return false;
+  const maxZ = layout.elements.reduce((m, e) => Math.max(m, e.z || 0), 0);
+  const minZ = layout.elements.reduce((m, e) => Math.min(m, e.z || 0), 0);
+  el.z = dir === 'front' ? maxZ + 1 : minZ - 1;
+  if (saveData) saveData(gid);
+  return true;
+}
+function toggleStat(db, gid, uid, statKey, saveData) {
+  const layout = getLayout(db, gid, uid);
+  layout.stats ||= [];
+  const i = layout.stats.indexOf(statKey);
+  if (i === -1) layout.stats.push(statKey); else layout.stats.splice(i, 1);
+  layout.custom = true;
+  if (saveData) saveData(gid);
+  return layout.stats.includes(statKey);
+}
+function resetLayout(db, gid, uid, saveData) {
+  const p = pState(db, gid);
+  (p.layouts ||= {})[uid] = defaultLayout();
+  if (saveData) saveData(gid);
+}
+
+
+// ───────────────────────────────────────────────────────────────────────────
 // STATS GATHERING — pulls live data from the other systems for the card.
 // gachaApi (hubApi) gives flip stats via flipBoard, Dinar via balance, collection.
 // ───────────────────────────────────────────────────────────────────────────
@@ -351,12 +481,15 @@ function cardSvg(ctx, gid, member, stats, equip, opts = {}) {
     statBox(gx + (gw+gap)*3, gy+84, gw, 'COIN DESIGN', truncate(stats.coin || 'Default', 12), '#fcd34d'),
   ].join('');
 
-  // hearts badge (top-right) + published stamp
+  // hearts badge (top-right) — heart drawn as a red vector path (the emoji glyph renders
+  // black in DejaVu, so we draw the shape ourselves for a proper red heart)
   const hearts = opts.hearts || 0;
+  const hx = CARD_W - 128, hy = 38;   // heart anchor inside the badge
+  const heartPath = `M ${hx} ${hy+4} C ${hx} ${hy+1}, ${hx-4} ${hy-3}, ${hx-8} ${hy-1} C ${hx-12} ${hy+1}, ${hx-11} ${hy+6}, ${hx} ${hy+13} C ${hx+11} ${hy+6}, ${hx+12} ${hy+1}, ${hx+8} ${hy-1} C ${hx+4} ${hy-3}, ${hx} ${hy+1}, ${hx} ${hy+4} Z`;
   const heartBadge = `<g>
-    <rect x="${CARD_W-150}" y="26" width="120" height="40" rx="20" fill="#000000" fill-opacity="0.35"/>
-    <text x="${CARD_W-124}" y="52" font-family="'DejaVu Sans'" font-size="22">❤</text>
-    <text x="${CARD_W-96}" y="53" font-family="'DejaVu Sans'" font-size="22" font-weight="700" fill="#fb7185">${fmt(hearts)}</text>
+    <rect x="${CARD_W-160}" y="26" width="130" height="40" rx="20" fill="#000000" fill-opacity="0.35"/>
+    <path d="${heartPath}" fill="#ef4444" stroke="#b91c1c" stroke-width="1"/>
+    <text x="${CARD_W-104}" y="53" font-family="'DejaVu Sans'" font-size="22" font-weight="700" fill="#fb7185">${fmt(hearts)}</text>
   </g>`;
 
   // effect overlay
@@ -428,6 +561,108 @@ function cardSvg(ctx, gid, member, stats, equip, opts = {}) {
   </svg>`;
 }
 
+// ── render one element to SVG ────────────────────────────────────────────────
+function elementSvg(el, ctx2) {
+  const { stats, images, selectedId } = ctx2;
+  const cx = el.x + el.w / 2, cy = el.y + el.h / 2;
+  const rot = el.rot ? ` transform="rotate(${el.rot} ${cx} ${cy})"` : '';
+  let inner = '';
+  if (el.type === 'text') {
+    const d = el.data || {};
+    const font = fontByKey(d.font).family;
+    const size = d.size || 30;
+    const color = d.color || '#ffffff';
+    const weight = d.bold ? ' font-weight="700"' : '';
+    inner = `<text x="${el.x}" y="${el.y + size}" font-family="'${font}'" font-size="${size}" fill="${color}"${weight}>${esc(truncate(d.text || 'Text', 40))}</text>`;
+  } else if (el.type === 'stat') {
+    const def = STAT_DEFS[el.data?.stat] || STAT_DEFS.dinar;
+    inner = `<g>
+      <rect x="${el.x}" y="${el.y}" width="${el.w}" height="${el.h}" rx="10" fill="#000000" fill-opacity="0.28"/>
+      <text x="${el.x+14}" y="${el.y+26}" font-family="'DejaVu Sans'" font-size="13" fill="#cbd5e1" letter-spacing="1">${esc(def.label)}</text>
+      <text x="${el.x+14}" y="${el.y+54}" font-family="'DejaVu Sans'" font-size="24" font-weight="700" fill="${def.accent}">${esc(def.get(stats))}</text>
+    </g>`;
+  } else if (el.type === 'sticker' || el.type === 'image') {
+    const uri = images[el.data?.imageKey];
+    if (uri) {
+      if (el.data?.circle) {
+        const clipId = `clip_${el.id}`;
+        inner = `<clipPath id="${clipId}"><circle cx="${cx}" cy="${cy}" r="${Math.min(el.w,el.h)/2}"/></clipPath>
+          <image href="${uri}" x="${el.x}" y="${el.y}" width="${el.w}" height="${el.h}" clip-path="url(#${clipId})" preserveAspectRatio="xMidYMid slice"/>`;
+      } else {
+        inner = `<image href="${uri}" x="${el.x}" y="${el.y}" width="${el.w}" height="${el.h}" preserveAspectRatio="xMidYMid meet"/>`;
+      }
+    } else {
+      inner = `<rect x="${el.x}" y="${el.y}" width="${el.w}" height="${el.h}" rx="8" fill="#334155" fill-opacity="0.5"/>
+        <text x="${cx}" y="${cy}" text-anchor="middle" font-family="'DejaVu Sans'" font-size="14" fill="#94a3b8">image?</text>`;
+    }
+  }
+  const sel = (selectedId && el.id === selectedId)
+    ? `<rect x="${el.x-3}" y="${el.y-3}" width="${el.w+6}" height="${el.h+6}" rx="6" fill="none" stroke="#38bdf8" stroke-width="2.5" stroke-dasharray="7 5"/>`
+    : '';
+  return `<g${rot}>${inner}${sel}</g>`;
+}
+
+// ── render a fully custom layout ─────────────────────────────────────────────
+function customCardSvg(ctx, gid, member, stats, equip, layout, opts = {}) {
+  const phase = opts.phase || 0;
+  const bg    = catalogueItem('background', equip.background) || BACKGROUNDS[0];
+  const frame = catalogueItem('frame', equip.frame) || FRAMES[0];
+  const effect= catalogueItem('effect', equip.effect) || EFFECTS[0];
+  const bgL = bgSvg(bg, frame);
+  const frL = frameSvg(frame, phase);
+  const images = opts.images || {};
+  const selectedId = opts.selectedId || null;
+
+  let starLayer = '', auroraLayer = '';
+  if (bg.kind === 'starfield') for (let i=0;i<60;i++){const x=(i*137.5)%CARD_W,y=(i*89.3)%CARD_H,tw=0.3+0.7*Math.abs(Math.sin(phase*Math.PI*2+i*0.7));starLayer+=`<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${i%3===0?1.6:1}" fill="#fff" fill-opacity="${tw.toFixed(2)}"/>`;}
+  if (bg.kind === 'aurora') { const cols=bg.colors; for(let b=0;b<3;b++){const yBase=120+b*80,off=Math.sin(phase*Math.PI*2+b)*40;auroraLayer+=`<path d="M0 ${yBase+off} Q ${CARD_W*0.25} ${yBase-60+off}, ${CARD_W*0.5} ${yBase+off} T ${CARD_W} ${yBase+off} V ${CARD_H} H 0 Z" fill="${cols[b%cols.length]}" fill-opacity="0.16"/>`;} }
+
+  const els = (layout.elements || []).slice().sort((a,b)=>(a.z||0)-(b.z||0));
+  const elementLayer = els.map(el => elementSvg(el, { stats, images, selectedId })).join('\n');
+
+  let autoStats = '';
+  const hasStatEls = els.some(e => e.type === 'stat');
+  if (!hasStatEls && layout.stats && layout.stats.length) {
+    const chosen = layout.stats.filter(k => STAT_DEFS[k]).slice(0, 8);
+    const gw = 198, gap = 14, gx = 30, gy = CARD_H - 160;
+    chosen.forEach((k, idx) => {
+      const def = STAT_DEFS[k];
+      const col = idx % 4, row = Math.floor(idx / 4);
+      const x = gx + (gw+gap)*col, y = gy + row*84;
+      autoStats += `<g>
+        <rect x="${x}" y="${y}" width="${gw}" height="70" rx="10" fill="#000000" fill-opacity="0.28"/>
+        <text x="${x+14}" y="${y+26}" font-family="'DejaVu Sans'" font-size="13" fill="#cbd5e1" letter-spacing="1">${esc(def.label)}</text>
+        <text x="${x+14}" y="${y+54}" font-family="'DejaVu Sans'" font-size="24" font-weight="700" fill="${def.accent}">${esc(def.get(stats))}</text>
+      </g>`;
+    });
+  }
+
+  const hearts = opts.hearts || 0;
+  const hx = CARD_W - 128, hy = 38;
+  const heartPath = `M ${hx} ${hy+4} C ${hx} ${hy+1}, ${hx-4} ${hy-3}, ${hx-8} ${hy-1} C ${hx-12} ${hy+1}, ${hx-11} ${hy+6}, ${hx} ${hy+13} C ${hx+11} ${hy+6}, ${hx+12} ${hy+1}, ${hx+8} ${hy-1} C ${hx+4} ${hy-3}, ${hx} ${hy+1}, ${hx} ${hy+4} Z`;
+  const heartBadge = `<g><rect x="${CARD_W-160}" y="26" width="130" height="40" rx="20" fill="#000000" fill-opacity="0.35"/>
+    <path d="${heartPath}" fill="#ef4444" stroke="#b91c1c" stroke-width="1"/>
+    <text x="${CARD_W-104}" y="53" font-family="'DejaVu Sans'" font-size="22" font-weight="700" fill="#fb7185">${fmt(hearts)}</text></g>`;
+
+  let effectOverlay = '', effectDefs = '';
+  if (effect.kind === 'holo') { effectDefs += `<linearGradient id="holo" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#fff" stop-opacity="0"/><stop offset="45%" stop-color="#a5f3fc" stop-opacity="0.12"/><stop offset="55%" stop-color="#f0abfc" stop-opacity="0.12"/><stop offset="100%" stop-color="#fff" stop-opacity="0"/></linearGradient>`; effectOverlay = `<rect width="${CARD_W}" height="${CARD_H}" rx="18" fill="url(#holo)"/>`; }
+  else if (effect.kind === 'sparkle' || effect.kind === 'confetti') { let parts=''; const N=effect.kind==='confetti'?26:18; const colors=['#fbbf24','#f472b6','#34d399','#38bdf8','#c4b5fd']; for(let i=0;i<N;i++){const seed=(i*97.13)%1;const x=((seed*CARD_W)+phase*(40+i*3))%CARD_W;const y=((i*53.7)%CARD_H+phase*60*(effect.kind==='confetti'?1:0))%CARD_H;const size=3+(i%3);if(effect.kind==='confetti'){parts+=`<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${size+2}" height="${size+2}" fill="${colors[i%colors.length]}" fill-opacity="0.85" transform="rotate(${(i*40+phase*120)%360} ${x.toFixed(1)} ${y.toFixed(1)})"/>`;}else{const tw=0.5+0.5*Math.abs(Math.sin(phase*Math.PI*2+i));parts+=`<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${size*0.6}" fill="#fff" fill-opacity="${tw.toFixed(2)}"/>`;}} effectOverlay = parts; }
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${CARD_W}" height="${CARD_H}" viewBox="0 0 ${CARD_W} ${CARD_H}">
+    <defs>${bgL.defs}${frL.defs}${effectDefs}<clipPath id="card"><rect width="${CARD_W}" height="${CARD_H}" rx="18"/></clipPath></defs>
+    <g clip-path="url(#card)">
+      ${bgL.rect}
+      ${starLayer}${auroraLayer}
+      <rect width="${CARD_W}" height="${CARD_H}" fill="#000000" fill-opacity="0.12"/>
+      ${autoStats}
+      ${elementLayer}
+      ${heartBadge}
+      ${effectOverlay}
+    </g>
+    ${frL.el}
+  </svg>`;
+}
+
 // ── render helpers ──────────────────────────────────────────────────────────
 function svgToPng(svg) {
   const r = new Resvg(svg, {
@@ -458,26 +693,35 @@ const isAnimatedEquip = (equip) =>
   });
 
 // Render the card as a PNG buffer, or an animated GIF if any equipped cosmetic is animated.
+// If the user has a custom layout (layout.custom), renders that; else the classic template.
+// opts.selectedId highlights an element (editor preview). opts.forceStatic forces PNG.
 async function renderCard(ctx, gid, member, opts = {}) {
   const { db } = ctx;
   const uid = (member.user || member).id;
   const stats = gatherStats(ctx, gid, uid);
   const equip = getEquipped(db, gid, uid);
   const hearts = heartsFor(db, gid, uid);
+  const layout = getLayout(db, gid, uid);
+  const images = userImages(db, gid, uid);
   const av = await avatarDataUri(member);
-  const base = { avatarDataUri: av, hearts };
+  const base = { avatarDataUri: av, hearts, images, selectedId: opts.selectedId || null };
 
-  if (opts.forceStatic || !isAnimatedEquip(equip)) {
-    const png = svgToPng(cardSvg(ctx, gid, member, stats, equip, { ...base, phase: 0 }));
+  const drawSvg = (phase) => (layout.custom)
+    ? customCardSvg(ctx, gid, member, stats, equip, layout, { ...base, phase })
+    : cardSvg(ctx, gid, member, stats, equip, { ...base, phase });
+
+  // editor previews are always static (fast + selection outline); animated only for final cards
+  const animate = !opts.forceStatic && !opts.selectedId && isAnimatedEquip(equip);
+
+  if (!animate) {
+    const png = svgToPng(drawSvg(0));
     return { attachment: png, name: `profile-${uid}.png`, animated: false };
   }
-  // animated GIF
   const { GIFEncoder, quantize, applyPalette } = require('gifenc');
   const enc = GIFEncoder();
   const FRAMES_N = 20, DELAY = 60;
   for (let f = 0; f < FRAMES_N; f++) {
-    const phase = f / FRAMES_N;
-    const png = svgToPng(cardSvg(ctx, gid, member, stats, equip, { ...base, phase }));
+    const png = svgToPng(drawSvg(f / FRAMES_N));
     const { data, width, height } = pngToRGBA(png);
     const palette = quantize(data, 256);
     const index = applyPalette(data, palette);
@@ -520,6 +764,19 @@ function initProfiles({ db, saveData, gachaApi, getDinar, spendDinar }) {
 
     gatherStats: (gid, uid) => gatherStats(ctx, gid, uid),
     renderCard:  (gid, member, opts) => renderCard(ctx, gid, member, opts),
+
+    // ── layout / editor API ──
+    FONTS, STAT_DEFS, STAT_KEYS,
+    getLayout:      (gid, uid) => getLayout(db, gid, uid),
+    addElement:     (gid, uid, type, data) => addElement(db, gid, uid, type, data, saveData),
+    getElement:     (gid, uid, elId) => getElement(db, gid, uid, elId),
+    updateElement:  (gid, uid, elId, patch) => updateElement(db, gid, uid, elId, patch, saveData),
+    removeElement:  (gid, uid, elId) => removeElement(db, gid, uid, elId, saveData),
+    reorderElement: (gid, uid, elId, dir) => reorderElement(db, gid, uid, elId, dir, saveData),
+    toggleStat:     (gid, uid, statKey) => toggleStat(db, gid, uid, statKey, saveData),
+    resetLayout:    (gid, uid) => resetLayout(db, gid, uid, saveData),
+    addUserImage:   (gid, uid, dataUri) => addUserImage(db, gid, uid, dataUri, saveData),
+    userImages:     (gid, uid) => userImages(db, gid, uid),
 
     // buy: validates ownership + funds, spends Dinar, grants. returns {ok}|{error}
     buy(gid, uid, slot, key) {

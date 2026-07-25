@@ -342,6 +342,11 @@ function getShopCommands() {
   return [
     new SlashCommandBuilder().setName('hub').setDescription('Open the community hub — custom roles, coin flip, daily streak & more').toJSON(),
     new SlashCommandBuilder()
+      .setName('profile')
+      .setDescription('Show your profile card (or someone else\'s)')
+      .addUserOption(o => o.setName('user').setDescription('Whose profile to show (defaults to you)').setRequired(false))
+      .toJSON(),
+    new SlashCommandBuilder()
       .setName('hub-mod-role')
       .setDescription('Set the moderator role — bot-made custom roles will always sit below it (admin only)')
       .addRoleOption(o => o.setName('role').setDescription('Your moderator role (custom roles go below this). Leave empty to auto-detect.').setRequired(false))
@@ -879,17 +884,85 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
     const embed = new EmbedBuilder()
       .setColor(0x6366f1)
       .setTitle('🪪 Your Profile Card')
-      .setDescription(`❤️ **${fmt(hearts)}** heart${hearts===1?'':'s'} received${published ? ' · 🌍 published to the showcase' : ' · not yet published'}`)
+      .setDescription(`❤️ **${fmt(hearts)}** heart${hearts===1?'':'s'} received${published ? ' · 🌍 published to the showcase' : ' · not yet published'}\nUse **Edit Layout** to add text, stickers & stats and move them anywhere. Buy backgrounds, frames & effects in the **🛒 Shop**.`)
       .setImage(`attachment://${card.name}`);
     const rows = [
       new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('prof:shop:background').setLabel('Customize').setEmoji('🎨').setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId('prof:edit').setLabel('Edit Layout').setEmoji('🎨').setStyle(ButtonStyle.Success),
         new ButtonBuilder().setCustomId(published ? 'prof:unpublish' : 'prof:publish').setLabel(published ? 'Unpublish' : 'Publish to Showcase').setEmoji(published ? '🙈' : '🌍').setStyle(published ? ButtonStyle.Secondary : ButtonStyle.Primary),
         new ButtonBuilder().setCustomId('hub:showcase:0').setLabel('View Showcase').setEmoji('❤️').setStyle(ButtonStyle.Secondary)),
       backHubOnly(),
     ];
     return { content: '', embeds: [embed], files: [card], components: rows, attachments: [] };
   }
+
+  // ─── PATH A EDITOR ────────────────────────────────────────────────────────
+  // Editor home: renders the card with the selected element highlighted, plus
+  // controls to select/add/move/resize/rotate/layer/delete elements & toggle stats.
+  // selMap tracks each user's currently-selected element id (in-memory; fine to reset).
+  const profileSel = new Map();  // uid -> elementId
+  async function profileEditorView(gid, member, note) {
+    const uid = (member.user || member).id;
+    const layout = profileApi.getLayout(gid, uid);
+    let selId = profileSel.get(uid);
+    if (selId && !layout.elements.find(e => e.id === selId)) { selId = null; profileSel.delete(uid); }
+    const card = await profileApi.renderCard(gid, member, { selectedId: selId, forceStatic: true });
+    const sel = selId ? layout.elements.find(e => e.id === selId) : null;
+
+    const desc = sel
+      ? `**Selected:** ${elLabel(sel)}\nNudge it with the arrows, resize with ➖/➕, rotate with ↻, or change its layer. The blue dashed box shows what's selected.`
+      : layout.elements.length
+        ? 'Pick an element below to move it, or add a new one. Nothing selected yet.'
+        : 'Your card is empty of custom items. **Add** text, a sticker or a stat below, then move it anywhere.';
+
+    const embed = new EmbedBuilder().setColor(0x10b981).setTitle('🎨 Edit Your Card').setDescription((note ? `${note}\n\n` : '') + desc)
+      .setImage(`attachment://${card.name}`);
+
+    const rows = [];
+    // row 1: element picker (select which element to edit)
+    if (layout.elements.length) {
+      const menu = new StringSelectMenuBuilder().setCustomId('prof:sel').setPlaceholder('Select an element to move/edit…')
+        .addOptions(layout.elements.slice(0, 25).map(e => ({
+          label: elLabel(e).slice(0, 100), value: e.id,
+          description: `x${Math.round(e.x)} y${Math.round(e.y)} · ${e.w}×${e.h}${e.rot?` · ${e.rot}°`:''}`.slice(0,100),
+          emoji: e.type==='text'?'🔤':e.type==='stat'?'📊':'🖼️',
+          default: e.id === selId,
+        })));
+      rows.push(new ActionRowBuilder().addComponents(menu));
+    }
+    // row 2: movement (disabled if nothing selected)
+    const noSel = !sel;
+    rows.push(new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('prof:mv:up').setLabel('▲').setStyle(ButtonStyle.Secondary).setDisabled(noSel),
+      new ButtonBuilder().setCustomId('prof:mv:down').setLabel('▼').setStyle(ButtonStyle.Secondary).setDisabled(noSel),
+      new ButtonBuilder().setCustomId('prof:mv:left').setLabel('◀').setStyle(ButtonStyle.Secondary).setDisabled(noSel),
+      new ButtonBuilder().setCustomId('prof:mv:right').setLabel('▶').setStyle(ButtonStyle.Secondary).setDisabled(noSel),
+      new ButtonBuilder().setCustomId('prof:step').setLabel(`Step ${moveStep.get(uid)||20}px`).setStyle(ButtonStyle.Primary)));
+    // row 3: size / rotate / layer / delete
+    rows.push(new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('prof:sz:down').setLabel('➖').setStyle(ButtonStyle.Secondary).setDisabled(noSel),
+      new ButtonBuilder().setCustomId('prof:sz:up').setLabel('➕').setStyle(ButtonStyle.Secondary).setDisabled(noSel),
+      new ButtonBuilder().setCustomId('prof:rot').setLabel('↻ Rotate').setStyle(ButtonStyle.Secondary).setDisabled(noSel),
+      new ButtonBuilder().setCustomId('prof:layer:front').setLabel('Bring Front').setStyle(ButtonStyle.Secondary).setDisabled(noSel),
+      new ButtonBuilder().setCustomId('prof:del').setLabel('Delete').setEmoji('🗑️').setStyle(ButtonStyle.Danger).setDisabled(noSel)));
+    // row 4: add-new + stats + reset
+    rows.push(new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('prof:add:text').setLabel('Add Text').setEmoji('🔤').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId('prof:add:sticker').setLabel('Add Sticker').setEmoji('🖼️').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId('prof:add:stat').setLabel('Add Stat').setEmoji('📊').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId('prof:reset').setLabel('Reset').setEmoji('♻️').setStyle(ButtonStyle.Danger)));
+    // row 5: text-edit (if a text element selected) + back
+    const backRow = new ActionRowBuilder();
+    if (sel && sel.type === 'text') backRow.addComponents(new ButtonBuilder().setCustomId('prof:text:edit').setLabel('Edit Text/Font').setEmoji('✏️').setStyle(ButtonStyle.Primary));
+    if (sel && sel.type === 'stat') backRow.addComponents(new ButtonBuilder().setCustomId('prof:stat:change').setLabel('Change Stat').setEmoji('🔀').setStyle(ButtonStyle.Primary));
+    if (sel && (sel.type === 'sticker' || sel.type === 'image')) backRow.addComponents(new ButtonBuilder().setCustomId('prof:img:circle').setLabel('Toggle Circle').setEmoji('⭕').setStyle(ButtonStyle.Primary));
+    backRow.addComponents(new ButtonBuilder().setCustomId('hub:profile').setLabel('← Done').setStyle(ButtonStyle.Secondary));
+    rows.push(backRow);
+
+    return { content:'', embeds:[embed], files:[card], attachments:[], components: rows.slice(0, 5) };
+  }
+  const elLabel = (e) => e.type==='text' ? `Text: “${(e.data?.text||'').slice(0,18)}”` : e.type==='stat' ? `Stat: ${(e.data?.stat||'').toUpperCase()}` : e.type==='sticker' ? 'Sticker' : 'Image';
+  const moveStep = new Map();  // uid -> px step
 
   // The cosmetics shop for one slot (background/frame/namecolor/title/effect).
   function profileShopView(gid, uid, slot) {
@@ -1200,9 +1273,60 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
   }
 
   // ═══════════════ INTERACTIONS ═══════════════
+  // Image upload for profile cards: a member posts an image with caption "!cardimg".
+  // We fetch it, store as a data URI, and add it as a sticker element on their card.
+  // Trusted community (per owner) — no approval step.
+  if (profileApi) client.on('messageCreate', async (message) => {
+    try {
+      if (message.author?.bot || !message.guild) return;
+      const content = (message.content || '').trim().toLowerCase();
+      if (content !== '!cardimg' && !content.startsWith('!cardimg')) return;
+      const att = message.attachments?.first();
+      if (!att || !att.contentType || !att.contentType.startsWith('image/')) {
+        return message.reply('Attach an image (PNG/JPG/GIF) with the message `!cardimg` to add it to your card.').catch(()=>{});
+      }
+      if (att.size > 4 * 1024 * 1024) return message.reply('That image is too large — please keep it under 4MB.').catch(()=>{});
+      const res = await fetch(att.url, { signal: AbortSignal.timeout(10000) }).catch(()=>null);
+      if (!res || !res.ok) return message.reply('Couldn\'t download that image, try again.').catch(()=>{});
+      const buf = Buffer.from(await res.arrayBuffer());
+      const mime = att.contentType.split(';')[0];
+      const dataUri = `data:${mime};base64,${buf.toString('base64')}`;
+      const key = profileApi.addUserImage(message.guild.id, message.author.id, dataUri);
+      profileApi.addElement(message.guild.id, message.author.id, 'sticker', { imageKey: key, circle: false });
+      await message.reply('🖼️ Added to your card! Open **/hub → 🪪 My Profile → Edit Layout** to position and resize it.').catch(()=>{});
+    } catch (e) { console.error('[profile] image upload failed:', e.message); }
+  });
+
   client.on('interactionCreate', async (interaction) => {
     try {
       // /hub
+      if (interaction.isChatInputCommand() && interaction.commandName === 'profile') {
+        if (!interaction.guildId) return interaction.reply({ content: 'Use this in the server.', flags: 64 });
+        if (!profileApi) return interaction.reply({ content: 'Profiles aren\'t available right now.', flags: 64 });
+        const target = interaction.options.getUser('user') || interaction.user;
+        await interaction.deferReply();
+        try {
+          const member = await interaction.guild.members.fetch(target.id).catch(() => null);
+          if (!member) return interaction.editReply({ content: 'That user isn\'t in this server.' });
+          const card = await profileApi.renderCard(interaction.guildId, member, {});
+          const hearts = profileApi.heartsFor(interaction.guildId, target.id);
+          const isMe = target.id === interaction.user.id;
+          const embed = new EmbedBuilder().setColor(0x6366f1)
+            .setTitle(`🪪 ${esc(member.displayName || target.username)}'s Profile`)
+            .setDescription(`❤️ **${fmt(hearts)}** heart${hearts===1?'':'s'}`)
+            .setImage(`attachment://${card.name}`);
+          const rows = [];
+          if (isMe) rows.push(new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId('prof:edit').setLabel('Edit Layout').setEmoji('🎨').setStyle(ButtonStyle.Success),
+            new ButtonBuilder().setCustomId('hub:showcase:0').setLabel('Showcase').setEmoji('❤️').setStyle(ButtonStyle.Secondary)));
+          else rows.push(new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId(`prof:heart:${target.id}:0`).setLabel('Heart').setEmoji('❤️').setStyle(ButtonStyle.Danger).setDisabled(target.bot)));
+          return interaction.editReply({ embeds: [embed], files: [card], components: rows });
+        } catch (e) {
+          console.error('[profile] command failed:', e.message);
+          return interaction.editReply({ content: '⚠️ Couldn\'t render that profile card.' });
+        }
+      }
       if (interaction.isChatInputCommand() && interaction.commandName === 'hub-mod-role') {
         if (!interaction.guildId) return interaction.reply({ content: 'Use this in the server.', flags: 64 });
         // admin check
@@ -1622,6 +1746,163 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
         const slot = interaction.customId.split(':')[2];
         return interaction.update(profileShopView(gid, uid, slot));
       }
+      // ── EDITOR ──
+      if (interaction.isButton() && interaction.customId === 'prof:edit') {
+        if (!profileApi) return interaction.reply({ content: 'Unavailable.', flags: 64 });
+        await interaction.deferUpdate();
+        const member = interaction.member || await interaction.guild.members.fetch(uid);
+        return interaction.editReply(await profileEditorView(gid, member));
+      }
+      if (interaction.isStringSelectMenu() && interaction.customId === 'prof:sel') {
+        profileSel.set(uid, interaction.values[0]);
+        await interaction.deferUpdate();
+        const member = interaction.member || await interaction.guild.members.fetch(uid);
+        return interaction.editReply(await profileEditorView(gid, member));
+      }
+      if (interaction.isButton() && interaction.customId === 'prof:step') {
+        const cur = moveStep.get(uid) || 20;
+        const next = cur === 20 ? 5 : cur === 5 ? 1 : cur === 1 ? 50 : 20;   // cycle 20→5→1→50
+        moveStep.set(uid, next);
+        await interaction.deferUpdate();
+        const member = interaction.member || await interaction.guild.members.fetch(uid);
+        return interaction.editReply(await profileEditorView(gid, member));
+      }
+      if (interaction.isButton() && interaction.customId.startsWith('prof:mv:')) {
+        const dir = interaction.customId.split(':')[2];
+        const selId = profileSel.get(uid);
+        if (selId) {
+          const el = profileApi.getElement(gid, uid, selId);
+          if (el) {
+            const step = moveStep.get(uid) || 20;
+            const patch = {};
+            if (dir === 'up') patch.y = el.y - step;
+            if (dir === 'down') patch.y = el.y + step;
+            if (dir === 'left') patch.x = el.x - step;
+            if (dir === 'right') patch.x = el.x + step;
+            profileApi.updateElement(gid, uid, selId, patch);
+          }
+        }
+        await interaction.deferUpdate();
+        const member = interaction.member || await interaction.guild.members.fetch(uid);
+        return interaction.editReply(await profileEditorView(gid, member));
+      }
+      if (interaction.isButton() && interaction.customId.startsWith('prof:sz:')) {
+        const dir = interaction.customId.split(':')[2];
+        const selId = profileSel.get(uid);
+        if (selId) {
+          const el = profileApi.getElement(gid, uid, selId);
+          if (el) {
+            const f = dir === 'up' ? 1.15 : 0.87;
+            const patch = { w: Math.round(el.w * f), h: Math.round(el.h * f) };
+            // text elements scale by font size too
+            if (el.type === 'text') patch.data = { size: Math.max(10, Math.round((el.data?.size || 30) * f)) };
+            profileApi.updateElement(gid, uid, selId, patch);
+          }
+        }
+        await interaction.deferUpdate();
+        const member = interaction.member || await interaction.guild.members.fetch(uid);
+        return interaction.editReply(await profileEditorView(gid, member));
+      }
+      if (interaction.isButton() && interaction.customId === 'prof:rot') {
+        const selId = profileSel.get(uid);
+        if (selId) { const el = profileApi.getElement(gid, uid, selId); if (el) profileApi.updateElement(gid, uid, selId, { rot: (el.rot || 0) + 15 }); }
+        await interaction.deferUpdate();
+        const member = interaction.member || await interaction.guild.members.fetch(uid);
+        return interaction.editReply(await profileEditorView(gid, member));
+      }
+      if (interaction.isButton() && interaction.customId === 'prof:layer:front') {
+        const selId = profileSel.get(uid);
+        if (selId) profileApi.reorderElement(gid, uid, selId, 'front');
+        await interaction.deferUpdate();
+        const member = interaction.member || await interaction.guild.members.fetch(uid);
+        return interaction.editReply(await profileEditorView(gid, member));
+      }
+      if (interaction.isButton() && interaction.customId === 'prof:del') {
+        const selId = profileSel.get(uid);
+        if (selId) { profileApi.removeElement(gid, uid, selId); profileSel.delete(uid); }
+        await interaction.deferUpdate();
+        const member = interaction.member || await interaction.guild.members.fetch(uid);
+        return interaction.editReply(await profileEditorView(gid, member, '🗑️ Element deleted.'));
+      }
+      if (interaction.isButton() && interaction.customId === 'prof:reset') {
+        profileApi.resetLayout(gid, uid); profileSel.delete(uid);
+        await interaction.deferUpdate();
+        const member = interaction.member || await interaction.guild.members.fetch(uid);
+        return interaction.editReply(await profileEditorView(gid, member, '♻️ Card reset to the default template.'));
+      }
+      if (interaction.isButton() && interaction.customId === 'prof:add:text') {
+        // open a modal to type text
+        const modal = new ModalBuilder().setCustomId('prof:textModal:new').setTitle('Add Text');
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('t').setLabel('Text').setStyle(TextInputStyle.Short).setMaxLength(40).setRequired(true)),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('c').setLabel('Colour hex (e.g. #fbbf24) — optional').setStyle(TextInputStyle.Short).setMaxLength(7).setRequired(false)),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('sz').setLabel('Size 10-80 — optional').setStyle(TextInputStyle.Short).setMaxLength(2).setRequired(false)));
+        return interaction.showModal(modal);
+      }
+      if (interaction.isButton() && interaction.customId === 'prof:add:stat') {
+        // dropdown of stats to add
+        const menu = new StringSelectMenuBuilder().setCustomId('prof:addStatPick').setPlaceholder('Which stat to add?')
+          .addOptions(profileApi.STAT_KEYS.map(k => ({ label: profileApi.STAT_DEFS[k].label, value: k })));
+        return interaction.reply({ content: 'Pick a stat to place on your card:', components: [new ActionRowBuilder().addComponents(menu)], flags: 64 });
+      }
+      if (interaction.isStringSelectMenu() && interaction.customId === 'prof:addStatPick') {
+        const el = profileApi.addElement(gid, uid, 'stat', { stat: interaction.values[0] });
+        profileSel.set(uid, el.id);
+        await interaction.update({ content: '✅ Stat added — go back to the editor to position it.', components: [] });
+        return;
+      }
+      if (interaction.isButton() && interaction.customId === 'prof:add:sticker') {
+        return interaction.reply({ content: '🖼️ **To add a sticker or image:** upload an image in this channel with the message text `!cardimg` (as the caption). I\'ll add it to your card automatically. Then reopen the editor to position it.\n\n*Tip: PNG with transparency works best for stickers.*', flags: 64 });
+      }
+      if (interaction.isButton() && interaction.customId === 'prof:img:circle') {
+        const selId = profileSel.get(uid);
+        if (selId) { const el = profileApi.getElement(gid, uid, selId); if (el) profileApi.updateElement(gid, uid, selId, { data: { circle: !el.data?.circle } }); }
+        await interaction.deferUpdate();
+        const member = interaction.member || await interaction.guild.members.fetch(uid);
+        return interaction.editReply(await profileEditorView(gid, member));
+      }
+      if (interaction.isButton() && interaction.customId === 'prof:text:edit') {
+        const selId = profileSel.get(uid);
+        const el = selId && profileApi.getElement(gid, uid, selId);
+        if (!el) return interaction.reply({ content: 'Select a text element first.', flags: 64 });
+        const modal = new ModalBuilder().setCustomId('prof:textModal:edit').setTitle('Edit Text');
+        modal.addComponents(
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('t').setLabel('Text').setStyle(TextInputStyle.Short).setMaxLength(40).setRequired(true).setValue(el.data?.text || '')),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('c').setLabel('Colour hex (e.g. #fbbf24)').setStyle(TextInputStyle.Short).setMaxLength(7).setRequired(false).setValue(el.data?.color || '')),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('f').setLabel('Font: sans / serif / mono').setStyle(TextInputStyle.Short).setMaxLength(6).setRequired(false).setValue(el.data?.font || 'sans')));
+        return interaction.showModal(modal);
+      }
+      if (interaction.isModalSubmit() && interaction.customId.startsWith('prof:textModal:')) {
+        const mode = interaction.customId.split(':')[2];
+        const text = interaction.fields.getTextInputValue('t');
+        const colorRaw = (interaction.fields.getTextInputValue('c') || '').trim();
+        const color = /^#?[0-9a-fA-F]{6}$/.test(colorRaw) ? (colorRaw.startsWith('#') ? colorRaw : '#'+colorRaw) : undefined;
+        await interaction.deferUpdate().catch(()=>{});
+        if (mode === 'new') {
+          const szRaw = parseInt(interaction.fields.getTextInputValue('sz'), 10);
+          const size = (szRaw >= 10 && szRaw <= 80) ? szRaw : 30;
+          const el = profileApi.addElement(gid, uid, 'text', { text, color: color || '#ffffff', size, font: 'sans' });
+          profileSel.set(uid, el.id);
+        } else {
+          const selId = profileSel.get(uid);
+          const fontRaw = (interaction.fields.getTextInputValue('f') || 'sans').trim().toLowerCase();
+          const font = ['sans','serif','mono'].includes(fontRaw) ? fontRaw : 'sans';
+          if (selId) profileApi.updateElement(gid, uid, selId, { data: { text, ...(color?{color}:{}) , font } });
+        }
+        const member = interaction.member || await interaction.guild.members.fetch(uid);
+        return interaction.editReply(await profileEditorView(gid, member));
+      }
+      if (interaction.isButton() && interaction.customId === 'prof:stat:change') {
+        const menu = new StringSelectMenuBuilder().setCustomId('prof:statChange').setPlaceholder('Change this stat to…')
+          .addOptions(profileApi.STAT_KEYS.map(k => ({ label: profileApi.STAT_DEFS[k].label, value: k })));
+        return interaction.reply({ content: 'Pick the stat to show here:', components: [new ActionRowBuilder().addComponents(menu)], flags: 64 });
+      }
+      if (interaction.isStringSelectMenu() && interaction.customId === 'prof:statChange') {
+        const selId = profileSel.get(uid);
+        if (selId) profileApi.updateElement(gid, uid, selId, { data: { stat: interaction.values[0] } });
+        return interaction.update({ content: '✅ Stat changed — reopen the editor to see it.', components: [] });
+      }
+
       if (interaction.isStringSelectMenu() && interaction.customId.startsWith('prof:pick:')) {
         const slot = interaction.customId.split(':')[2];
         const key  = interaction.values[0];
