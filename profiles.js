@@ -1,0 +1,538 @@
+// profiles.js — Rich player profile cards for the Hub.
+//
+// A landscape "trading card" rendered via SVG → resvg (PNG), or animated GIF for
+// premium cosmetics. Surfaces live stats from the existing systems (gacha flip
+// stats, Dinar + wealth rank, gacha collection, clan, equipped coin) and layers
+// purchasable cosmetics on top: backgrounds, frames, name colours, titles, badges,
+// effects. Includes a server showcase where members publish their card and others
+// give it ❤ — the heart count is shown on the card itself.
+//
+// Wiring (in index.js initShop call): pass `profileApi: initProfiles({ db, saveData, gachaApi, getDinar, spendDinar })`
+// then hub.js consumes it. All Dinar goes through the shared getDinar/spendDinar so
+// balances never desync.
+
+const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, StringSelectMenuBuilder, ButtonStyle } = require('discord.js');
+const { Resvg } = require('@resvg/resvg-js');
+const fs   = require('fs');
+const path = require('path');
+const clans = require('./clanfns');
+let coins = null; try { coins = require('./coinskins'); } catch { /* optional */ }
+
+// ── font (mirrors the exchange module's resolution: fonts/ dir or repo root) ──
+const FONT_CANDIDATES = [
+  path.join(__dirname, 'fonts', 'DejaVuSans.ttf'),
+  path.join(__dirname, 'DejaVuSans.ttf'),
+];
+const FONT_PATH = FONT_CANDIDATES.find(f => { try { return fs.existsSync(f); } catch { return false; } }) || FONT_CANDIDATES[0];
+const FONT_BOLD_CANDIDATES = [
+  path.join(__dirname, 'fonts', 'DejaVuSans-Bold.ttf'),
+  path.join(__dirname, 'DejaVuSans-Bold.ttf'),
+];
+const FONT_BOLD = FONT_BOLD_CANDIDATES.find(f => { try { return fs.existsSync(f); } catch { return false; } }) || null;
+
+const fmt = (n) => Math.round(n || 0).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+// ───────────────────────────────────────────────────────────────────────────
+// COSMETIC CATALOGUE
+// Prices tuned so a casual affords an entry cosmetic fast, with prestige/animated
+// items to save toward. free:true = owned by everyone from the start.
+// GIF/animated items are the premium tier (pricier), per the design.
+// ───────────────────────────────────────────────────────────────────────────
+
+// Backgrounds define the card's base. `render(ctx)` returns the SVG for the
+// background layer. `anim:true` marks animated (GIF) backgrounds — pricier.
+const BACKGROUNDS = [
+  { key: 'slate',    name: 'Slate',           price: 0,     free: true,  kind: 'solid',    colors: ['#1e293b'] },
+  { key: 'charcoal', name: 'Charcoal',        price: 0,     free: true,  kind: 'solid',    colors: ['#111827'] },
+  { key: 'sand',     name: 'Desert Sand',     price: 400,   kind: 'gradient', colors: ['#d4a574', '#8b5a2b'] },
+  { key: 'ocean',    name: 'Ocean',           price: 400,   kind: 'gradient', colors: ['#0ea5e9', '#0c4a6e'] },
+  { key: 'sunset',   name: 'Sunset',          price: 600,   kind: 'gradient', colors: ['#f97316', '#7c2d12'] },
+  { key: 'emerald',  name: 'Emerald',         price: 600,   kind: 'gradient', colors: ['#10b981', '#064e3b'] },
+  { key: 'grape',    name: 'Grape',           price: 600,   kind: 'gradient', colors: ['#8b5cf6', '#4c1d95'] },
+  { key: 'rose',     name: 'Rose Gold',       price: 900,   kind: 'gradient', colors: ['#fb7185', '#881337'] },
+  { key: 'mesh',     name: 'Neon Mesh',       price: 1500,  kind: 'mesh',     colors: ['#6366f1', '#ec4899', '#06b6d4'] },
+  { key: 'carbon',   name: 'Carbon Fibre',    price: 1800,  kind: 'carbon',   colors: ['#1f2937', '#111827'] },
+  { key: 'aurora',   name: 'Aurora (animated)', price: 6000, anim: true, kind: 'aurora', colors: ['#22d3ee', '#a855f7', '#ec4899'] },
+  { key: 'starfield',name: 'Starfield (animated)', price: 8000, anim: true, kind: 'starfield', colors: ['#0b1026', '#1e1b4b'] },
+];
+
+// Frames = the border around the card. `render` supplies stroke styling.
+const FRAMES = [
+  { key: 'none',    name: 'None',            price: 0,    free: true,  stroke: null },
+  { key: 'bronze',  name: 'Bronze',          price: 300,  stroke: '#b08d57', width: 6 },
+  { key: 'silver',  name: 'Silver',          price: 800,  stroke: '#cbd5e1', width: 6 },
+  { key: 'gold',    name: 'Gold',            price: 2000, stroke: '#fbbf24', width: 7, glow: '#f59e0b' },
+  { key: 'emerald', name: 'Emerald',         price: 2500, stroke: '#34d399', width: 7, glow: '#10b981' },
+  { key: 'ruby',    name: 'Ruby',            price: 3000, stroke: '#fb7185', width: 7, glow: '#e11d48' },
+  { key: 'ornate',  name: 'Ornate Gold',     price: 5000, stroke: '#fcd34d', width: 9, glow: '#f59e0b', ornate: true },
+  { key: 'rainbow', name: 'Rainbow (animated)', price: 7000, anim: true, stroke: 'rainbow', width: 8 },
+];
+
+// Name colours (solid or gradient text fill for the display name)
+const NAMECOLORS = [
+  { key: 'white',   name: 'White',      price: 0,    free: true, colors: ['#ffffff'] },
+  { key: 'gold',    name: 'Gold',       price: 500,  colors: ['#fbbf24'] },
+  { key: 'sky',     name: 'Sky',        price: 500,  colors: ['#38bdf8'] },
+  { key: 'mint',    name: 'Mint',       price: 500,  colors: ['#34d399'] },
+  { key: 'rose',    name: 'Rose',       price: 500,  colors: ['#fb7185'] },
+  { key: 'fire',    name: 'Fire',       price: 1200, colors: ['#fbbf24', '#ef4444'] },
+  { key: 'ocean',   name: 'Ocean',      price: 1200, colors: ['#22d3ee', '#3b82f6'] },
+  { key: 'candy',   name: 'Candy',      price: 1200, colors: ['#f472b6', '#a855f7'] },
+  { key: 'chrome',  name: 'Chrome (animated)', price: 4000, anim: true, colors: ['#e5e7eb', '#9ca3af', '#f9fafb'] },
+];
+
+// Titles — a line of flavour text under the name. Some are prestige (earned).
+const TITLES = [
+  { key: 'none',      name: '(no title)',        price: 0,    free: true, text: '' },
+  { key: 'newcomer',  name: 'Newcomer',          price: 200,  text: 'Newcomer' },
+  { key: 'regular',   name: 'Regular',           price: 500,  text: 'Regular' },
+  { key: 'highroller',name: 'High Roller',       price: 1500, text: 'High Roller' },
+  { key: 'collector', name: 'The Collector',     price: 1500, text: 'The Collector' },
+  { key: 'legend',    name: 'Living Legend',     price: 4000, text: 'Living Legend' },
+  { key: 'sultan',    name: 'Sultan',            price: 6000, text: 'Sultan' },
+  { key: 'gambler',   name: 'Lucky Devil',       price: 2500, text: 'Lucky Devil' },
+];
+
+// Effects = an overlay on the whole card (holo sheen, particles). Some animated.
+const EFFECTS = [
+  { key: 'none',   name: 'None',              price: 0,    free: true },
+  { key: 'holo',   name: 'Holographic',       price: 2000, kind: 'holo' },
+  { key: 'sparkle',name: 'Sparkles (animated)', price: 5000, anim: true, kind: 'sparkle' },
+  { key: 'confetti',name: 'Confetti (animated)', price: 5000, anim: true, kind: 'confetti' },
+];
+
+const CATALOGUE = { background: BACKGROUNDS, frame: FRAMES, namecolor: NAMECOLORS, title: TITLES, effect: EFFECTS };
+const SLOT_LABEL = { background: 'Background', frame: 'Frame', namecolor: 'Name Colour', title: 'Title', effect: 'Effect' };
+const DEFAULT_EQUIP = { background: 'slate', frame: 'none', namecolor: 'white', title: 'none', effect: 'none' };
+
+const catalogueItem = (slot, key) => (CATALOGUE[slot] || []).find(i => i.key === key) || null;
+
+// ───────────────────────────────────────────────────────────────────────────
+// STATE  (db[guildId].__profiles)
+//   owned:    { uid: { background:[keys], frame:[], namecolor:[], title:[], effect:[] } }
+//   equipped: { uid: { background, frame, namecolor, title, effect } }
+//   hearts:   { uid: [voterId, ...] }          who hearted this profile
+//   published:{ uid: true }                    appears in the showcase
+// ───────────────────────────────────────────────────────────────────────────
+function pState(db, gid) {
+  const g = (db[gid] ||= {});
+  const p = (g.__profiles ||= {});
+  p.owned     ||= {};
+  p.equipped  ||= {};
+  p.hearts    ||= {};
+  p.published ||= {};
+  return p;
+}
+function ownedSlots(db, gid, uid) {
+  const p = pState(db, gid);
+  const o = (p.owned[uid] ||= {});
+  for (const slot of Object.keys(CATALOGUE)) o[slot] ||= [];
+  return o;
+}
+function isOwned(db, gid, uid, slot, key) {
+  const item = catalogueItem(slot, key);
+  if (!item) return false;
+  if (item.free) return true;
+  return ownedSlots(db, gid, uid)[slot].includes(key);
+}
+function addOwned(db, gid, uid, slot, key, saveData) {
+  const o = ownedSlots(db, gid, uid);
+  if (!o[slot].includes(key)) o[slot].push(key);
+  if (saveData) saveData(gid);
+}
+function getEquipped(db, gid, uid) {
+  const p = pState(db, gid);
+  const e = (p.equipped[uid] ||= { ...DEFAULT_EQUIP });
+  for (const slot of Object.keys(DEFAULT_EQUIP)) {
+    if (!e[slot] || !isOwned(db, gid, uid, slot, e[slot])) e[slot] = DEFAULT_EQUIP[slot];
+  }
+  return e;
+}
+function equipItem(db, gid, uid, slot, key, saveData) {
+  if (!isOwned(db, gid, uid, slot, key)) return false;
+  const p = pState(db, gid);
+  (p.equipped[uid] ||= { ...DEFAULT_EQUIP })[slot] = key;
+  if (saveData) saveData(gid);
+  return true;
+}
+function heartsFor(db, gid, uid) { return (pState(db, gid).hearts[uid] || []).length; }
+function hasHearted(db, gid, uid, voterId) { return (pState(db, gid).hearts[uid] || []).includes(voterId); }
+function toggleHeart(db, gid, uid, voterId, saveData) {
+  const p = pState(db, gid);
+  const arr = (p.hearts[uid] ||= []);
+  const i = arr.indexOf(voterId);
+  let hearted;
+  if (i === -1) { arr.push(voterId); hearted = true; } else { arr.splice(i, 1); hearted = false; }
+  if (saveData) saveData(gid);
+  return { hearted, total: arr.length };
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// STATS GATHERING — pulls live data from the other systems for the card.
+// gachaApi (hubApi) gives flip stats via flipBoard, Dinar via balance, collection.
+// ───────────────────────────────────────────────────────────────────────────
+function gatherStats(ctx, gid, uid) {
+  const { db, gachaApi, getDinar } = ctx;
+  const out = { dinar: 0, wealthRank: null, flip: null, collection: null, clan: null, coin: null, potd: 0 };
+
+  try { out.dinar = getDinar ? getDinar(db, gid, uid) : (gachaApi ? gachaApi.balance(gid, uid) : 0); } catch { /* */ }
+
+  // wealth rank from the richest board
+  try {
+    const rich = gachaApi ? gachaApi.richest(gid) : [];
+    const idx = rich.findIndex(r => r.id === uid);
+    if (idx !== -1) out.wealthRank = idx + 1;
+  } catch { /* */ }
+
+  // coin-flip record — flipBoard only returns players with games>0; if absent, zeros
+  try {
+    const board = gachaApi ? gachaApi.flipBoard(gid) : [];
+    const mine = board.find(r => r.id === uid);
+    // flipBoard filters to games>0 and top 10; for full accuracy read state directly if exposed
+    if (mine) out.flip = { wins: mine.wins, losses: mine.losses, games: mine.games, net: mine.net, winPct: mine.winPct };
+    // pull streak straight from raw state if we can reach it
+    const s = db[gid] && (db[gid].__gacha || db[gid].gacha);
+    const fstat = s && s.flipStats && s.flipStats[uid];
+    if (fstat) {
+      out.flip = out.flip || { wins: fstat.wins || 0, losses: fstat.losses || 0, games: (fstat.wins||0)+(fstat.losses||0), net: (fstat.won||0)-(fstat.lost||0), winPct: ((fstat.wins||0)+(fstat.losses||0)) ? (fstat.wins/((fstat.wins||0)+(fstat.losses||0)))*100 : 0 };
+      out.flip.streak = fstat.streak || 0;
+      out.flip.won = fstat.won || 0; out.flip.lost = fstat.lost || 0;
+    }
+  } catch { /* */ }
+
+  // gacha collection
+  try {
+    const col = gachaApi ? gachaApi.collection(gid, uid) : null;
+    if (col) out.collection = { count: col.count, value: col.totalValue, byTier: col.byTier, emoji: col.emoji, tiers: col.tiers };
+  } catch { /* */ }
+
+  // clan
+  try {
+    const c = clans.userClan(db, gid, uid);
+    if (c) out.clan = { name: c.name, rank: clans.userRank ? clans.userRank(c.clan, uid) : 'Member' };
+  } catch { /* */ }
+
+  // equipped coin design
+  try {
+    if (coins) {
+      const key = coins.getEquipped(db, gid, uid);
+      const skin = coins.skinByKey ? coins.skinByKey(key) : null;
+      out.coin = skin ? skin.name : (key || 'Default');
+    }
+  } catch { /* */ }
+
+  return out;
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// SVG CARD RENDER
+// Landscape trading card, 900×420. Avatar (as a data-URI PNG) top-left, name +
+// title beside it, stats grid below, hearts + tier bottom corners.
+// ───────────────────────────────────────────────────────────────────────────
+const CARD_W = 900, CARD_H = 420;
+
+function bgSvg(bg, frame) {
+  // returns { defs, rect } for the background layer
+  const colors = bg.colors || ['#1e293b'];
+  let defs = '', fill = colors[0];
+  if (bg.kind === 'gradient') {
+    defs += `<linearGradient id="bgGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="${colors[0]}"/><stop offset="100%" stop-color="${colors[1] || colors[0]}"/></linearGradient>`;
+    fill = 'url(#bgGrad)';
+  } else if (bg.kind === 'mesh') {
+    defs += `<radialGradient id="m1" cx="20%" cy="20%" r="60%"><stop offset="0%" stop-color="${colors[0]}"/><stop offset="100%" stop-color="#0b1026" stop-opacity="0"/></radialGradient>
+      <radialGradient id="m2" cx="80%" cy="30%" r="60%"><stop offset="0%" stop-color="${colors[1]}"/><stop offset="100%" stop-color="#0b1026" stop-opacity="0"/></radialGradient>
+      <radialGradient id="m3" cx="50%" cy="90%" r="70%"><stop offset="0%" stop-color="${colors[2]||colors[0]}"/><stop offset="100%" stop-color="#0b1026" stop-opacity="0"/></radialGradient>`;
+    fill = '#0b1026';
+  } else if (bg.kind === 'carbon') {
+    defs += `<pattern id="carbon" width="12" height="12" patternUnits="userSpaceOnUse">
+      <rect width="12" height="12" fill="${colors[0]}"/>
+      <rect width="6" height="6" fill="${colors[1]}"/><rect x="6" y="6" width="6" height="6" fill="${colors[1]}"/></pattern>`;
+    fill = 'url(#carbon)';
+  } else if (bg.kind === 'aurora' || bg.kind === 'starfield') {
+    // animated kinds render their static base here; frames add motion in GIF path
+    defs += `<linearGradient id="bgGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="${colors[0]}"/><stop offset="100%" stop-color="${colors[colors.length-1]}"/></linearGradient>`;
+    fill = bg.kind === 'starfield' ? (colors[0] || '#0b1026') : 'url(#bgGrad)';
+  }
+  const meshRects = bg.kind === 'mesh'
+    ? `<rect width="${CARD_W}" height="${CARD_H}" fill="url(#m1)"/><rect width="${CARD_W}" height="${CARD_H}" fill="url(#m2)"/><rect width="${CARD_W}" height="${CARD_H}" fill="url(#m3)"/>`
+    : '';
+  return { defs, rect: `<rect width="${CARD_W}" height="${CARD_H}" fill="${fill}"/>${meshRects}` };
+}
+
+function frameSvg(frame, phase = 0) {
+  if (!frame || !frame.stroke) return { defs: '', el: '' };
+  const inset = 5, w = frame.width || 6;
+  let defs = '', stroke = frame.stroke;
+  if (frame.stroke === 'rainbow') {
+    // animated rainbow: rotate hue by phase
+    const hue = Math.floor(phase * 360);
+    defs += `<linearGradient id="rbF" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="hsl(${hue},90%,60%)"/>
+      <stop offset="50%" stop-color="hsl(${(hue+120)%360},90%,60%)"/>
+      <stop offset="100%" stop-color="hsl(${(hue+240)%360},90%,60%)"/></linearGradient>`;
+    stroke = 'url(#rbF)';
+  }
+  const glow = frame.glow ? `<filter id="fglow"><feGaussianBlur stdDeviation="4" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>` : '';
+  const filterAttr = frame.glow ? ` filter="url(#fglow)"` : '';
+  const el = `<rect x="${inset}" y="${inset}" width="${CARD_W-inset*2}" height="${CARD_H-inset*2}" rx="18" fill="none" stroke="${stroke}" stroke-width="${w}"${filterAttr}/>`
+    + (frame.ornate ? `<rect x="${inset+8}" y="${inset+8}" width="${CARD_W-(inset+8)*2}" height="${CARD_H-(inset+8)*2}" rx="12" fill="none" stroke="${stroke}" stroke-width="1.5" stroke-opacity="0.6"/>` : '');
+  return { defs: glow + defs, el };
+}
+
+function nameFill(nc) {
+  const colors = nc.colors || ['#ffffff'];
+  if (colors.length === 1) return { defs: '', fill: colors[0] };
+  const defs = `<linearGradient id="nameGrad" x1="0" y1="0" x2="1" y2="0">
+    <stop offset="0%" stop-color="${colors[0]}"/><stop offset="100%" stop-color="${colors[colors.length-1]}"/></linearGradient>`;
+  return { defs, fill: 'url(#nameGrad)' };
+}
+
+function statBox(x, y, w, label, value, accent) {
+  return `<g>
+    <rect x="${x}" y="${y}" width="${w}" height="70" rx="10" fill="#000000" fill-opacity="0.28"/>
+    <text x="${x+14}" y="${y+26}" font-family="'DejaVu Sans'" font-size="13" fill="#cbd5e1" letter-spacing="1">${esc(label)}</text>
+    <text x="${x+14}" y="${y+54}" font-family="'DejaVu Sans'" font-size="24" font-weight="700" fill="${accent||'#ffffff'}">${esc(value)}</text>
+  </g>`;
+}
+
+function truncate(s, n) { s = String(s == null ? '' : s); return s.length > n ? s.slice(0, n - 1) + '…' : s; }
+
+// Build the full card SVG. avatarDataUri may be null (falls back to a monogram).
+function cardSvg(ctx, gid, member, stats, equip, opts = {}) {
+  const phase = opts.phase || 0;
+  const bg    = catalogueItem('background', equip.background) || BACKGROUNDS[0];
+  const frame = catalogueItem('frame', equip.frame) || FRAMES[0];
+  const nc    = catalogueItem('namecolor', equip.namecolor) || NAMECOLORS[0];
+  const title = catalogueItem('title', equip.title) || TITLES[0];
+  const effect= catalogueItem('effect', equip.effect) || EFFECTS[0];
+
+  const bgL = bgSvg(bg, frame);
+  const frL = frameSvg(frame, phase);
+  const nmL = nameFill(nc);
+
+  const name  = truncate(member.displayName || member.username || 'Player', 20);
+  const av    = opts.avatarDataUri;
+  const AVX = 34, AVY = 34, AVR = 66;
+
+  // avatar circle (image or monogram)
+  const avatar = av
+    ? `<clipPath id="avc"><circle cx="${AVX+AVR}" cy="${AVY+AVR}" r="${AVR}"/></clipPath>
+       <image href="${av}" x="${AVX}" y="${AVY}" width="${AVR*2}" height="${AVR*2}" clip-path="url(#avc)" preserveAspectRatio="xMidYMid slice"/>
+       <circle cx="${AVX+AVR}" cy="${AVY+AVR}" r="${AVR}" fill="none" stroke="#ffffff" stroke-opacity="0.85" stroke-width="3"/>`
+    : `<circle cx="${AVX+AVR}" cy="${AVY+AVR}" r="${AVR}" fill="#334155"/>
+       <text x="${AVX+AVR}" y="${AVY+AVR+14}" text-anchor="middle" font-family="'DejaVu Sans'" font-size="46" font-weight="700" fill="#e2e8f0">${esc((name[0]||'?').toUpperCase())}</text>
+       <circle cx="${AVX+AVR}" cy="${AVY+AVR}" r="${AVR}" fill="none" stroke="#ffffff" stroke-opacity="0.5" stroke-width="3"/>`;
+
+  // header text
+  const nameX = AVX + AVR*2 + 26;
+  const titleLine = title.text
+    ? `<text x="${nameX}" y="106" font-family="'DejaVu Sans'" font-size="20" font-style="italic" fill="#e2e8f0" fill-opacity="0.92">“${esc(truncate(title.text,26))}”</text>`
+    : '';
+  const clanLine = stats.clan
+    ? `<text x="${nameX}" y="${title.text?134:112}" font-family="'DejaVu Sans'" font-size="16" fill="#a5b4fc">⚔ ${esc(truncate(stats.clan.name,22))} · ${esc(stats.clan.rank)}</text>`
+    : '';
+
+  // stats grid (bottom area)
+  const gy = 186, gx = 30, gw = 198, gap = 14;
+  const flip = stats.flip || { wins:0, losses:0, games:0, net:0, winPct:0, streak:0 };
+  const streakTxt = flip.streak > 0 ? `${flip.streak}W🔥` : flip.streak < 0 ? `${Math.abs(flip.streak)}L❄` : '—';
+  const col = stats.collection || { count:0, value:0 };
+  const grid = [
+    statBox(gx + (gw+gap)*0, gy, gw, 'DINAR', fmt(stats.dinar), '#fbbf24'),
+    statBox(gx + (gw+gap)*1, gy, gw, 'WEALTH RANK', stats.wealthRank ? `#${stats.wealthRank}` : 'Unranked', '#f9fafb'),
+    statBox(gx + (gw+gap)*2, gy, gw, 'COIN FLIPS', `${flip.wins}W / ${flip.losses}L`, '#34d399'),
+    statBox(gx + (gw+gap)*3, gy, gw, 'WIN RATE', `${(flip.winPct||0).toFixed(0)}%`, '#38bdf8'),
+    statBox(gx + (gw+gap)*0, gy+84, gw, 'NET FLIP', `${flip.net>=0?'+':''}${fmt(flip.net)}`, flip.net>=0?'#34d399':'#fb7185'),
+    statBox(gx + (gw+gap)*1, gy+84, gw, 'STREAK', streakTxt, '#f472b6'),
+    statBox(gx + (gw+gap)*2, gy+84, gw, 'CARDS', `${col.count}`, '#c4b5fd'),
+    statBox(gx + (gw+gap)*3, gy+84, gw, 'COIN DESIGN', truncate(stats.coin || 'Default', 12), '#fcd34d'),
+  ].join('');
+
+  // hearts badge (top-right) + published stamp
+  const hearts = opts.hearts || 0;
+  const heartBadge = `<g>
+    <rect x="${CARD_W-150}" y="26" width="120" height="40" rx="20" fill="#000000" fill-opacity="0.35"/>
+    <text x="${CARD_W-124}" y="52" font-family="'DejaVu Sans'" font-size="22">❤</text>
+    <text x="${CARD_W-96}" y="53" font-family="'DejaVu Sans'" font-size="22" font-weight="700" fill="#fb7185">${fmt(hearts)}</text>
+  </g>`;
+
+  // effect overlay
+  let effectOverlay = '', effectDefs = '';
+  if (effect.kind === 'holo') {
+    effectDefs += `<linearGradient id="holo" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.0"/>
+      <stop offset="45%" stop-color="#a5f3fc" stop-opacity="0.12"/>
+      <stop offset="55%" stop-color="#f0abfc" stop-opacity="0.12"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0.0"/></linearGradient>`;
+    effectOverlay = `<rect width="${CARD_W}" height="${CARD_H}" rx="18" fill="url(#holo)"/>`;
+  } else if (effect.kind === 'sparkle' || effect.kind === 'confetti') {
+    // animated particles: deterministic positions shifted by phase
+    let parts = '';
+    const N = effect.kind === 'confetti' ? 26 : 18;
+    for (let i = 0; i < N; i++) {
+      const seed = (i * 97.13) % 1;
+      const x = ((seed * CARD_W) + phase * (40 + i*3)) % CARD_W;
+      const y = ((i * 53.7) % CARD_H + phase * 60 * (effect.kind==='confetti'?1:0)) % CARD_H;
+      const size = 3 + (i % 3);
+      const colors = ['#fbbf24','#f472b6','#34d399','#38bdf8','#c4b5fd'];
+      if (effect.kind === 'confetti') {
+        parts += `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${size+2}" height="${size+2}" fill="${colors[i%colors.length]}" fill-opacity="0.85" transform="rotate(${(i*40+phase*120)%360} ${x.toFixed(1)} ${y.toFixed(1)})"/>`;
+      } else {
+        const tw = 0.5 + 0.5*Math.abs(Math.sin(phase*Math.PI*2 + i));
+        parts += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${size*0.6}" fill="#ffffff" fill-opacity="${tw.toFixed(2)}"/>`;
+      }
+    }
+    effectOverlay = parts;
+  }
+
+  // starfield animated background dots
+  let starLayer = '';
+  if (bg.kind === 'starfield') {
+    for (let i = 0; i < 60; i++) {
+      const x = (i * 137.5) % CARD_W;
+      const y = (i * 89.3) % CARD_H;
+      const tw = 0.3 + 0.7*Math.abs(Math.sin(phase*Math.PI*2 + i*0.7));
+      starLayer += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${(i%3===0?1.6:1)}" fill="#ffffff" fill-opacity="${tw.toFixed(2)}"/>`;
+    }
+  }
+  // aurora animated ribbons
+  let auroraLayer = '';
+  if (bg.kind === 'aurora') {
+    const cols = bg.colors;
+    for (let b = 0; b < 3; b++) {
+      const yBase = 120 + b*80;
+      const off = Math.sin(phase*Math.PI*2 + b) * 40;
+      auroraLayer += `<path d="M0 ${yBase+off} Q ${CARD_W*0.25} ${yBase-60+off}, ${CARD_W*0.5} ${yBase+off} T ${CARD_W} ${yBase+off} V ${CARD_H} H 0 Z" fill="${cols[b%cols.length]}" fill-opacity="0.16"/>`;
+    }
+  }
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${CARD_W}" height="${CARD_H}" viewBox="0 0 ${CARD_W} ${CARD_H}">
+    <defs>${bgL.defs}${frL.defs}${nmL.defs}${effectDefs}
+      <clipPath id="card"><rect width="${CARD_W}" height="${CARD_H}" rx="18"/></clipPath>
+    </defs>
+    <g clip-path="url(#card)">
+      ${bgL.rect}
+      ${starLayer}${auroraLayer}
+      <rect width="${CARD_W}" height="${CARD_H}" fill="#000000" fill-opacity="0.12"/>
+      ${avatar}
+      <text x="${nameX}" y="76" font-family="'DejaVu Sans'" font-size="40" font-weight="700" fill="${nmL.fill}">${esc(name)}</text>
+      ${titleLine}${clanLine}
+      ${grid}
+      ${heartBadge}
+      ${effectOverlay}
+    </g>
+    ${frL.el}
+  </svg>`;
+}
+
+// ── render helpers ──────────────────────────────────────────────────────────
+function svgToPng(svg) {
+  const r = new Resvg(svg, {
+    font: { fontFiles: [FONT_PATH, ...(FONT_BOLD ? [FONT_BOLD] : [])], loadSystemFonts: false, defaultFontFamily: 'DejaVu Sans' },
+    fitTo: { mode: 'width', value: CARD_W },
+  });
+  return r.render().asPng();
+}
+
+// fetch a Discord avatar and return a data URI (so resvg can embed it offline)
+async function avatarDataUri(member) {
+  try {
+    const user = member.user || member;
+    const url = user.displayAvatarURL
+      ? user.displayAvatarURL({ extension: 'png', size: 128, forceStatic: true })
+      : (typeof member.avatarURL === 'function' ? member.avatarURL() : null);
+    if (!url) return null;
+    const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    if (!res.ok) return null;
+    const buf = Buffer.from(await res.arrayBuffer());
+    return `data:image/png;base64,${buf.toString('base64')}`;
+  } catch { return null; }
+}
+
+const isAnimatedEquip = (equip) =>
+  ['background','frame','namecolor','effect'].some(slot => {
+    const it = catalogueItem(slot, equip[slot]); return it && it.anim;
+  });
+
+// Render the card as a PNG buffer, or an animated GIF if any equipped cosmetic is animated.
+async function renderCard(ctx, gid, member, opts = {}) {
+  const { db } = ctx;
+  const uid = (member.user || member).id;
+  const stats = gatherStats(ctx, gid, uid);
+  const equip = getEquipped(db, gid, uid);
+  const hearts = heartsFor(db, gid, uid);
+  const av = await avatarDataUri(member);
+  const base = { avatarDataUri: av, hearts };
+
+  if (opts.forceStatic || !isAnimatedEquip(equip)) {
+    const png = svgToPng(cardSvg(ctx, gid, member, stats, equip, { ...base, phase: 0 }));
+    return { attachment: png, name: `profile-${uid}.png`, animated: false };
+  }
+  // animated GIF
+  const { GIFEncoder, quantize, applyPalette } = require('gifenc');
+  const enc = GIFEncoder();
+  const FRAMES_N = 20, DELAY = 60;
+  for (let f = 0; f < FRAMES_N; f++) {
+    const phase = f / FRAMES_N;
+    const png = svgToPng(cardSvg(ctx, gid, member, stats, equip, { ...base, phase }));
+    const { data, width, height } = pngToRGBA(png);
+    const palette = quantize(data, 256);
+    const index = applyPalette(data, palette);
+    enc.writeFrame(index, width, height, { palette, delay: DELAY });
+  }
+  enc.finish();
+  return { attachment: Buffer.from(enc.bytes()), name: `profile-${uid}.gif`, animated: true };
+}
+
+// decode a PNG buffer to raw RGBA for gifenc
+function pngToRGBA(pngBuf) {
+  // resvg output is PNG; use pngjs-free path via Resvg? Simpler: use 'upng-js' style not available.
+  // Use the built-in: sharp isn't guaranteed. Decode via pngjs.
+  const { PNG } = require('pngjs');
+  const png = PNG.sync.read(pngBuf);
+  return { data: new Uint8Array(png.data), width: png.width, height: png.height };
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// EXPORTS — a factory the hub consumes
+// ───────────────────────────────────────────────────────────────────────────
+function initProfiles({ db, saveData, gachaApi, getDinar, spendDinar }) {
+  const ctx = { db, saveData, gachaApi, getDinar, spendDinar };
+
+  return {
+    CATALOGUE, SLOT_LABEL, catalogueItem,
+    isOwned:   (gid, uid, slot, key) => isOwned(db, gid, uid, slot, key),
+    addOwned:  (gid, uid, slot, key) => addOwned(db, gid, uid, slot, key, saveData),
+    getEquipped: (gid, uid) => getEquipped(db, gid, uid),
+    equipItem: (gid, uid, slot, key) => equipItem(db, gid, uid, slot, key, saveData),
+    ownedSlots: (gid, uid) => ownedSlots(db, gid, uid),
+
+    heartsFor:  (gid, uid) => heartsFor(db, gid, uid),
+    hasHearted: (gid, uid, voter) => hasHearted(db, gid, uid, voter),
+    toggleHeart:(gid, uid, voter) => toggleHeart(db, gid, uid, voter, saveData),
+
+    isPublished: (gid, uid) => !!pState(db, gid).published[uid],
+    setPublished:(gid, uid, on) => { pState(db, gid).published[uid] = !!on; saveData(gid); },
+    publishedList:(gid) => Object.keys(pState(db, gid).published).filter(u => pState(db, gid).published[u]),
+
+    gatherStats: (gid, uid) => gatherStats(ctx, gid, uid),
+    renderCard:  (gid, member, opts) => renderCard(ctx, gid, member, opts),
+
+    // buy: validates ownership + funds, spends Dinar, grants. returns {ok}|{error}
+    buy(gid, uid, slot, key) {
+      const item = catalogueItem(slot, key);
+      if (!item) return { error: 'Unknown item.' };
+      if (item.free || isOwned(db, gid, uid, slot, key)) return { error: 'You already own that.' };
+      const bal = getDinar ? getDinar(db, gid, uid) : gachaApi.balance(gid, uid);
+      if (bal < item.price) return { error: `You need **${fmt(item.price)} Dinar** — you have **${fmt(bal)}**.` };
+      if (spendDinar) spendDinar(db, gid, uid, item.price, saveData);
+      addOwned(db, gid, uid, slot, key, saveData);
+      return { ok: true, item };
+    },
+  };
+}
+
+module.exports = { initProfiles, CATALOGUE, SLOT_LABEL, BACKGROUNDS, FRAMES, NAMECOLORS, TITLES, EFFECTS };

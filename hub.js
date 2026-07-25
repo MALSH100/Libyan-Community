@@ -301,7 +301,7 @@ function getShopCommands() {
   ];
 }
 
-function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeView }) {
+function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeView, profileApi }) {
   const stateOf = (gid) => shopState(db, gid);
 
   // Post a clan alert. Prefers the dedicated alerts channel; falls back to the clan's own
@@ -446,7 +446,10 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
     new ButtonBuilder().setCustomId('hub:clan').setLabel('Clan').setEmoji('⚔️').setStyle(ButtonStyle.Success),
     new ButtonBuilder().setCustomId('hub:collection').setLabel('Collection').setEmoji('🃏').setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId('hub:exchange').setLabel('Exchange Rate').setEmoji('💱').setStyle(ButtonStyle.Secondary).setDisabled(!exchangeView));
-  const hubComponents = (isBooster) => [hubRow(isBooster), hubRow2()];
+  const hubRow3 = () => new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('hub:profile').setLabel('My Profile').setEmoji('🪪').setStyle(ButtonStyle.Primary).setDisabled(!profileApi),
+    new ButtonBuilder().setCustomId('hub:showcase:0').setLabel('Profile Showcase').setEmoji('❤️').setStyle(ButtonStyle.Secondary).setDisabled(!profileApi));
+  const hubComponents = (isBooster) => profileApi ? [hubRow(isBooster), hubRow2(), hubRow3()] : [hubRow(isBooster), hubRow2()];
   const backHubRow = () => new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('hub:home').setLabel('← Back to Hub').setStyle(ButtonStyle.Secondary));
   const backRolesRow = () => new ActionRowBuilder().addComponents(
@@ -815,6 +818,95 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
   // ═══════════════ CLAN UI ═══════════════
   const backHubOnly = () => new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('hub:home').setLabel('← Back to Hub').setStyle(ButtonStyle.Secondary));
+
+  // ─── PROFILE CARD SYSTEM ──────────────────────────────────────────────────
+  // Renders a member's card and returns a message payload (embed image + buttons).
+  async function profileHomeView(gid, member) {
+    const uid = (member.user || member).id;
+    const card = await profileApi.renderCard(gid, member, {});
+    const published = profileApi.isPublished(gid, uid);
+    const hearts = profileApi.heartsFor(gid, uid);
+    const embed = new EmbedBuilder()
+      .setColor(0x6366f1)
+      .setTitle('🪪 Your Profile Card')
+      .setDescription(`❤️ **${fmt(hearts)}** heart${hearts===1?'':'s'} received${published ? ' · 🌍 published to the showcase' : ' · not yet published'}`)
+      .setImage(`attachment://${card.name}`);
+    const rows = [
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('prof:shop:background').setLabel('Customize').setEmoji('🎨').setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId(published ? 'prof:unpublish' : 'prof:publish').setLabel(published ? 'Unpublish' : 'Publish to Showcase').setEmoji(published ? '🙈' : '🌍').setStyle(published ? ButtonStyle.Secondary : ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('hub:showcase:0').setLabel('View Showcase').setEmoji('❤️').setStyle(ButtonStyle.Secondary)),
+      backHubOnly(),
+    ];
+    return { content: '', embeds: [embed], files: [card], components: rows, attachments: [] };
+  }
+
+  // The cosmetics shop for one slot (background/frame/namecolor/title/effect).
+  function profileShopView(gid, uid, slot) {
+    const cat = profileApi.CATALOGUE[slot] || [];
+    const equipped = profileApi.getEquipped(gid, uid);
+    const bal = (gachaApi ? gachaApi.balance(gid, uid) : 0);
+    const slotRow = new ActionRowBuilder().addComponents(
+      ...['background','frame','namecolor','title','effect'].map(s =>
+        new ButtonBuilder().setCustomId(`prof:shop:${s}`).setLabel(profileApi.SLOT_LABEL[s]).setStyle(s===slot?ButtonStyle.Primary:ButtonStyle.Secondary)));
+    // dropdown of items in this slot
+    const opts = cat.slice(0, 25).map(it => {
+      const owned = it.free || profileApi.isOwned(gid, uid, slot, it.key);
+      const isEq  = equipped[slot] === it.key;
+      const price = it.free ? 'Free' : `${fmt(it.price)} Dinar`;
+      return {
+        label: `${it.name}${it.anim ? ' ✨' : ''}`.slice(0, 100),
+        value: it.key,
+        description: (isEq ? 'Equipped · ' : owned ? 'Owned · ' : `${price} · `) + (it.anim ? 'Animated GIF' : SLOT_HINT(slot)),
+        emoji: isEq ? '✅' : owned ? '📦' : '🔒',
+      };
+    });
+    const menu = new StringSelectMenuBuilder().setCustomId(`prof:pick:${slot}`).setPlaceholder(`Choose a ${profileApi.SLOT_LABEL[slot].toLowerCase()}…`).addOptions(opts);
+    const embed = new EmbedBuilder()
+      .setColor(0x10b981)
+      .setTitle(`🎨 Customize — ${profileApi.SLOT_LABEL[slot]}`)
+      .setDescription(`Your balance: **${fmt(bal)} Dinar**\nPick an item below to **equip** it (if owned) or **buy** it. ✨ = animated GIF (premium).`);
+    return { content:'', embeds: [embed], files: [], attachments: [], components: [slotRow, new ActionRowBuilder().addComponents(menu),
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('hub:profile').setLabel('← Back to Card').setStyle(ButtonStyle.Secondary))] };
+  }
+  const SLOT_HINT = (slot) => ({background:'card background',frame:'card border',namecolor:'name colour',title:'profile title',effect:'card effect'}[slot]||'');
+
+  // Showcase — browse published cards sorted by hearts (most-loved first).
+  async function showcaseView(gid, viewerId, idx, guild) {
+    let list = profileApi.publishedList(gid);
+    // sort by hearts desc so the "card of the moment" leads
+    list = list.map(id => ({ id, hearts: profileApi.heartsFor(gid, id) })).sort((a,b) => b.hearts - a.hearts);
+    if (!list.length) {
+      return { content:'', embeds: [new EmbedBuilder().setColor(0xfb7185).setTitle('❤️ Profile Showcase')
+        .setDescription('No one has published a card yet!\nOpen **🪪 My Profile** → **Publish to Showcase** to be the first.')], files: [], attachments: [], components: [backHubOnly()] };
+    }
+    const n = list.length;
+    idx = ((idx % n) + n) % n;   // wrap
+    const entry = list[idx];
+    let member;
+    try { member = await guild.members.fetch(entry.id); } catch { member = null; }
+    if (!member) {
+      // member left — skip by rendering a placeholder and letting them navigate on
+      const embed = new EmbedBuilder().setColor(0xfb7185).setTitle(`❤️ Profile Showcase — ${idx+1}/${n}`)
+        .setDescription('This member is no longer in the server.');
+      return { content:'', embeds:[embed], files:[], attachments:[], components:[navRow(idx,n,entry.id,viewerId,true), backHubOnly()] };
+    }
+    const card = await profileApi.renderCard(gid, member, {});
+    const rank = idx + 1;
+    const medal = rank===1?'🥇':rank===2?'🥈':rank===3?'🥉':`#${rank}`;
+    const embed = new EmbedBuilder().setColor(0xfb7185)
+      .setTitle(`❤️ Profile Showcase — ${medal} of ${n}`)
+      .setDescription(`**${esc(member.displayName || member.user.username)}** · ❤️ **${fmt(entry.hearts)}** heart${entry.hearts===1?'':'s'}`)
+      .setImage(`attachment://${card.name}`);
+    return { content:'', embeds:[embed], files:[card], attachments:[], components:[navRow(idx,n,entry.id,viewerId,false), backHubOnly()] };
+  }
+  function navRow(idx, n, targetId, viewerId, disabledHeart) {
+    return new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`hub:showcase:${idx-1}`).setLabel('◀ Prev').setStyle(ButtonStyle.Secondary).setDisabled(n<=1),
+      new ButtonBuilder().setCustomId(`prof:heart:${targetId}:${idx}`).setLabel('Heart').setEmoji('❤️').setStyle(ButtonStyle.Danger).setDisabled(disabledHeart || targetId===viewerId),
+      new ButtonBuilder().setCustomId(`hub:showcase:${idx+1}`).setLabel('Next ▶').setStyle(ButtonStyle.Secondary).setDisabled(n<=1));
+  }
 
   // entry: no clan → offer create/join; in a clan → dashboard
   function clanEntryView(gid, uid) {
@@ -1446,6 +1538,68 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
           new ButtonBuilder().setCustomId('hub:home').setLabel('← Back to Hub').setStyle(ButtonStyle.Secondary)));
         return interaction.editReply({ content: '', embeds: view.embeds, files: view.files || [], attachments: [], components: rows });
       }
+      // ─── PROFILE CARD HANDLERS ──────────────────────────────────────────
+      if (interaction.isButton() && interaction.customId === 'hub:profile') {
+        if (!profileApi) return interaction.reply({ content: 'Profiles aren\'t available right now.', flags: 64 });
+        await interaction.deferUpdate();
+        try {
+          const member = interaction.member || await interaction.guild.members.fetch(uid);
+          return interaction.editReply(await profileHomeView(gid, member));
+        } catch (e) {
+          console.error('[profile] home failed:', e.message);
+          return interaction.editReply({ content: '⚠️ Couldn\'t render your card. Try again in a moment.', embeds: [], components: [backHubOnly()], files: [], attachments: [] });
+        }
+      }
+      if (interaction.isButton() && interaction.customId.startsWith('prof:shop:')) {
+        if (!profileApi) return interaction.reply({ content: 'Unavailable.', flags: 64 });
+        const slot = interaction.customId.split(':')[2];
+        return interaction.update(profileShopView(gid, uid, slot));
+      }
+      if (interaction.isStringSelectMenu() && interaction.customId.startsWith('prof:pick:')) {
+        const slot = interaction.customId.split(':')[2];
+        const key  = interaction.values[0];
+        if (profileApi.isOwned(gid, uid, slot, key)) {
+          profileApi.equipItem(gid, uid, slot, key);
+          setAction(uid, `🪪 Equipped a new ${profileApi.SLOT_LABEL[slot].toLowerCase()}.`);
+          return interaction.update(profileShopView(gid, uid, slot));
+        }
+        const res = profileApi.buy(gid, uid, slot, key);
+        if (res.error) return interaction.update(Object.assign(profileShopView(gid, uid, slot), { content: `⚠️ ${res.error}` }));
+        profileApi.equipItem(gid, uid, slot, key);   // auto-equip on purchase
+        setAction(uid, `🪪 Bought & equipped **${res.item.name}**.`);
+        return interaction.update(Object.assign(profileShopView(gid, uid, slot), { content: `✅ Bought & equipped **${res.item.name}**!` }));
+      }
+      if (interaction.isButton() && interaction.customId === 'prof:publish') {
+        profileApi.setPublished(gid, uid, true);
+        setAction(uid, '🌍 Published your profile to the showcase.');
+        await interaction.deferUpdate();
+        const member = interaction.member || await interaction.guild.members.fetch(uid);
+        return interaction.editReply(await profileHomeView(gid, member));
+      }
+      if (interaction.isButton() && interaction.customId === 'prof:unpublish') {
+        profileApi.setPublished(gid, uid, false);
+        setAction(uid, '🙈 Removed your profile from the showcase.');
+        await interaction.deferUpdate();
+        const member = interaction.member || await interaction.guild.members.fetch(uid);
+        return interaction.editReply(await profileHomeView(gid, member));
+      }
+      // Showcase: browse published cards, heart them. customId hub:showcase:<index>
+      if (interaction.isButton() && interaction.customId.startsWith('hub:showcase:')) {
+        if (!profileApi) return interaction.reply({ content: 'Unavailable.', flags: 64 });
+        const idx = parseInt(interaction.customId.split(':')[2], 10) || 0;
+        await interaction.deferUpdate();
+        return interaction.editReply(await showcaseView(gid, uid, idx, interaction.guild));
+      }
+      if (interaction.isButton() && interaction.customId.startsWith('prof:heart:')) {
+        const targetId = interaction.customId.split(':')[2];
+        const idx = parseInt(interaction.customId.split(':')[3], 10) || 0;
+        if (targetId === uid) return interaction.reply({ content: '😅 You can\'t heart your own card!', flags: 64 });
+        const { hearted, total } = profileApi.toggleHeart(gid, targetId, uid);
+        await interaction.deferUpdate();
+        const view = await showcaseView(gid, uid, idx, interaction.guild);
+        return interaction.editReply(Object.assign(view, { content: hearted ? `❤️ You hearted this card! (${fmt(total)} total)` : `💔 Heart removed. (${fmt(total)} total)` }));
+      }
+
       if (interaction.isButton() && interaction.customId === 'col:mine')       return interaction.update(myCardsView(gid, uid));
       if (interaction.isButton() && interaction.customId === 'col:wishlist')   return interaction.update(wishlistView(gid, uid));
       if (interaction.isButton() && interaction.customId === 'col:boardCollectors') return interaction.update(boardView(gid, 'collectors'));
