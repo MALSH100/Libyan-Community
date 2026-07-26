@@ -1366,12 +1366,11 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
             .setTitle(`🪪 ${esc(member.displayName || target.username)}'s Profile`)
             .setDescription(`❤️ **${fmt(hearts)}** heart${hearts===1?'':'s'}`)
             .setImage(`attachment://${card.name}`);
-          // A single button that opens the private hub menu (same as /hub). For someone
-          // else's card we also offer a Heart button that replies privately.
+          // Two buttons: edit YOUR OWN profile (opens the editor), and heart THIS profile.
           const row = new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId('prof:openhub').setLabel('View Profile Showcase').setEmoji('❤️').setStyle(ButtonStyle.Primary));
+            new ButtonBuilder().setCustomId('prof:editmine').setLabel('Edit your Profile').setEmoji('🎨').setStyle(ButtonStyle.Success));
           if (!isMe) row.addComponents(
-            new ButtonBuilder().setCustomId(`prof:heartp:${target.id}`).setLabel('Give a Heart').setEmoji('❤️').setStyle(ButtonStyle.Danger).setDisabled(target.bot));
+            new ButtonBuilder().setCustomId(`prof:heartp:${target.id}`).setLabel('Heart').setEmoji('❤️').setStyle(ButtonStyle.Danger).setDisabled(target.bot));
           return interaction.editReply({ embeds: [embed], files: [card], components: [row] });
         } catch (e) {
           console.error('[profile] command failed:', e.message);
@@ -1412,6 +1411,19 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
         return interaction.update({ embeds: [hubEmbed(boosting, uid, gid)], components: hubComponents(boosting), files: [], attachments: [] });
       }
       // "View Profile Showcase" from a public /profile card → open the PRIVATE
+      // "Edit your Profile" from a /profile card → open the editor for the CLICKER'S OWN
+      // profile as a fresh ephemeral reply (works even when viewing someone else's card).
+      if (interaction.isButton() && interaction.customId === 'prof:editmine') {
+        if (!profileApi) return interaction.reply({ content: 'Profiles aren\'t available right now.', flags: 64 });
+        await interaction.deferReply({ flags: 64 });
+        try {
+          const member = interaction.member || await interaction.guild.members.fetch(uid);
+          return interaction.editReply(await profileEditorView(gid, member));
+        } catch (e) {
+          console.error('[profile] editmine failed:', e.message);
+          return interaction.editReply({ content: '⚠️ Couldn\'t open the editor. Try /hub → 🪪 My Profile → Edit Layout.' });
+        }
+      }
       // "Your Profile Card" view (Edit Layout / Publish / View Showcase / Back to Hub),
       // as a fresh ephemeral reply so the public /profile message is never modified.
       if (interaction.isButton() && interaction.customId === 'prof:openhub') {
@@ -2083,15 +2095,19 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
         await interaction.deferUpdate();
         return interaction.editReply(await showcaseView(gid, uid, idx, interaction.guild));
       }
-      // Heart from a /profile card (public message) — reply privately, never touch the shared message
+      // Heart from a /profile card. New heart → PUBLIC confirmation. Already hearted →
+      // PRIVATE "you already hearted" message. Never un-hearts (add-only). The public
+      // /profile message itself is never edited.
       if (interaction.isButton() && interaction.customId.startsWith('prof:heartp:')) {
         const targetId = interaction.customId.split(':')[2];
-        if (targetId === uid) return interaction.reply({ content: '😅 You can\'t heart your own card!', flags: 64 });
-        const { hearted, total } = profileApi.toggleHeart(gid, targetId, uid);
+        if (targetId === uid) return interaction.reply({ content: '😅 You can\'t heart your own profile!', flags: 64 });
+        if (profileApi.hasHearted(gid, targetId, uid)) {
+          return interaction.reply({ content: `💗 You've already hearted <@${targetId}>'s profile.`, flags: 64 });
+        }
+        const { total } = profileApi.toggleHeart(gid, targetId, uid);   // adds the heart
         return interaction.reply({
-          content: hearted ? `❤️ You hearted <@${targetId}>'s card! They now have **${fmt(total)}** heart${total===1?'':'s'}.`
-                           : `💔 You removed your heart from <@${targetId}>'s card. They now have **${fmt(total)}**.`,
-          flags: 64,   // ephemeral — only the clicker sees this, public card stays untouched
+          content: `❤️ <@${uid}> hearted <@${targetId}>'s profile! They now have **${fmt(total)}** heart${total===1?'':'s'}.`,
+          // public (no ephemeral flag)
         });
       }
       if (interaction.isButton() && interaction.customId.startsWith('prof:heart:')) {
