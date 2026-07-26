@@ -286,7 +286,12 @@ function addElement(db, gid, uid, type, data, saveData) {
   layout.custom = true;
   const maxZ = layout.elements.reduce((m, e) => Math.max(m, e.z || 0), 0);
   // sensible default size per type
-  const size = type === 'text' ? { w: 240, h: 44 } : type === 'stat' ? { w: 198, h: 70 } : { w: 140, h: 140 };
+  const size = type === 'text' ? { w: 240, h: 44 }
+    : type === 'stat' ? { w: 198, h: 70 }
+    : type === 'avatar' ? { w: 132, h: 132 }
+    : type === 'name' ? { w: 300, h: 50 }
+    : type === 'clan' ? { w: 260, h: 26 }
+    : { w: 140, h: 140 };
   const el = clampEl({ id: newElementId(), type, x: 60, y: 60, ...size, rot: 0, z: maxZ + 1, data: data || {} });
   layout.elements.push(el);
   if (saveData) saveData(gid);
@@ -615,7 +620,7 @@ function cardSvg(ctx, gid, member, stats, equip, opts = {}) {
 
 // ── render one element to SVG ────────────────────────────────────────────────
 function elementSvg(el, ctx2) {
-  const { stats, images, selectedId } = ctx2;
+  const { stats, images, selectedId, member, avatarDataUri: av } = ctx2;
   const cx = el.x + el.w / 2, cy = el.y + el.h / 2;
   const rot = el.rot ? ` transform="rotate(${el.rot} ${cx} ${cy})"` : '';
   let inner = '';
@@ -633,6 +638,30 @@ function elementSvg(el, ctx2) {
       <text x="${el.x+14}" y="${el.y+26}" font-family="'DejaVu Sans'" font-size="13" fill="#cbd5e1" letter-spacing="1">${esc(def.label)}</text>
       <text x="${el.x+14}" y="${el.y+54}" font-family="'DejaVu Sans'" font-size="24" font-weight="700" fill="${def.accent}">${esc(def.get(stats))}</text>
     </g>`;
+  } else if (el.type === 'avatar') {
+    // circular avatar (or monogram fallback)
+    const r = Math.min(el.w, el.h) / 2;
+    const name = (member && (member.displayName || member.username)) || 'Player';
+    if (av) {
+      const clipId = `av_${el.id}`;
+      inner = `<clipPath id="${clipId}"><circle cx="${cx}" cy="${cy}" r="${r}"/></clipPath>
+        <image href="${av}" x="${el.x}" y="${el.y}" width="${el.w}" height="${el.h}" clip-path="url(#${clipId})" preserveAspectRatio="xMidYMid slice"/>
+        <circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="#ffffff" stroke-opacity="0.85" stroke-width="3"/>`;
+    } else {
+      inner = `<circle cx="${cx}" cy="${cy}" r="${r}" fill="#334155"/>
+        <text x="${cx}" y="${cy + r*0.32}" text-anchor="middle" font-family="'DejaVu Sans'" font-size="${r*0.9}" font-weight="700" fill="#e2e8f0">${esc((name[0]||'?').toUpperCase())}</text>
+        <circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="#ffffff" stroke-opacity="0.5" stroke-width="3"/>`;
+    }
+  } else if (el.type === 'name') {
+    const d = el.data || {};
+    const size = d.size || 40;
+    const color = d.color || '#ffffff';
+    const name = truncate((member && (member.displayName || member.username)) || 'Player', 20);
+    inner = `<text x="${el.x}" y="${el.y + size}" font-family="'DejaVu Sans'" font-size="${size}" font-weight="700" fill="${color}">${esc(name)}</text>`;
+  } else if (el.type === 'clan') {
+    const size = (el.data?.size) || 18;
+    const clanTxt = stats.clan ? `⚔ ${truncate(stats.clan.name, 22)} · ${stats.clan.rank}` : 'No clan';
+    inner = `<text x="${el.x}" y="${el.y + size}" font-family="'DejaVu Sans'" font-size="${size}" fill="${el.data?.color || '#a5b4fc'}">${esc(clanTxt)}</text>`;
   } else if (el.type === 'sticker' || el.type === 'image') {
     const uri = images[el.data?.imageKey];
     if (uri) {
@@ -670,7 +699,7 @@ function customCardSvg(ctx, gid, member, stats, equip, layout, opts = {}) {
   if (bg.kind === 'aurora') { const cols=bg.colors; for(let b=0;b<3;b++){const yBase=120+b*80,off=Math.sin(phase*Math.PI*2+b)*40;auroraLayer+=`<path d="M0 ${yBase+off} Q ${CARD_W*0.25} ${yBase-60+off}, ${CARD_W*0.5} ${yBase+off} T ${CARD_W} ${yBase+off} V ${CARD_H} H 0 Z" fill="${cols[b%cols.length]}" fill-opacity="0.16"/>`;} }
 
   const els = (layout.elements || []).slice().sort((a,b)=>(a.z||0)-(b.z||0));
-  const elementLayer = els.map(el => elementSvg(el, { stats, images, selectedId })).join('\n');
+  const elementLayer = els.map(el => elementSvg(el, { stats, images, selectedId, member, avatarDataUri: opts.avatarDataUri })).join('\n');
 
   let autoStats = '';
   const hasStatEls = els.some(e => e.type === 'stat');

@@ -926,7 +926,7 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
         .addOptions(layout.elements.slice(0, 25).map(e => ({
           label: elLabel(e).slice(0, 100), value: e.id,
           description: `x${Math.round(e.x)} y${Math.round(e.y)} · ${e.w}×${e.h}${e.rot?` · ${e.rot}°`:''}`.slice(0,100),
-          emoji: e.type==='text'?'🔤':e.type==='stat'?'📊':'🖼️',
+          emoji: e.type==='text'?'🔤':e.type==='stat'?'📊':e.type==='avatar'?'🖼️':e.type==='name'?'🏷️':e.type==='clan'?'⚔️':'🖼️',
           default: e.id === selId,
         })));
       rows.push(new ActionRowBuilder().addComponents(menu));
@@ -949,7 +949,7 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
     // row 4: add-new + manage images + reset
     rows.push(new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId('prof:add:text').setLabel('Add Text').setEmoji('🔤').setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId('prof:add:stat').setLabel('Add Stat').setEmoji('📊').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId('prof:add:stat').setLabel('Add Stat/Info').setEmoji('📊').setStyle(ButtonStyle.Success),
       new ButtonBuilder().setCustomId('prof:images').setLabel('Manage Images').setEmoji('🖼️').setStyle(ButtonStyle.Primary),
       new ButtonBuilder().setCustomId('prof:reset').setLabel('Reset').setEmoji('♻️').setStyle(ButtonStyle.Danger)));
     // row 5: contextual actions for the selected element + back
@@ -963,7 +963,9 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
 
     return { content:'', embeds:[embed], files:[card], attachments:[], components: rows.slice(0, 5) };
   }
-  const elLabel = (e) => e.data?.name ? `${e.type==='text'?'🔤':e.type==='stat'?'📊':'🖼️'} ${e.data.name}` : (e.type==='text' ? `Text: “${(e.data?.text||'').slice(0,18)}”` : e.type==='stat' ? `Stat: ${(e.data?.stat||'').toUpperCase()}` : e.type==='sticker' ? 'Sticker' : 'Image');
+  const elTypeLabel = (e) => e.type==='text' ? `Text: “${(e.data?.text||'').slice(0,18)}”` : e.type==='stat' ? `Stat: ${(e.data?.stat||'').toUpperCase()}` : e.type==='avatar' ? 'Profile Avatar' : e.type==='name' ? 'Profile Name' : e.type==='clan' ? 'Clan Info' : e.type==='sticker' ? 'Sticker' : 'Image';
+  const elEmoji = (e) => e.type==='text'?'🔤':e.type==='stat'?'📊':e.type==='avatar'?'🖼️':e.type==='name'?'🏷️':e.type==='clan'?'⚔️':'🖼️';
+  const elLabel = (e) => e.data?.name ? `${elEmoji(e)} ${e.data.name}` : elTypeLabel(e);
 
   // Manage Images: shows usage vs cap, a dropdown to delete an image, and one to pick a banner.
   function manageImagesView(gid, uid) {
@@ -1857,8 +1859,8 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
           if (el) {
             const f = dir === 'up' ? 1.15 : 0.87;
             const patch = { w: Math.round(el.w * f), h: Math.round(el.h * f) };
-            // text elements scale by font size too
-            if (el.type === 'text') patch.data = { size: Math.max(10, Math.round((el.data?.size || 30) * f)) };
+            // text-based elements scale their font size too
+            if (el.type === 'text' || el.type === 'name' || el.type === 'clan') patch.data = { size: Math.max(10, Math.round((el.data?.size || 30) * f)) };
             profileApi.updateElement(gid, uid, selId, patch);
           }
         }
@@ -1904,15 +1906,27 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
         return interaction.showModal(modal);
       }
       if (interaction.isButton() && interaction.customId === 'prof:add:stat') {
-        // dropdown of stats to add
-        const menu = new StringSelectMenuBuilder().setCustomId('prof:addStatPick').setPlaceholder('Which stat to add?')
-          .addOptions(profileApi.STAT_KEYS.map(k => ({ label: profileApi.STAT_DEFS[k].label, value: k })));
-        return interaction.reply({ content: 'Pick a stat to place on your card:', components: [new ActionRowBuilder().addComponents(menu)], flags: 64 });
+        // dropdown of things to add: profile pieces (avatar/name/clan) + live stats
+        const specials = [
+          { label: 'Profile Avatar', value: '__avatar', emoji: '🖼️', description: 'Your Discord avatar (circular)' },
+          { label: 'Profile Name', value: '__name', emoji: '🏷️', description: 'Your display name' },
+          { label: 'Clan (name & rank)', value: '__clan', emoji: '⚔️', description: 'Your clan and rank' },
+        ];
+        const statOpts = profileApi.STAT_KEYS.map(k => ({ label: profileApi.STAT_DEFS[k].label, value: k, emoji: '📊' }));
+        const menu = new StringSelectMenuBuilder().setCustomId('prof:addStatPick').setPlaceholder('Add a profile piece or a stat…')
+          .addOptions([...specials, ...statOpts].slice(0, 25));
+        return interaction.reply({ content: 'Pick something to place on your card:', components: [new ActionRowBuilder().addComponents(menu)], flags: 64 });
       }
       if (interaction.isStringSelectMenu() && interaction.customId === 'prof:addStatPick') {
-        const el = profileApi.addElement(gid, uid, 'stat', { stat: interaction.values[0] });
+        const v = interaction.values[0];
+        let el;
+        if (v === '__avatar') el = profileApi.addElement(gid, uid, 'avatar', {});
+        else if (v === '__name') el = profileApi.addElement(gid, uid, 'name', { color: '#ffffff', size: 40 });
+        else if (v === '__clan') el = profileApi.addElement(gid, uid, 'clan', { color: '#a5b4fc', size: 18 });
+        else el = profileApi.addElement(gid, uid, 'stat', { stat: v });
         profileSel.set(uid, el.id);
-        await interaction.update({ content: '✅ Stat added — go back to the editor to position it.', components: [] });
+        const label = v === '__avatar' ? 'Avatar' : v === '__name' ? 'Name' : v === '__clan' ? 'Clan' : 'Stat';
+        await interaction.update({ content: `✅ ${label} added — go back to the editor to position it.`, components: [] });
         return;
       }
       if (interaction.isButton() && interaction.customId === 'prof:add:sticker') {
