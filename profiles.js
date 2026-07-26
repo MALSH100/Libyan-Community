@@ -727,6 +727,10 @@ function svgToPng(svg) {
 }
 
 // fetch a Discord avatar and return a data URI (so resvg can embed it offline)
+// Avatar fetches hit Discord's CDN over the network — cache the resulting data URI by
+// avatar URL for a few minutes so repeated card renders don't pay that round-trip each time.
+const _avatarCache = new Map();   // url -> { uri, expires }
+const _AVATAR_TTL_MS = 10 * 60 * 1000;
 async function avatarDataUri(member) {
   try {
     const user = member.user || member;
@@ -734,10 +738,15 @@ async function avatarDataUri(member) {
       ? user.displayAvatarURL({ extension: 'png', size: 128, forceStatic: true })
       : (typeof member.avatarURL === 'function' ? member.avatarURL() : null);
     if (!url) return null;
+    const hit = _avatarCache.get(url);
+    if (hit && hit.expires > Date.now()) return hit.uri;
     const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
     if (!res.ok) return null;
     const buf = Buffer.from(await res.arrayBuffer());
-    return `data:image/png;base64,${buf.toString('base64')}`;
+    const uri = `data:image/png;base64,${buf.toString('base64')}`;
+    if (_avatarCache.size > 200) _avatarCache.clear();
+    _avatarCache.set(url, { uri, expires: Date.now() + _AVATAR_TTL_MS });
+    return uri;
   } catch { return null; }
 }
 
@@ -781,6 +790,28 @@ function decodeGifFrames(dataUri) {
   }
 }
 
+// Cache decoded GIF frames so the same uploaded GIF isn't re-decoded (~hundreds of ms)
+// on every render. Keyed by a cheap hash of the data URI; capped to avoid unbounded growth.
+const _gifFrameCache = new Map();   // hash -> [pngDataUri,...]
+const _GIF_CACHE_MAX = 40;
+function _hashUri(s) {
+  let h = 5381;
+  const step = Math.max(1, Math.floor(s.length / 4096));   // sample for speed
+  for (let i = 0; i < s.length; i += step) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  return `${s.length}_${h}`;
+}
+function decodeGifFramesCached(dataUri) {
+  if (!isGifUri(dataUri)) return null;
+  const key = _hashUri(dataUri);
+  if (_gifFrameCache.has(key)) return _gifFrameCache.get(key);
+  const frames = decodeGifFrames(dataUri);
+  if (frames) {
+    if (_gifFrameCache.size >= _GIF_CACHE_MAX) _gifFrameCache.delete(_gifFrameCache.keys().next().value);
+    _gifFrameCache.set(key, frames);
+  }
+  return frames;
+}
+
 // Build a frame cache for every GIF image referenced by the layout (banner + elements).
 // Returns { key: [pngDataUri,...] } for GIFs, and the max frame count across them.
 function buildGifCache(layout, images) {
@@ -792,7 +823,7 @@ function buildGifCache(layout, images) {
   for (const key of keys) {
     const uri = images[key];
     if (isGifUri(uri)) {
-      const frames = decodeGifFrames(uri);
+      const frames = decodeGifFramesCached(uri);
       if (frames && frames.length > 1) { cache[key] = frames; maxFrames = Math.max(maxFrames, frames.length); }
     }
   }
@@ -844,15 +875,39 @@ async function renderCard(ctx, gid, member, opts = {}) {
   }
   const { GIFEncoder, quantize, applyPalette } = require('gifenc');
   const enc = GIFEncoder();
-  // enough frames to show the GIF smoothly; align cosmetic phase to the loop
   const FRAMES_N = Math.min(30, Math.max(20, gifFrames));
   const DELAY = 80;
+
+  // Render every frame's RGBA first, then build ONE shared palette from a sample of all
+  // frames and apply it to each. Re-quantizing per frame (the old approach) gives each
+  // frame a slightly different palette + dithering, which causes the shimmer/pixel-crawl
+  // and colour distortion between frames. A single global palette keeps colours stable.
+  const rgbaFrames = [];
+  let W = 0, H = 0;
   for (let f = 0; f < FRAMES_N; f++) {
     const png = svgToPng(drawSvg(f / FRAMES_N, f));
     const { data, width, height } = pngToRGBA(png);
-    const palette = quantize(data, 256);
-    const index = applyPalette(data, palette);
-    enc.writeFrame(index, width, height, { palette, delay: DELAY });
+    W = width; H = height;
+    rgbaFrames.push(data);
+  }
+  // Build a representative sample by combining pixels across frames (subsampled for speed),
+  // so the shared palette covers colours that appear in any frame.
+  const sampleStride = Math.max(1, Math.floor(rgbaFrames.length / 6));  // ~6 frames sampled
+  let sample;
+  if (rgbaFrames.length === 1) {
+    sample = rgbaFrames[0];
+  } else {
+    const chunks = [];
+    for (let i = 0; i < rgbaFrames.length; i += sampleStride) chunks.push(rgbaFrames[i]);
+    const totalLen = chunks.reduce((s, c) => s + c.length, 0);
+    sample = new Uint8Array(totalLen);
+    let off = 0;
+    for (const c of chunks) { sample.set(c, off); off += c.length; }
+  }
+  const palette = quantize(sample, 256);
+  for (let f = 0; f < FRAMES_N; f++) {
+    const index = applyPalette(rgbaFrames[f], palette);
+    enc.writeFrame(index, W, H, { palette, delay: DELAY, first: f === 0 });
   }
   enc.finish();
   return { attachment: Buffer.from(enc.bytes()), name: `profile-${uid}.gif`, animated: true };
