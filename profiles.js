@@ -463,7 +463,7 @@ function nameFill(nc) {
 
 function statBox(x, y, w, label, value, accent) {
   return `<g>
-    <rect x="${x}" y="${y}" width="${w}" height="70" rx="10" fill="#000000" fill-opacity="0.28"/>
+    <rect x="${x}" y="${y}" width="${w}" height="70" rx="10" fill="#000000" fill-opacity="0.55"/>
     <text x="${x+14}" y="${y+26}" font-family="'DejaVu Sans'" font-size="13" fill="#cbd5e1" letter-spacing="1">${esc(label)}</text>
     <text x="${x+14}" y="${y+54}" font-family="'DejaVu Sans'" font-size="24" font-weight="700" fill="${accent||'#ffffff'}">${esc(value)}</text>
   </g>`;
@@ -484,7 +484,7 @@ function heartBadgeSvg(hearts) {
   const heartPath = `M ${hx} ${hy+4} C ${hx} ${hy+1}, ${hx-4} ${hy-3}, ${hx-8} ${hy-1} C ${hx-12} ${hy+1}, ${hx-11} ${hy+6}, ${hx} ${hy+13} C ${hx+11} ${hy+6}, ${hx+12} ${hy+1}, ${hx+8} ${hy-1} C ${hx+4} ${hy-3}, ${hx} ${hy+1}, ${hx} ${hy+4} Z`;
   const textX = badgeX + padL + heartW + gap;
   return `<g>
-    <rect x="${badgeX}" y="${y}" width="${badgeW}" height="${h}" rx="${h/2}" fill="#000000" fill-opacity="0.35"/>
+    <rect x="${badgeX}" y="${y}" width="${badgeW}" height="${h}" rx="${h/2}" fill="#000000" fill-opacity="0.6"/>
     <path d="${heartPath}" fill="#ef4444" stroke="#b91c1c" stroke-width="1"/>
     <text x="${textX}" y="${y+26}" font-family="'DejaVu Sans'" font-size="22" font-weight="700" fill="#fb7185">${label}</text>
   </g>`;
@@ -629,7 +629,7 @@ function elementSvg(el, ctx2) {
   } else if (el.type === 'stat') {
     const def = STAT_DEFS[el.data?.stat] || STAT_DEFS.dinar;
     inner = `<g>
-      <rect x="${el.x}" y="${el.y}" width="${el.w}" height="${el.h}" rx="10" fill="#000000" fill-opacity="0.28"/>
+      <rect x="${el.x}" y="${el.y}" width="${el.w}" height="${el.h}" rx="10" fill="#000000" fill-opacity="0.55"/>
       <text x="${el.x+14}" y="${el.y+26}" font-family="'DejaVu Sans'" font-size="13" fill="#cbd5e1" letter-spacing="1">${esc(def.label)}</text>
       <text x="${el.x+14}" y="${el.y+54}" font-family="'DejaVu Sans'" font-size="24" font-weight="700" fill="${def.accent}">${esc(def.get(stats))}</text>
     </g>`;
@@ -682,7 +682,7 @@ function customCardSvg(ctx, gid, member, stats, equip, layout, opts = {}) {
       const col = idx % 4, row = Math.floor(idx / 4);
       const x = gx + (gw+gap)*col, y = gy + row*84;
       autoStats += `<g>
-        <rect x="${x}" y="${y}" width="${gw}" height="70" rx="10" fill="#000000" fill-opacity="0.28"/>
+        <rect x="${x}" y="${y}" width="${gw}" height="70" rx="10" fill="#000000" fill-opacity="0.55"/>
         <text x="${x+14}" y="${y+26}" font-family="'DejaVu Sans'" font-size="13" fill="#cbd5e1" letter-spacing="1">${esc(def.label)}</text>
         <text x="${x+14}" y="${y+54}" font-family="'DejaVu Sans'" font-size="24" font-weight="700" fill="${def.accent}">${esc(def.get(stats))}</text>
       </g>`;

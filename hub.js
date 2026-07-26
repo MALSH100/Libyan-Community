@@ -889,6 +889,7 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
     const rows = [
       new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId('prof:edit').setLabel('Edit Layout').setEmoji('🎨').setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId('prof:upload').setLabel('Upload Image').setEmoji('📤').setStyle(ButtonStyle.Primary),
         new ButtonBuilder().setCustomId(published ? 'prof:unpublish' : 'prof:publish').setLabel(published ? 'Unpublish' : 'Publish to Showcase').setEmoji(published ? '🙈' : '🌍').setStyle(published ? ButtonStyle.Secondary : ButtonStyle.Primary),
         new ButtonBuilder().setCustomId('hub:showcase:0').setLabel('View Showcase').setEmoji('❤️').setStyle(ButtonStyle.Secondary)),
       backHubOnly(),
@@ -971,7 +972,7 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
     const used = keys.length, max = profileApi.MAX_IMAGES;
     const banner = profileApi.getBanner(gid, uid);
     const embed = new EmbedBuilder().setColor(0x8b5cf6).setTitle('🖼️ Manage Images')
-      .setDescription(`You're using **${used} / ${max}** image slots.\nUpload more by posting an image with the caption \`!cardimg\`.\n\n• **Delete** an image to free a slot (also removes it from your card).\n• **Set as Banner** to make an image fill your whole card background${banner ? ' *(one is currently set)*' : ''}.`);
+      .setDescription(`You're using **${used} / ${max}** image slots.\nPress **📤 Upload Image** then drop an image in the channel — or caption any image with \`!cardimg\`.\n\n• **Delete** an image to free a slot (also removes it from your card).\n• **Set as Banner** to make an image fill your whole card background${banner ? ' *(one is currently set)*' : ''}.`);
     const rows = [];
     if (used) {
       const delOpts = keys.slice(0, 25).map((k, i) => ({ label: `Image ${i+1}${banner===k?' (banner)':''}`, value: k, emoji: '🗑️' }));
@@ -980,7 +981,9 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
         ...keys.slice(0, 24).map((k, i) => ({ label: `Use Image ${i+1} as banner`, value: k, emoji: '🖼️', default: banner===k }))];
       rows.push(new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('prof:imgBanner').setPlaceholder('Set a banner…').addOptions(banOpts)));
     }
-    rows.push(new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('prof:edit').setLabel('← Back to Editor').setStyle(ButtonStyle.Secondary)));
+    rows.push(new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('prof:upload').setLabel('Upload Image').setEmoji('📤').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('prof:edit').setLabel('← Back to Editor').setStyle(ButtonStyle.Secondary)));
     return { content: '', embeds: [embed], components: rows, files: [], attachments: [], flags: 64 };
   }
   const moveStep = new Map();  // uid -> px step
@@ -1294,20 +1297,27 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
   }
 
   // ═══════════════ INTERACTIONS ═══════════════
-  // Image upload for profile cards: a member posts an image with caption "!cardimg".
-  // We fetch it, store as a data URI, and add it as a sticker element on their card.
-  // Trusted community (per owner) — no approval step.
+  // Image upload for profile cards. Two ways to trigger:
+  //  (a) post an image with the caption "!cardimg", or
+  //  (b) press the "Upload Image" button (arms a 2-minute window, then just post any image).
+  // We fetch it, store as a data URI, and add it as a sticker element. Trusted community.
+  const awaitingUpload = new Map();   // uid -> expiry timestamp
+  const UPLOAD_WINDOW_MS = 2 * 60 * 1000;
   if (profileApi) client.on('messageCreate', async (message) => {
     try {
       if (message.author?.bot || !message.guild) return;
       const content = (message.content || '').trim().toLowerCase();
-      if (!content.startsWith('!cardimg')) return;
-      console.log(`[profile] !cardimg from ${message.author.id} — attachments: ${message.attachments?.size || 0}`);
+      const armedUntil = awaitingUpload.get(message.author.id) || 0;
+      const isArmed = Date.now() < armedUntil && (message.attachments?.size > 0);
+      const hasCaption = content.startsWith('!cardimg');
+      if (!hasCaption && !isArmed) return;
+      if (isArmed) awaitingUpload.delete(message.author.id);   // consume the armed window
+      console.log(`[profile] image trigger from ${message.author.id} (${hasCaption?'!cardimg':'button-armed'}) — attachments: ${message.attachments?.size || 0}`);
       const att = message.attachments?.first();
       if (!att) {
-        return message.reply('📎 Attach an image **in the same message** as `!cardimg` (drag the image in, then type `!cardimg` as the caption before sending).').catch(()=>{});
+        if (hasCaption) return message.reply('📎 Attach an image **in the same message** as `!cardimg` (drag the image in, then type `!cardimg` as the caption before sending).').catch(()=>{});
+        return;
       }
-      // contentType is sometimes null on Discord — fall back to the filename extension
       const name = (att.name || '').toLowerCase();
       const extOk = /\.(png|jpe?g|gif|webp)$/.test(name);
       const typeOk = att.contentType && att.contentType.startsWith('image/');
@@ -1315,22 +1325,20 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
         return message.reply(`That doesn't look like an image (got \`${att.contentType || name || 'unknown'}\`). Use a PNG, JPG, GIF or WEBP.`).catch(()=>{});
       }
       if (att.size > 8 * 1024 * 1024) return message.reply('That image is too large — please keep it under 8MB.').catch(()=>{});
-      // enforce the per-user image cap
       const used = profileApi.imageCount(message.guild.id, message.author.id);
       if (used >= profileApi.MAX_IMAGES) {
-        return message.reply(`🚫 You've reached the max of **${profileApi.MAX_IMAGES} images**. Delete one from **/hub → 🪪 My Profile → Edit Layout → Manage Images** before adding another.`).catch(()=>{});
+        return message.reply(`🚫 You've reached the max of **${profileApi.MAX_IMAGES} images**. Delete one from **🪪 My Profile → Edit Layout → Manage Images** before adding another.`).catch(()=>{});
       }
       const res = await fetch(att.url, { signal: AbortSignal.timeout(12000) }).catch((e)=>{ console.error('[profile] image fetch error:', e.message); return null; });
       if (!res || !res.ok) return message.reply('Couldn\'t download that image — try uploading it again.').catch(()=>{});
       const buf = Buffer.from(await res.arrayBuffer());
-      // derive mime from contentType, else from extension
       let mime = att.contentType && att.contentType.startsWith('image/') ? att.contentType.split(';')[0] : null;
       if (!mime) mime = name.endsWith('.png') ? 'image/png' : name.endsWith('.gif') ? 'image/gif' : name.endsWith('.webp') ? 'image/webp' : 'image/jpeg';
       const dataUri = `data:${mime};base64,${buf.toString('base64')}`;
       const key = profileApi.addUserImage(message.guild.id, message.author.id, dataUri);
       profileApi.addElement(message.guild.id, message.author.id, 'sticker', { imageKey: key, circle: false });
       console.log(`[profile] image stored for ${message.author.id} (key=${key}, ${(buf.length/1024).toFixed(0)}KB, ${mime})`);
-      await message.reply('🖼️ **Added to your card!** Open **/hub → 🪪 My Profile → Edit Layout** to position and resize it (it starts near the top-left).').catch(()=>{});
+      await message.reply('🖼️ **Added to your card!** Open **🪪 My Profile → Edit Layout** to position and resize it (it starts near the top-left).').catch(()=>{});
     } catch (e) {
       console.error('[profile] image upload failed:', e.message, e.stack?.split('\n')[1]);
       try { await message.reply('⚠️ Something went wrong adding that image. Check the logs or try again.'); } catch {}
@@ -1400,11 +1408,19 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
         const boosting = isBoosting(interaction);
         return interaction.update({ embeds: [hubEmbed(boosting, uid, gid)], components: hubComponents(boosting), files: [], attachments: [] });
       }
-      // "View Profile Showcase" from a public /profile card → open a fresh PRIVATE hub menu
-      // (a new ephemeral reply, so the public /profile message is never modified)
+      // "View Profile Showcase" from a public /profile card → open the PRIVATE
+      // "Your Profile Card" view (Edit Layout / Publish / View Showcase / Back to Hub),
+      // as a fresh ephemeral reply so the public /profile message is never modified.
       if (interaction.isButton() && interaction.customId === 'prof:openhub') {
-        const boosting = isBoosting(interaction);
-        return interaction.reply({ embeds: [hubEmbed(boosting, uid, gid)], components: hubComponents(boosting), flags: 64 });
+        if (!profileApi) return interaction.reply({ content: 'Profiles aren\'t available right now.', flags: 64 });
+        await interaction.deferReply({ flags: 64 });
+        try {
+          const member = interaction.member || await interaction.guild.members.fetch(uid);
+          return interaction.editReply(await profileHomeView(gid, member));
+        } catch (e) {
+          console.error('[profile] openhub failed:', e.message);
+          return interaction.editReply({ content: '⚠️ Couldn\'t open your profile. Try /hub → 🪪 My Profile.' });
+        }
       }
       // ── Shop sub-menu: Custom Roles + Coin Designs ──
       if (interaction.isButton() && interaction.customId === 'hub:shop') {
@@ -1903,6 +1919,17 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
         return interaction.reply({ content: '🖼️ **To add a sticker or image:** upload an image in this channel with the message text `!cardimg` (as the caption). I\'ll add it to your card automatically. Then reopen the editor to position it.\n\n*Tip: PNG with transparency works best for stickers.*', flags: 64 });
       }
       // Manage Images: list uploaded images, delete them (frees the cap), or set one as banner
+      // "Upload Image" button — arms a short window, then the user just posts an image
+      // in the channel (no caption needed). Also works via the !cardimg caption anytime.
+      if (interaction.isButton() && interaction.customId === 'prof:upload') {
+        if (!profileApi) return interaction.reply({ content: 'Unavailable.', flags: 64 });
+        const used = profileApi.imageCount(gid, uid);
+        if (used >= profileApi.MAX_IMAGES) {
+          return interaction.reply({ content: `🚫 You're at the max of **${profileApi.MAX_IMAGES} images**. Delete one in **Edit Layout → Manage Images** first.`, flags: 64 });
+        }
+        awaitingUpload.set(uid, Date.now() + UPLOAD_WINDOW_MS);
+        return interaction.reply({ content: `📤 **Ready for your image!** Just drag an image into this channel and send it (no caption needed) within the next **2 minutes**, and I'll add it to your card.\n\n*Works with PNG, JPG, GIF or WEBP. You can also caption any image with \`!cardimg\` anytime.*`, flags: 64 });
+      }
       if (interaction.isButton() && interaction.customId === 'prof:images') {
         return interaction.reply(manageImagesView(gid, uid));
       }
