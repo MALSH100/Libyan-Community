@@ -950,7 +950,8 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
     rows.push(new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId('prof:add:text').setLabel('Add Text').setEmoji('🔤').setStyle(ButtonStyle.Success),
       new ButtonBuilder().setCustomId('prof:add:stat').setLabel('Add Stat/Info').setEmoji('📊').setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId('prof:images').setLabel('Manage Images').setEmoji('🖼️').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('prof:border').setLabel('Border').setEmoji('🖼️').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('prof:images').setLabel('Manage Images').setEmoji('🗂️').setStyle(ButtonStyle.Primary),
       new ButtonBuilder().setCustomId('prof:reset').setLabel('Reset').setEmoji('♻️').setStyle(ButtonStyle.Danger)));
     // row 5: contextual actions for the selected element + back
     const backRow = new ActionRowBuilder();
@@ -1904,6 +1905,26 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
           new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('sz').setLabel('Size 10-80 — optional (default 30)').setStyle(TextInputStyle.Short).setMaxLength(2).setRequired(false)),
           new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('f').setLabel('Font — optional').setStyle(TextInputStyle.Short).setMaxLength(8).setRequired(false).setPlaceholder(fontList.slice(0, 100))));
         return interaction.showModal(modal);
+      }
+      // Border picker — all frames are free; equips the chosen one on the card
+      if (interaction.isButton() && interaction.customId === 'prof:border') {
+        if (!profileApi) return interaction.reply({ content: 'Unavailable.', flags: 64 });
+        const current = profileApi.getEquipped(gid, uid).frame;
+        const frames = profileApi.CATALOGUE.frame || [];
+        const menu = new StringSelectMenuBuilder().setCustomId('prof:borderPick').setPlaceholder('Choose a border…')
+          .addOptions(frames.slice(0, 25).map(fr => ({
+            label: fr.name, value: fr.key,
+            description: fr.anim ? 'Animated' : fr.key === 'none' ? 'No border' : 'Free',
+            emoji: fr.key === current ? '✅' : '🖼️',
+            default: fr.key === current,
+          })));
+        return interaction.reply({ content: '🖼️ Pick a border for your card (all free):', components: [new ActionRowBuilder().addComponents(menu)], flags: 64 });
+      }
+      if (interaction.isStringSelectMenu() && interaction.customId === 'prof:borderPick') {
+        profileApi.equipItem(gid, uid, 'frame', interaction.values[0]);
+        const fr = profileApi.catalogueItem('frame', interaction.values[0]);
+        await interaction.update({ content: `✅ Border set to **${fr ? fr.name : interaction.values[0]}** — reopen the editor to see it.`, components: [] });
+        return;
       }
       if (interaction.isButton() && interaction.customId === 'prof:add:stat') {
         // dropdown of things to add: profile pieces (avatar/name/clan) + live stats
