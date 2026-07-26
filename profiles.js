@@ -85,15 +85,22 @@ const FRAMES = [
   { key: 'rose',    name: 'Rose Gold',       price: 0, free: true, stroke: '#fda4af', width: 7, glow: '#fb7185' },
   { key: 'lilac',   name: 'Lilac',           price: 0, free: true, stroke: '#c4b5fd', width: 7, glow: '#a855f7' },
   { key: 'sky',     name: 'Sky Blue',        price: 0, free: true, stroke: '#38bdf8', width: 7, glow: '#0ea5e9' },
-  { key: 'teal',    name: 'Teal',            price: 0, free: true, stroke: '#2dd4bf', width: 7, glow: '#14b8a6' },
-  { key: 'lime',    name: 'Lime',            price: 0, free: true, stroke: '#a3e635', width: 7, glow: '#84cc16' },
-  { key: 'orange',  name: 'Orange',          price: 0, free: true, stroke: '#fb923c', width: 7, glow: '#f97316' },
   { key: 'crimson', name: 'Crimson',         price: 0, free: true, stroke: '#ef4444', width: 7, glow: '#dc2626' },
   { key: 'white',   name: 'White',           price: 0, free: true, stroke: '#f8fafc', width: 6 },
   { key: 'black',   name: 'Black',           price: 0, free: true, stroke: '#1e293b', width: 7 },
   { key: 'ornate',  name: 'Ornate Gold',     price: 0, free: true, stroke: '#fcd34d', width: 9, glow: '#f59e0b', ornate: true },
   { key: 'ornatepink', name: 'Ornate Pink',  price: 0, free: true, stroke: '#f9a8d4', width: 9, glow: '#ec4899', ornate: true },
-  { key: 'rainbow', name: 'Rainbow (animated)', price: 0, free: true, anim: true, stroke: 'rainbow', width: 8 },
+  // ── animated frames ──
+  { key: 'rainbow',    name: 'Rainbow ✨',       price: 0, free: true, anim: true,      stroke: 'rainbow', width: 8 },
+  { key: 'goldpulse',  name: 'Gold Pulse ✨',    price: 0, free: true, anim: 'pulse',   stroke: '#fbbf24', width: 7, glow: '#f59e0b' },
+  { key: 'pinkpulse',  name: 'Pink Pulse ✨',    price: 0, free: true, anim: 'pulse',   stroke: '#f472b6', width: 7, glow: '#ec4899' },
+  { key: 'rubypulse',  name: 'Ruby Pulse ✨',    price: 0, free: true, anim: 'pulse',   stroke: '#fb7185', width: 7, glow: '#e11d48' },
+  { key: 'skypulse',   name: 'Sky Pulse ✨',     price: 0, free: true, anim: 'pulse',   stroke: '#38bdf8', width: 7, glow: '#0ea5e9' },
+  { key: 'emeraldpulse', name: 'Emerald Pulse ✨', price: 0, free: true, anim: 'pulse', stroke: '#34d399', width: 7, glow: '#10b981' },
+  { key: 'lilacpulse', name: 'Lilac Pulse ✨',   price: 0, free: true, anim: 'pulse',   stroke: '#c4b5fd', width: 7, glow: '#a855f7' },
+  { key: 'goldshimmer', name: 'Gold Shimmer ✨', price: 0, free: true, anim: 'shimmer', stroke: '#b8860b', shimmerHi: '#fff4c2', width: 8, glow: '#f59e0b' },
+  { key: 'silvershimmer', name: 'Silver Shimmer ✨', price: 0, free: true, anim: 'shimmer', stroke: '#94a3b8', shimmerHi: '#ffffff', width: 8, glow: '#cbd5e1' },
+  { key: 'pinkshimmer', name: 'Pink Shimmer ✨', price: 0, free: true, anim: 'shimmer', stroke: '#db2777', shimmerHi: '#fce7f3', width: 8, glow: '#ec4899' },
 ];
 
 // Name colours (solid or gradient text fill for the display name)
@@ -453,6 +460,8 @@ function frameSvg(frame, phase = 0) {
   if (!frame || !frame.stroke) return { defs: '', el: '' };
   const inset = 5, w = frame.width || 6;
   let defs = '', stroke = frame.stroke;
+  let extraGlowStd = 4;
+  let strokeOpacity = 1;
   if (frame.stroke === 'rainbow') {
     // animated rainbow: rotate hue by phase
     const hue = Math.floor(phase * 360);
@@ -461,10 +470,25 @@ function frameSvg(frame, phase = 0) {
       <stop offset="50%" stop-color="hsl(${(hue+120)%360},90%,60%)"/>
       <stop offset="100%" stop-color="hsl(${(hue+240)%360},90%,60%)"/></linearGradient>`;
     stroke = 'url(#rbF)';
+  } else if (frame.anim === 'pulse') {
+    // animated glow pulse: the border's glow blur + opacity breathe with phase
+    const t = 0.5 + 0.5 * Math.sin(phase * Math.PI * 2);   // 0..1..0
+    extraGlowStd = 2 + t * 7;                               // glow swells and shrinks
+    strokeOpacity = 0.7 + 0.3 * t;                          // brightness breathes
+  } else if (frame.anim === 'shimmer') {
+    // animated shimmer: a bright band sweeps around the border via a moving gradient
+    const p = phase % 1;
+    const c = frame.stroke, hi = frame.shimmerHi || '#ffffff';
+    defs += `<linearGradient id="shm_${frame.key}" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="${Math.max(0,(p-0.15)).toFixed(3)}" stop-color="${c}"/>
+      <stop offset="${p.toFixed(3)}" stop-color="${hi}"/>
+      <stop offset="${Math.min(1,(p+0.15)).toFixed(3)}" stop-color="${c}"/></linearGradient>`;
+    stroke = `url(#shm_${frame.key})`;
   }
-  const glow = frame.glow ? `<filter id="fglow"><feGaussianBlur stdDeviation="4" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>` : '';
+  const glow = frame.glow ? `<filter id="fglow"><feGaussianBlur stdDeviation="${extraGlowStd.toFixed(2)}" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>` : '';
   const filterAttr = frame.glow ? ` filter="url(#fglow)"` : '';
-  const el = `<rect x="${inset}" y="${inset}" width="${CARD_W-inset*2}" height="${CARD_H-inset*2}" rx="18" fill="none" stroke="${stroke}" stroke-width="${w}"${filterAttr}/>`
+  const opAttr = strokeOpacity < 1 ? ` stroke-opacity="${strokeOpacity.toFixed(2)}"` : '';
+  const el = `<rect x="${inset}" y="${inset}" width="${CARD_W-inset*2}" height="${CARD_H-inset*2}" rx="18" fill="none" stroke="${stroke}" stroke-width="${w}"${filterAttr}${opAttr}/>`
     + (frame.ornate ? `<rect x="${inset+8}" y="${inset+8}" width="${CARD_W-(inset+8)*2}" height="${CARD_H-(inset+8)*2}" rx="12" fill="none" stroke="${stroke}" stroke-width="1.5" stroke-opacity="0.6"/>` : '');
   return { defs: glow + defs, el };
 }
