@@ -75,14 +75,25 @@ const BACKGROUNDS = [
 
 // Frames = the border around the card. `render` supplies stroke styling.
 const FRAMES = [
-  { key: 'none',    name: 'None',            price: 0,    free: true,  stroke: null },
-  { key: 'bronze',  name: 'Bronze',          price: 300,  stroke: '#b08d57', width: 6 },
-  { key: 'silver',  name: 'Silver',          price: 800,  stroke: '#cbd5e1', width: 6 },
-  { key: 'gold',    name: 'Gold',            price: 2000, stroke: '#fbbf24', width: 7, glow: '#f59e0b' },
-  { key: 'emerald', name: 'Emerald',         price: 2500, stroke: '#34d399', width: 7, glow: '#10b981' },
-  { key: 'ruby',    name: 'Ruby',            price: 3000, stroke: '#fb7185', width: 7, glow: '#e11d48' },
-  { key: 'ornate',  name: 'Ornate Gold',     price: 5000, stroke: '#fcd34d', width: 9, glow: '#f59e0b', ornate: true },
-  { key: 'rainbow', name: 'Rainbow (animated)', price: 7000, anim: true, stroke: 'rainbow', width: 8 },
+  { key: 'none',    name: 'None',            price: 0, free: true, stroke: null },
+  { key: 'bronze',  name: 'Bronze',          price: 0, free: true, stroke: '#b08d57', width: 6 },
+  { key: 'silver',  name: 'Silver',          price: 0, free: true, stroke: '#cbd5e1', width: 6 },
+  { key: 'gold',    name: 'Gold',            price: 0, free: true, stroke: '#fbbf24', width: 7, glow: '#f59e0b' },
+  { key: 'emerald', name: 'Emerald',         price: 0, free: true, stroke: '#34d399', width: 7, glow: '#10b981' },
+  { key: 'ruby',    name: 'Ruby',            price: 0, free: true, stroke: '#fb7185', width: 7, glow: '#e11d48' },
+  { key: 'pink',    name: 'Pink',            price: 0, free: true, stroke: '#f472b6', width: 7, glow: '#ec4899' },
+  { key: 'rose',    name: 'Rose Gold',       price: 0, free: true, stroke: '#fda4af', width: 7, glow: '#fb7185' },
+  { key: 'lilac',   name: 'Lilac',           price: 0, free: true, stroke: '#c4b5fd', width: 7, glow: '#a855f7' },
+  { key: 'sky',     name: 'Sky Blue',        price: 0, free: true, stroke: '#38bdf8', width: 7, glow: '#0ea5e9' },
+  { key: 'teal',    name: 'Teal',            price: 0, free: true, stroke: '#2dd4bf', width: 7, glow: '#14b8a6' },
+  { key: 'lime',    name: 'Lime',            price: 0, free: true, stroke: '#a3e635', width: 7, glow: '#84cc16' },
+  { key: 'orange',  name: 'Orange',          price: 0, free: true, stroke: '#fb923c', width: 7, glow: '#f97316' },
+  { key: 'crimson', name: 'Crimson',         price: 0, free: true, stroke: '#ef4444', width: 7, glow: '#dc2626' },
+  { key: 'white',   name: 'White',           price: 0, free: true, stroke: '#f8fafc', width: 6 },
+  { key: 'black',   name: 'Black',           price: 0, free: true, stroke: '#1e293b', width: 7 },
+  { key: 'ornate',  name: 'Ornate Gold',     price: 0, free: true, stroke: '#fcd34d', width: 9, glow: '#f59e0b', ornate: true },
+  { key: 'ornatepink', name: 'Ornate Pink',  price: 0, free: true, stroke: '#f9a8d4', width: 9, glow: '#ec4899', ornate: true },
+  { key: 'rainbow', name: 'Rainbow (animated)', price: 0, free: true, anim: true, stroke: 'rainbow', width: 8 },
 ];
 
 // Name colours (solid or gradient text fill for the display name)
