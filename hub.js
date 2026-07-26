@@ -937,7 +937,7 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
       new ButtonBuilder().setCustomId('prof:mv:down').setLabel('▼').setStyle(ButtonStyle.Secondary).setDisabled(noSel),
       new ButtonBuilder().setCustomId('prof:mv:left').setLabel('◀').setStyle(ButtonStyle.Secondary).setDisabled(noSel),
       new ButtonBuilder().setCustomId('prof:mv:right').setLabel('▶').setStyle(ButtonStyle.Secondary).setDisabled(noSel),
-      new ButtonBuilder().setCustomId('prof:step').setLabel(`Step ${moveStep.get(uid)||20}px`).setStyle(ButtonStyle.Primary)));
+      new ButtonBuilder().setCustomId('prof:step').setLabel(`Movement Speed: ${(moveStep.get(uid)||20)}x`).setStyle(ButtonStyle.Primary)));
     // row 3: size / rotate / layer / delete
     rows.push(new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId('prof:sz:down').setLabel('➖').setStyle(ButtonStyle.Secondary).setDisabled(noSel),
@@ -945,15 +945,16 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
       new ButtonBuilder().setCustomId('prof:rot').setLabel('↻ Rotate').setStyle(ButtonStyle.Secondary).setDisabled(noSel),
       new ButtonBuilder().setCustomId('prof:layer:front').setLabel('Bring Front').setStyle(ButtonStyle.Secondary).setDisabled(noSel),
       new ButtonBuilder().setCustomId('prof:del').setLabel('Delete').setEmoji('🗑️').setStyle(ButtonStyle.Danger).setDisabled(noSel)));
-    // row 4: add-new + stats + reset
+    // row 4: add-new + manage images + reset
     rows.push(new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId('prof:add:text').setLabel('Add Text').setEmoji('🔤').setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId('prof:add:sticker').setLabel('Add Sticker').setEmoji('🖼️').setStyle(ButtonStyle.Success),
       new ButtonBuilder().setCustomId('prof:add:stat').setLabel('Add Stat').setEmoji('📊').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId('prof:images').setLabel('Manage Images').setEmoji('🖼️').setStyle(ButtonStyle.Primary),
       new ButtonBuilder().setCustomId('prof:reset').setLabel('Reset').setEmoji('♻️').setStyle(ButtonStyle.Danger)));
-    // row 5: text-edit (if a text element selected) + back
+    // row 5: contextual actions for the selected element + back
     const backRow = new ActionRowBuilder();
-    if (sel && sel.type === 'text') backRow.addComponents(new ButtonBuilder().setCustomId('prof:text:edit').setLabel('Edit Text/Font').setEmoji('✏️').setStyle(ButtonStyle.Primary));
+    if (sel) backRow.addComponents(new ButtonBuilder().setCustomId('prof:rename').setLabel('Rename Item').setEmoji('🏷️').setStyle(ButtonStyle.Secondary));
+    if (sel && sel.type === 'text') backRow.addComponents(new ButtonBuilder().setCustomId('prof:text:edit').setLabel('Edit Text').setEmoji('✏️').setStyle(ButtonStyle.Primary));
     if (sel && sel.type === 'stat') backRow.addComponents(new ButtonBuilder().setCustomId('prof:stat:change').setLabel('Change Stat').setEmoji('🔀').setStyle(ButtonStyle.Primary));
     if (sel && (sel.type === 'sticker' || sel.type === 'image')) backRow.addComponents(new ButtonBuilder().setCustomId('prof:img:circle').setLabel('Toggle Circle').setEmoji('⭕').setStyle(ButtonStyle.Primary));
     backRow.addComponents(new ButtonBuilder().setCustomId('hub:profile').setLabel('← Done').setStyle(ButtonStyle.Secondary));
@@ -961,7 +962,27 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
 
     return { content:'', embeds:[embed], files:[card], attachments:[], components: rows.slice(0, 5) };
   }
-  const elLabel = (e) => e.type==='text' ? `Text: “${(e.data?.text||'').slice(0,18)}”` : e.type==='stat' ? `Stat: ${(e.data?.stat||'').toUpperCase()}` : e.type==='sticker' ? 'Sticker' : 'Image';
+  const elLabel = (e) => e.data?.name ? `${e.type==='text'?'🔤':e.type==='stat'?'📊':'🖼️'} ${e.data.name}` : (e.type==='text' ? `Text: “${(e.data?.text||'').slice(0,18)}”` : e.type==='stat' ? `Stat: ${(e.data?.stat||'').toUpperCase()}` : e.type==='sticker' ? 'Sticker' : 'Image');
+
+  // Manage Images: shows usage vs cap, a dropdown to delete an image, and one to pick a banner.
+  function manageImagesView(gid, uid) {
+    const imgs = profileApi.userImages(gid, uid);
+    const keys = Object.keys(imgs);
+    const used = keys.length, max = profileApi.MAX_IMAGES;
+    const banner = profileApi.getBanner(gid, uid);
+    const embed = new EmbedBuilder().setColor(0x8b5cf6).setTitle('🖼️ Manage Images')
+      .setDescription(`You're using **${used} / ${max}** image slots.\nUpload more by posting an image with the caption \`!cardimg\`.\n\n• **Delete** an image to free a slot (also removes it from your card).\n• **Set as Banner** to make an image fill your whole card background${banner ? ' *(one is currently set)*' : ''}.`);
+    const rows = [];
+    if (used) {
+      const delOpts = keys.slice(0, 25).map((k, i) => ({ label: `Image ${i+1}${banner===k?' (banner)':''}`, value: k, emoji: '🗑️' }));
+      rows.push(new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('prof:imgDelete').setPlaceholder('Delete an image…').addOptions(delOpts)));
+      const banOpts = [{ label: 'No banner (use background cosmetic)', value: '__none__', emoji: '🚫' },
+        ...keys.slice(0, 24).map((k, i) => ({ label: `Use Image ${i+1} as banner`, value: k, emoji: '🖼️', default: banner===k }))];
+      rows.push(new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('prof:imgBanner').setPlaceholder('Set a banner…').addOptions(banOpts)));
+    }
+    rows.push(new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('prof:edit').setLabel('← Back to Editor').setStyle(ButtonStyle.Secondary)));
+    return { content: '', embeds: [embed], components: rows, files: [], attachments: [], flags: 64 };
+  }
   const moveStep = new Map();  // uid -> px step
 
   // The cosmetics shop for one slot (background/frame/namecolor/title/effect).
@@ -1294,6 +1315,11 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
         return message.reply(`That doesn't look like an image (got \`${att.contentType || name || 'unknown'}\`). Use a PNG, JPG, GIF or WEBP.`).catch(()=>{});
       }
       if (att.size > 8 * 1024 * 1024) return message.reply('That image is too large — please keep it under 8MB.').catch(()=>{});
+      // enforce the per-user image cap
+      const used = profileApi.imageCount(message.guild.id, message.author.id);
+      if (used >= profileApi.MAX_IMAGES) {
+        return message.reply(`🚫 You've reached the max of **${profileApi.MAX_IMAGES} images**. Delete one from **/hub → 🪪 My Profile → Edit Layout → Manage Images** before adding another.`).catch(()=>{});
+      }
       const res = await fetch(att.url, { signal: AbortSignal.timeout(12000) }).catch((e)=>{ console.error('[profile] image fetch error:', e.message); return null; });
       if (!res || !res.ok) return message.reply('Couldn\'t download that image — try uploading it again.').catch(()=>{});
       const buf = Buffer.from(await res.arrayBuffer());
@@ -1329,13 +1355,13 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
             .setTitle(`🪪 ${esc(member.displayName || target.username)}'s Profile`)
             .setDescription(`❤️ **${fmt(hearts)}** heart${hearts===1?'':'s'}`)
             .setImage(`attachment://${card.name}`);
-          const rows = [];
-          if (isMe) rows.push(new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId('prof:edit').setLabel('Edit Layout').setEmoji('🎨').setStyle(ButtonStyle.Success),
-            new ButtonBuilder().setCustomId('hub:showcase:0').setLabel('Showcase').setEmoji('❤️').setStyle(ButtonStyle.Secondary)));
-          else rows.push(new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId(`prof:heart:${target.id}:0`).setLabel('Heart').setEmoji('❤️').setStyle(ButtonStyle.Danger).setDisabled(target.bot)));
-          return interaction.editReply({ embeds: [embed], files: [card], components: rows });
+          // A single button that opens the private hub menu (same as /hub). For someone
+          // else's card we also offer a Heart button that replies privately.
+          const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId('prof:openhub').setLabel('View Profile Showcase').setEmoji('❤️').setStyle(ButtonStyle.Primary));
+          if (!isMe) row.addComponents(
+            new ButtonBuilder().setCustomId(`prof:heartp:${target.id}`).setLabel('Give a Heart').setEmoji('❤️').setStyle(ButtonStyle.Danger).setDisabled(target.bot));
+          return interaction.editReply({ embeds: [embed], files: [card], components: [row] });
         } catch (e) {
           console.error('[profile] command failed:', e.message);
           return interaction.editReply({ content: '⚠️ Couldn\'t render that profile card.' });
@@ -1373,6 +1399,12 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
       if (interaction.isButton() && interaction.customId === 'hub:home') {
         const boosting = isBoosting(interaction);
         return interaction.update({ embeds: [hubEmbed(boosting, uid, gid)], components: hubComponents(boosting), files: [], attachments: [] });
+      }
+      // "View Profile Showcase" from a public /profile card → open a fresh PRIVATE hub menu
+      // (a new ephemeral reply, so the public /profile message is never modified)
+      if (interaction.isButton() && interaction.customId === 'prof:openhub') {
+        const boosting = isBoosting(interaction);
+        return interaction.reply({ embeds: [hubEmbed(boosting, uid, gid)], components: hubComponents(boosting), flags: 64 });
       }
       // ── Shop sub-menu: Custom Roles + Coin Designs ──
       if (interaction.isButton() && interaction.customId === 'hub:shop') {
@@ -1775,7 +1807,8 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
       }
       if (interaction.isButton() && interaction.customId === 'prof:step') {
         const cur = moveStep.get(uid) || 20;
-        const next = cur === 20 ? 5 : cur === 5 ? 1 : cur === 1 ? 50 : 20;   // cycle 20→5→1→50
+        // cycle 1x → 5x → 20x → 50x → 80x → 1x  (value = pixels moved per nudge)
+        const next = cur === 1 ? 5 : cur === 5 ? 20 : cur === 20 ? 50 : cur === 50 ? 80 : 1;
         moveStep.set(uid, next);
         await interaction.deferUpdate();
         const member = interaction.member || await interaction.guild.members.fetch(uid);
@@ -1845,12 +1878,13 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
         return interaction.editReply(await profileEditorView(gid, member, '♻️ Card reset to the default template.'));
       }
       if (interaction.isButton() && interaction.customId === 'prof:add:text') {
-        // open a modal to type text
+        const fontList = profileApi.FONTS.map(f => f.key).join(' / ');
         const modal = new ModalBuilder().setCustomId('prof:textModal:new').setTitle('Add Text');
         modal.addComponents(
           new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('t').setLabel('Text').setStyle(TextInputStyle.Short).setMaxLength(40).setRequired(true)),
           new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('c').setLabel('Colour hex (e.g. #fbbf24) — optional').setStyle(TextInputStyle.Short).setMaxLength(7).setRequired(false)),
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('sz').setLabel('Size 10-80 — optional').setStyle(TextInputStyle.Short).setMaxLength(2).setRequired(false)));
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('sz').setLabel('Size 10-80 — optional (default 30)').setStyle(TextInputStyle.Short).setMaxLength(2).setRequired(false)),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('f').setLabel('Font — optional').setStyle(TextInputStyle.Short).setMaxLength(8).setRequired(false).setPlaceholder(fontList.slice(0, 100))));
         return interaction.showModal(modal);
       }
       if (interaction.isButton() && interaction.customId === 'prof:add:stat') {
@@ -1868,6 +1902,20 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
       if (interaction.isButton() && interaction.customId === 'prof:add:sticker') {
         return interaction.reply({ content: '🖼️ **To add a sticker or image:** upload an image in this channel with the message text `!cardimg` (as the caption). I\'ll add it to your card automatically. Then reopen the editor to position it.\n\n*Tip: PNG with transparency works best for stickers.*', flags: 64 });
       }
+      // Manage Images: list uploaded images, delete them (frees the cap), or set one as banner
+      if (interaction.isButton() && interaction.customId === 'prof:images') {
+        return interaction.reply(manageImagesView(gid, uid));
+      }
+      if (interaction.isStringSelectMenu() && interaction.customId === 'prof:imgDelete') {
+        profileApi.removeUserImage(gid, uid, interaction.values[0]);
+        return interaction.update(Object.assign(manageImagesView(gid, uid), { content: '🗑️ Image deleted — a slot is free again.' }));
+      }
+      if (interaction.isStringSelectMenu() && interaction.customId === 'prof:imgBanner') {
+        const val = interaction.values[0];
+        if (val === '__none__') { profileApi.setBanner(gid, uid, null); return interaction.update(Object.assign(manageImagesView(gid, uid), { content: '🖼️ Banner cleared — your background cosmetic shows again.' })); }
+        profileApi.setBanner(gid, uid, val);
+        return interaction.update(Object.assign(manageImagesView(gid, uid), { content: '🖼️ Banner set! It now fills your card background.' }));
+      }
       if (interaction.isButton() && interaction.customId === 'prof:img:circle') {
         const selId = profileSel.get(uid);
         if (selId) { const el = profileApi.getElement(gid, uid, selId); if (el) profileApi.updateElement(gid, uid, selId, { data: { circle: !el.data?.circle } }); }
@@ -1875,15 +1923,35 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
         const member = interaction.member || await interaction.guild.members.fetch(uid);
         return interaction.editReply(await profileEditorView(gid, member));
       }
+      // Rename the selected element (gives it a friendly label in the picker)
+      if (interaction.isButton() && interaction.customId === 'prof:rename') {
+        const selId = profileSel.get(uid);
+        const el = selId && profileApi.getElement(gid, uid, selId);
+        if (!el) return interaction.reply({ content: 'Select an item first.', flags: 64 });
+        const modal = new ModalBuilder().setCustomId('prof:renameModal').setTitle('Rename Item');
+        modal.addComponents(new ActionRowBuilder().addComponents(
+          new TextInputBuilder().setCustomId('n').setLabel('Item name (shown in the picker)').setStyle(TextInputStyle.Short).setMaxLength(30).setRequired(true).setValue(el.data?.name || '')));
+        return interaction.showModal(modal);
+      }
+      if (interaction.isModalSubmit() && interaction.customId === 'prof:renameModal') {
+        const selId = profileSel.get(uid);
+        const nm = interaction.fields.getTextInputValue('n').trim().slice(0, 30);
+        if (selId) profileApi.updateElement(gid, uid, selId, { data: { name: nm } });
+        await interaction.deferUpdate().catch(()=>{});
+        const member = interaction.member || await interaction.guild.members.fetch(uid);
+        return interaction.editReply(await profileEditorView(gid, member));
+      }
       if (interaction.isButton() && interaction.customId === 'prof:text:edit') {
         const selId = profileSel.get(uid);
         const el = selId && profileApi.getElement(gid, uid, selId);
         if (!el) return interaction.reply({ content: 'Select a text element first.', flags: 64 });
+        const fontList = profileApi.FONTS.map(f => f.key).join(' / ');
         const modal = new ModalBuilder().setCustomId('prof:textModal:edit').setTitle('Edit Text');
         modal.addComponents(
           new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('t').setLabel('Text').setStyle(TextInputStyle.Short).setMaxLength(40).setRequired(true).setValue(el.data?.text || '')),
           new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('c').setLabel('Colour hex (e.g. #fbbf24)').setStyle(TextInputStyle.Short).setMaxLength(7).setRequired(false).setValue(el.data?.color || '')),
-          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('f').setLabel('Font: sans / serif / mono').setStyle(TextInputStyle.Short).setMaxLength(6).setRequired(false).setValue(el.data?.font || 'sans')));
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('sz').setLabel('Size 10-80').setStyle(TextInputStyle.Short).setMaxLength(2).setRequired(false).setValue(String(el.data?.size || 30))),
+          new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('f').setLabel('Font').setStyle(TextInputStyle.Short).setMaxLength(8).setRequired(false).setValue(el.data?.font || 'sans').setPlaceholder(fontList.slice(0,100))));
         return interaction.showModal(modal);
       }
       if (interaction.isModalSubmit() && interaction.customId.startsWith('prof:textModal:')) {
@@ -1891,17 +1959,18 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
         const text = interaction.fields.getTextInputValue('t');
         const colorRaw = (interaction.fields.getTextInputValue('c') || '').trim();
         const color = /^#?[0-9a-fA-F]{6}$/.test(colorRaw) ? (colorRaw.startsWith('#') ? colorRaw : '#'+colorRaw) : undefined;
+        const validFonts = profileApi.FONTS.map(f => f.key);
+        let font;
+        try { const fr = (interaction.fields.getTextInputValue('f') || '').trim().toLowerCase(); if (validFonts.includes(fr)) font = fr; } catch { /* no field */ }
+        let size;
+        try { const sr = parseInt(interaction.fields.getTextInputValue('sz'), 10); if (sr >= 10 && sr <= 80) size = sr; } catch { /* no field */ }
         await interaction.deferUpdate().catch(()=>{});
         if (mode === 'new') {
-          const szRaw = parseInt(interaction.fields.getTextInputValue('sz'), 10);
-          const size = (szRaw >= 10 && szRaw <= 80) ? szRaw : 30;
-          const el = profileApi.addElement(gid, uid, 'text', { text, color: color || '#ffffff', size, font: 'sans' });
+          const el = profileApi.addElement(gid, uid, 'text', { text, color: color || '#ffffff', size: size || 30, font: font || 'sans' });
           profileSel.set(uid, el.id);
         } else {
           const selId = profileSel.get(uid);
-          const fontRaw = (interaction.fields.getTextInputValue('f') || 'sans').trim().toLowerCase();
-          const font = ['sans','serif','mono'].includes(fontRaw) ? fontRaw : 'sans';
-          if (selId) profileApi.updateElement(gid, uid, selId, { data: { text, ...(color?{color}:{}) , font } });
+          if (selId) profileApi.updateElement(gid, uid, selId, { data: { text, ...(color?{color}:{}), ...(font?{font}:{}), ...(size?{size}:{}) } });
         }
         const member = interaction.member || await interaction.guild.members.fetch(uid);
         return interaction.editReply(await profileEditorView(gid, member));
@@ -1951,6 +2020,17 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
         const idx = parseInt(interaction.customId.split(':')[2], 10) || 0;
         await interaction.deferUpdate();
         return interaction.editReply(await showcaseView(gid, uid, idx, interaction.guild));
+      }
+      // Heart from a /profile card (public message) — reply privately, never touch the shared message
+      if (interaction.isButton() && interaction.customId.startsWith('prof:heartp:')) {
+        const targetId = interaction.customId.split(':')[2];
+        if (targetId === uid) return interaction.reply({ content: '😅 You can\'t heart your own card!', flags: 64 });
+        const { hearted, total } = profileApi.toggleHeart(gid, targetId, uid);
+        return interaction.reply({
+          content: hearted ? `❤️ You hearted <@${targetId}>'s card! They now have **${fmt(total)}** heart${total===1?'':'s'}.`
+                           : `💔 You removed your heart from <@${targetId}>'s card. They now have **${fmt(total)}**.`,
+          flags: 64,   // ephemeral — only the clicker sees this, public card stays untouched
+        });
       }
       if (interaction.isButton() && interaction.customId.startsWith('prof:heart:')) {
         const targetId = interaction.customId.split(':')[2];

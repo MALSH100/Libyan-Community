@@ -30,6 +30,22 @@ const FONT_BOLD_CANDIDATES = [
 ];
 const FONT_BOLD = FONT_BOLD_CANDIDATES.find(f => { try { return fs.existsSync(f); } catch { return false; } }) || null;
 
+// Collect every font file we can find (from /fonts or repo root) for resvg, so the
+// wacky fonts render. Missing files are skipped; text falls back to DejaVu Sans.
+function collectFontFiles() {
+  const wanted = ['DejaVuSans.ttf','DejaVuSans-Bold.ttf','DejaVuSerif.ttf','DejaVuSansMono.ttf','Bangers.ttf','PermanentMarker.ttf','Pacifico.ttf','PressStart2P.ttf','Creepster.ttf','Righteous.ttf'];
+  const found = [];
+  for (const name of wanted) {
+    for (const dir of [path.join(__dirname, 'fonts'), __dirname]) {
+      const p = path.join(dir, name);
+      try { if (fs.existsSync(p)) { found.push(p); break; } } catch { /* */ }
+    }
+  }
+  if (!found.length) found.push(FONT_PATH);
+  return found;
+}
+const ALL_FONT_FILES = collectFontFiles();
+
 const fmt = (n) => Math.round(n || 0).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
@@ -183,9 +199,15 @@ function toggleHeart(db, gid, uid, voterId, saveData) {
 //
 // Fonts available to text elements (all must exist as files, else fall back to DejaVu):
 const FONTS = [
-  { key: 'sans',    name: 'Sans',        family: 'DejaVu Sans' },
-  { key: 'serif',   name: 'Serif',       family: 'DejaVu Serif' },
-  { key: 'mono',    name: 'Monospace',   family: 'DejaVu Sans Mono' },
+  { key: 'sans',    name: 'Sans',            family: 'DejaVu Sans',      file: null },
+  { key: 'serif',   name: 'Serif',           family: 'DejaVu Serif',     file: 'DejaVuSerif.ttf' },
+  { key: 'mono',    name: 'Monospace',       family: 'DejaVu Sans Mono', file: 'DejaVuSansMono.ttf' },
+  { key: 'comic',   name: 'Comic (Bangers)', family: 'Bangers',          file: 'Bangers.ttf' },
+  { key: 'marker',  name: 'Marker',          family: 'Permanent Marker', file: 'PermanentMarker.ttf' },
+  { key: 'script',  name: 'Script (Pacifico)', family: 'Pacifico',       file: 'Pacifico.ttf' },
+  { key: 'arcade',  name: 'Arcade (8-bit)',  family: 'Press Start 2P',   file: 'PressStart2P.ttf' },
+  { key: 'spooky',  name: 'Spooky',          family: 'Creepster',        file: 'Creepster.ttf' },
+  { key: 'bold',    name: 'Chunky',          family: 'Righteous',        file: 'Righteous.ttf' },
 ];
 const fontByKey = (k) => FONTS.find(f => f.key === k) || FONTS[0];
 
@@ -231,6 +253,25 @@ function addUserImage(db, gid, uid, dataUri, saveData) {
   imgs[key] = dataUri;
   if (saveData) saveData(gid);
   return key;
+}
+const MAX_IMAGES = 20;
+function imageCount(db, gid, uid) { return Object.keys(userImages(db, gid, uid)).length; }
+function removeUserImage(db, gid, uid, imageKey, saveData) {
+  const imgs = userImages(db, gid, uid);
+  if (!(imageKey in imgs)) return false;
+  delete imgs[imageKey];
+  const layout = getLayout(db, gid, uid);
+  layout.elements = layout.elements.filter(e => e.data?.imageKey !== imageKey);
+  if (layout.bannerKey === imageKey) delete layout.bannerKey;
+  if (saveData) saveData(gid);
+  return true;
+}
+function setBanner(db, gid, uid, imageKey, saveData) {
+  const layout = getLayout(db, gid, uid);
+  if (imageKey && userImages(db, gid, uid)[imageKey]) { layout.bannerKey = imageKey; layout.custom = true; }
+  else delete layout.bannerKey;
+  if (saveData) saveData(gid);
+  return layout.bannerKey || null;
 }
 function clampEl(el) {
   el.x = Math.max(-40, Math.min(CARD_W - 10, el.x));
@@ -431,6 +472,24 @@ function statBox(x, y, w, label, value, accent) {
 function truncate(s, n) { s = String(s == null ? '' : s); return s.length > n ? s.slice(0, n - 1) + '…' : s; }
 
 // Build the full card SVG. avatarDataUri may be null (falls back to a monogram).
+// Snug hearts pill, hugging the top-right edge — width fits heart + digits (no empty gap).
+function heartBadgeSvg(hearts) {
+  const label = fmt(hearts);
+  const digits = label.length;
+  const padL = 14, heartW = 22, gap = 6, digitW = 13, padR = 12;
+  const badgeW = padL + heartW + gap + digits * digitW + padR;
+  const badgeX = CARD_W - badgeW - 18;
+  const y = 24, h = 38;
+  const hx = badgeX + padL + heartW / 2, hy = y + 14;
+  const heartPath = `M ${hx} ${hy+4} C ${hx} ${hy+1}, ${hx-4} ${hy-3}, ${hx-8} ${hy-1} C ${hx-12} ${hy+1}, ${hx-11} ${hy+6}, ${hx} ${hy+13} C ${hx+11} ${hy+6}, ${hx+12} ${hy+1}, ${hx+8} ${hy-1} C ${hx+4} ${hy-3}, ${hx} ${hy+1}, ${hx} ${hy+4} Z`;
+  const textX = badgeX + padL + heartW + gap;
+  return `<g>
+    <rect x="${badgeX}" y="${y}" width="${badgeW}" height="${h}" rx="${h/2}" fill="#000000" fill-opacity="0.35"/>
+    <path d="${heartPath}" fill="#ef4444" stroke="#b91c1c" stroke-width="1"/>
+    <text x="${textX}" y="${y+26}" font-family="'DejaVu Sans'" font-size="22" font-weight="700" fill="#fb7185">${label}</text>
+  </g>`;
+}
+
 function cardSvg(ctx, gid, member, stats, equip, opts = {}) {
   const phase = opts.phase || 0;
   const bg    = catalogueItem('background', equip.background) || BACKGROUNDS[0];
@@ -481,16 +540,9 @@ function cardSvg(ctx, gid, member, stats, equip, opts = {}) {
     statBox(gx + (gw+gap)*3, gy+84, gw, 'COIN DESIGN', truncate(stats.coin || 'Default', 12), '#fcd34d'),
   ].join('');
 
-  // hearts badge (top-right) — heart drawn as a red vector path (the emoji glyph renders
-  // black in DejaVu, so we draw the shape ourselves for a proper red heart)
+  // hearts badge (top-right) — snug pill hugging the right edge
   const hearts = opts.hearts || 0;
-  const hx = CARD_W - 128, hy = 38;   // heart anchor inside the badge
-  const heartPath = `M ${hx} ${hy+4} C ${hx} ${hy+1}, ${hx-4} ${hy-3}, ${hx-8} ${hy-1} C ${hx-12} ${hy+1}, ${hx-11} ${hy+6}, ${hx} ${hy+13} C ${hx+11} ${hy+6}, ${hx+12} ${hy+1}, ${hx+8} ${hy-1} C ${hx+4} ${hy-3}, ${hx} ${hy+1}, ${hx} ${hy+4} Z`;
-  const heartBadge = `<g>
-    <rect x="${CARD_W-160}" y="26" width="130" height="40" rx="20" fill="#000000" fill-opacity="0.35"/>
-    <path d="${heartPath}" fill="#ef4444" stroke="#b91c1c" stroke-width="1"/>
-    <text x="${CARD_W-104}" y="53" font-family="'DejaVu Sans'" font-size="22" font-weight="700" fill="#fb7185">${fmt(hearts)}</text>
-  </g>`;
+  const heartBadge = heartBadgeSvg(hearts);
 
   // effect overlay
   let effectOverlay = '', effectDefs = '';
@@ -572,7 +624,7 @@ function elementSvg(el, ctx2) {
     const font = fontByKey(d.font).family;
     const size = d.size || 30;
     const color = d.color || '#ffffff';
-    const weight = d.bold ? ' font-weight="700"' : '';
+    const weight = (d.bold === false) ? '' : ' font-weight="700"';   // bold by default
     inner = `<text x="${el.x}" y="${el.y + size}" font-family="'${font}'" font-size="${size}" fill="${color}"${weight}>${esc(truncate(d.text || 'Text', 40))}</text>`;
   } else if (el.type === 'stat') {
     const def = STAT_DEFS[el.data?.stat] || STAT_DEFS.dinar;
@@ -638,22 +690,24 @@ function customCardSvg(ctx, gid, member, stats, equip, layout, opts = {}) {
   }
 
   const hearts = opts.hearts || 0;
-  const hx = CARD_W - 128, hy = 38;
-  const heartPath = `M ${hx} ${hy+4} C ${hx} ${hy+1}, ${hx-4} ${hy-3}, ${hx-8} ${hy-1} C ${hx-12} ${hy+1}, ${hx-11} ${hy+6}, ${hx} ${hy+13} C ${hx+11} ${hy+6}, ${hx+12} ${hy+1}, ${hx+8} ${hy-1} C ${hx+4} ${hy-3}, ${hx} ${hy+1}, ${hx} ${hy+4} Z`;
-  const heartBadge = `<g><rect x="${CARD_W-160}" y="26" width="130" height="40" rx="20" fill="#000000" fill-opacity="0.35"/>
-    <path d="${heartPath}" fill="#ef4444" stroke="#b91c1c" stroke-width="1"/>
-    <text x="${CARD_W-104}" y="53" font-family="'DejaVu Sans'" font-size="22" font-weight="700" fill="#fb7185">${fmt(hearts)}</text></g>`;
+  const heartBadge = heartBadgeSvg(hearts);
 
   let effectOverlay = '', effectDefs = '';
   if (effect.kind === 'holo') { effectDefs += `<linearGradient id="holo" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#fff" stop-opacity="0"/><stop offset="45%" stop-color="#a5f3fc" stop-opacity="0.12"/><stop offset="55%" stop-color="#f0abfc" stop-opacity="0.12"/><stop offset="100%" stop-color="#fff" stop-opacity="0"/></linearGradient>`; effectOverlay = `<rect width="${CARD_W}" height="${CARD_H}" rx="18" fill="url(#holo)"/>`; }
   else if (effect.kind === 'sparkle' || effect.kind === 'confetti') { let parts=''; const N=effect.kind==='confetti'?26:18; const colors=['#fbbf24','#f472b6','#34d399','#38bdf8','#c4b5fd']; for(let i=0;i<N;i++){const seed=(i*97.13)%1;const x=((seed*CARD_W)+phase*(40+i*3))%CARD_W;const y=((i*53.7)%CARD_H+phase*60*(effect.kind==='confetti'?1:0))%CARD_H;const size=3+(i%3);if(effect.kind==='confetti'){parts+=`<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${size+2}" height="${size+2}" fill="${colors[i%colors.length]}" fill-opacity="0.85" transform="rotate(${(i*40+phase*120)%360} ${x.toFixed(1)} ${y.toFixed(1)})"/>`;}else{const tw=0.5+0.5*Math.abs(Math.sin(phase*Math.PI*2+i));parts+=`<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${size*0.6}" fill="#fff" fill-opacity="${tw.toFixed(2)}"/>`;}} effectOverlay = parts; }
 
+  // banner: a user-uploaded image that replaces the whole background
+  const bannerUri = layout.bannerKey ? images[layout.bannerKey] : null;
+  const bannerLayer = bannerUri
+    ? `<image href="${bannerUri}" x="0" y="0" width="${CARD_W}" height="${CARD_H}" preserveAspectRatio="xMidYMid slice"/>`
+    : '';
+
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${CARD_W}" height="${CARD_H}" viewBox="0 0 ${CARD_W} ${CARD_H}">
     <defs>${bgL.defs}${frL.defs}${effectDefs}<clipPath id="card"><rect width="${CARD_W}" height="${CARD_H}" rx="18"/></clipPath></defs>
     <g clip-path="url(#card)">
-      ${bgL.rect}
-      ${starLayer}${auroraLayer}
-      <rect width="${CARD_W}" height="${CARD_H}" fill="#000000" fill-opacity="0.12"/>
+      ${bannerLayer || bgL.rect}
+      ${bannerUri ? '' : `${starLayer}${auroraLayer}`}
+      <rect width="${CARD_W}" height="${CARD_H}" fill="#000000" fill-opacity="${bannerUri ? '0.22' : '0.12'}"/>
       ${autoStats}
       ${elementLayer}
       ${heartBadge}
@@ -666,7 +720,7 @@ function customCardSvg(ctx, gid, member, stats, equip, layout, opts = {}) {
 // ── render helpers ──────────────────────────────────────────────────────────
 function svgToPng(svg) {
   const r = new Resvg(svg, {
-    font: { fontFiles: [FONT_PATH, ...(FONT_BOLD ? [FONT_BOLD] : [])], loadSystemFonts: false, defaultFontFamily: 'DejaVu Sans' },
+    font: { fontFiles: ALL_FONT_FILES, loadSystemFonts: false, defaultFontFamily: 'DejaVu Sans' },
     fitTo: { mode: 'width', value: CARD_W },
   });
   return r.render().asPng();
@@ -692,8 +746,61 @@ const isAnimatedEquip = (equip) =>
     const it = catalogueItem(slot, equip[slot]); return it && it.anim;
   });
 
-// Render the card as a PNG buffer, or an animated GIF if any equipped cosmetic is animated.
-// If the user has a custom layout (layout.custom), renders that; else the classic template.
+const isGifUri = (uri) => typeof uri === 'string' && uri.startsWith('data:image/gif');
+
+// Decode a GIF data URI into an array of per-frame PNG data URIs (so each frame can be
+// embedded in the SVG and rendered by resvg). Cached on the images object by key to
+// avoid re-decoding every render. Returns [] if not a GIF or on failure.
+function decodeGifFrames(dataUri) {
+  if (!isGifUri(dataUri)) return null;
+  try {
+    const { GifReader } = require('omggif');
+    const { PNG } = require('pngjs');
+    const b64 = dataUri.split(',')[1];
+    const buf = Buffer.from(b64, 'base64');
+    const reader = new GifReader(buf);
+    const w = reader.width, h = reader.height;
+    const n = reader.numFrames();
+    if (n <= 1) return null;  // single-frame gif → treat as static
+    const frames = [];
+    // omggif frames can be partial (disposal); blit cumulatively onto a persistent canvas
+    const canvas = new Uint8Array(w * h * 4);
+    const MAX = 30;  // cap frames to keep render time sane
+    const step = Math.max(1, Math.floor(n / MAX));
+    for (let i = 0; i < n; i += step) {
+      reader.decodeAndBlitFrameRGBA(i, canvas);
+      const png = new PNG({ width: w, height: h });
+      png.data = Buffer.from(canvas);
+      const pngBuf = PNG.sync.write(png);
+      frames.push('data:image/png;base64,' + pngBuf.toString('base64'));
+    }
+    return frames.length > 1 ? frames : null;
+  } catch (e) {
+    console.error('[profile] gif decode failed:', e.message);
+    return null;
+  }
+}
+
+// Build a frame cache for every GIF image referenced by the layout (banner + elements).
+// Returns { key: [pngDataUri,...] } for GIFs, and the max frame count across them.
+function buildGifCache(layout, images) {
+  const cache = {};
+  let maxFrames = 1;
+  const keys = new Set();
+  if (layout.bannerKey) keys.add(layout.bannerKey);
+  for (const el of (layout.elements || [])) if (el.data?.imageKey) keys.add(el.data.imageKey);
+  for (const key of keys) {
+    const uri = images[key];
+    if (isGifUri(uri)) {
+      const frames = decodeGifFrames(uri);
+      if (frames && frames.length > 1) { cache[key] = frames; maxFrames = Math.max(maxFrames, frames.length); }
+    }
+  }
+  return { cache, maxFrames };
+}
+
+// Render the card as a PNG buffer, or an animated GIF if any equipped cosmetic OR any
+// uploaded GIF sticker/banner is animated. Static layout+cosmetics → PNG.
 // opts.selectedId highlights an element (editor preview). opts.forceStatic forces PNG.
 async function renderCard(ctx, gid, member, opts = {}) {
   const { db } = ctx;
@@ -704,24 +811,44 @@ async function renderCard(ctx, gid, member, opts = {}) {
   const layout = getLayout(db, gid, uid);
   const images = userImages(db, gid, uid);
   const av = await avatarDataUri(member);
-  const base = { avatarDataUri: av, hearts, images, selectedId: opts.selectedId || null };
 
-  const drawSvg = (phase) => (layout.custom)
-    ? customCardSvg(ctx, gid, member, stats, equip, layout, { ...base, phase })
-    : cardSvg(ctx, gid, member, stats, equip, { ...base, phase });
+  // decode any GIF stickers/banner into frames (skipped for static editor previews)
+  const wantAnim = !opts.forceStatic && !opts.selectedId;
+  const { cache: gifCache, maxFrames: gifFrames } = wantAnim ? buildGifCache(layout, images) : { cache: {}, maxFrames: 1 };
+  const hasGif = Object.keys(gifCache).length > 0;
 
-  // editor previews are always static (fast + selection outline); animated only for final cards
-  const animate = !opts.forceStatic && !opts.selectedId && isAnimatedEquip(equip);
+  // For a given animation frame f, produce the images map where each GIF key resolves to
+  // that frame's still PNG (cycling through the GIF's own frames).
+  const imagesForFrame = (f) => {
+    if (!hasGif) return images;
+    const out = { ...images };
+    for (const key of Object.keys(gifCache)) {
+      const frames = gifCache[key];
+      out[key] = frames[f % frames.length];
+    }
+    return out;
+  };
+
+  const drawSvg = (phase, f) => {
+    const base = { avatarDataUri: av, hearts, images: imagesForFrame(f), selectedId: opts.selectedId || null };
+    return (layout.custom)
+      ? customCardSvg(ctx, gid, member, stats, equip, layout, { ...base, phase })
+      : cardSvg(ctx, gid, member, stats, equip, { ...base, phase });
+  };
+
+  const animate = wantAnim && (isAnimatedEquip(equip) || hasGif);
 
   if (!animate) {
-    const png = svgToPng(drawSvg(0));
+    const png = svgToPng(drawSvg(0, 0));
     return { attachment: png, name: `profile-${uid}.png`, animated: false };
   }
   const { GIFEncoder, quantize, applyPalette } = require('gifenc');
   const enc = GIFEncoder();
-  const FRAMES_N = 20, DELAY = 60;
+  // enough frames to show the GIF smoothly; align cosmetic phase to the loop
+  const FRAMES_N = Math.min(30, Math.max(20, gifFrames));
+  const DELAY = 80;
   for (let f = 0; f < FRAMES_N; f++) {
-    const png = svgToPng(drawSvg(f / FRAMES_N));
+    const png = svgToPng(drawSvg(f / FRAMES_N, f));
     const { data, width, height } = pngToRGBA(png);
     const palette = quantize(data, 256);
     const index = applyPalette(data, palette);
@@ -777,6 +904,11 @@ function initProfiles({ db, saveData, gachaApi, getDinar, spendDinar }) {
     resetLayout:    (gid, uid) => resetLayout(db, gid, uid, saveData),
     addUserImage:   (gid, uid, dataUri) => addUserImage(db, gid, uid, dataUri, saveData),
     userImages:     (gid, uid) => userImages(db, gid, uid),
+    imageCount:     (gid, uid) => imageCount(db, gid, uid),
+    removeUserImage:(gid, uid, imageKey) => removeUserImage(db, gid, uid, imageKey, saveData),
+    setBanner:      (gid, uid, imageKey) => setBanner(db, gid, uid, imageKey, saveData),
+    getBanner:      (gid, uid) => getLayout(db, gid, uid).bannerKey || null,
+    MAX_IMAGES,
 
     // buy: validates ownership + funds, spends Dinar, grants. returns {ok}|{error}
     buy(gid, uid, slot, key) {
