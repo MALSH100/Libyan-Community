@@ -56,6 +56,7 @@ const { MongoClient } = require('mongodb');
 
 let mongoClient = null;
 let mongoCollection = null;
+let mongoImages = null;   // separate collection for uploaded profile images (base64 bodies)
 let db = {}; // in-memory cache — always write-through to MongoDB
 
 async function connectMongo() {
@@ -70,6 +71,9 @@ async function connectMongo() {
     await mongoClient.connect();
     const database  = mongoClient.db('clanbot');
     mongoCollection = database.collection('data');
+    // Profile images (base64) are stored one-per-document here instead of inside the
+    // guild document, so the guild doc never hits MongoDB's 16MB per-document limit.
+    mongoImages     = database.collection('images');
     console.log('✅ Connected to MongoDB');
     return true;
   } catch (e) {
@@ -86,7 +90,36 @@ async function loadData() {
       const guildId = doc._id;
       db[guildId]   = doc.data;
     }
-    console.log(`✅ Loaded data for ${docs.length} guild(s) from MongoDB`);
+    // Stitch uploaded images back in from the separate collection, replacing the
+    // '__EXTERNAL__' markers with their real base64 bodies.
+    if (mongoImages) {
+      const imgDocs = await mongoImages.find({}).toArray();
+      let restored = 0;
+      for (const im of imgDocs) {
+        const g = db[im.guildId];
+        if (!g || !g.__profiles) continue;
+        g.__profiles.images ||= {};
+        g.__profiles.images[im.uid] ||= {};
+        g.__profiles.images[im.uid][im.key] = im.body;
+        restored++;
+      }
+      // One-time migration: any guild still holding inline base64 images (from before
+      // the split) gets those images moved into the images collection on next save.
+      let migrated = 0;
+      for (const guildId of Object.keys(db)) {
+        const imgs = db[guildId]?.__profiles?.images;
+        if (!imgs) continue;
+        for (const uid of Object.keys(imgs)) {
+          for (const key of Object.keys(imgs[uid] || {})) {
+            if (typeof imgs[uid][key] === 'string' && imgs[uid][key].startsWith('data:')) migrated++;
+          }
+        }
+        if (migrated) saveData(guildId);   // schedules a split-save that externalises them
+      }
+      console.log(`✅ Loaded ${docs.length} guild(s); restored ${restored} image(s)${migrated ? `, migrating ${migrated} legacy image(s)` : ''}`);
+    } else {
+      console.log(`✅ Loaded data for ${docs.length} guild(s) from MongoDB`);
+    }
   } catch (e) {
     console.error('⚠️  Could not load from MongoDB:', e.message);
   }
@@ -103,17 +136,75 @@ function saveData(guildIdHint) {
   }
 }
 
+// Persist one guild. Uploaded profile images (base64) are pulled OUT of the guild
+// document and written to a separate `images` collection (one doc per image), so the
+// guild doc stays tiny and never hits MongoDB's 16MB per-document limit. In memory the
+// images stay exactly where the rest of the code expects them.
 async function _persistGuild(guildId) {
   if (!mongoCollection) return;
+  const gd = db[guildId] || {};
+  // Detach image bodies before saving the guild doc, remember them, then restore.
+  const detached = _detachImages(gd);
   try {
     await mongoCollection.replaceOne(
       { _id: guildId },
-      { _id: guildId, data: db[guildId] || {} },
+      { _id: guildId, data: gd },
       { upsert: true }
     );
+    // Persist each image body to the images collection (upsert; only changed ones matter,
+    // but upserting all is cheap and keeps them in sync).
+    if (mongoImages && detached.length) {
+      await Promise.all(detached.map(({ uid, key, body }) =>
+        mongoImages.replaceOne(
+          { _id: `${guildId}:${uid}:${key}` },
+          { _id: `${guildId}:${uid}:${key}`, guildId, uid, key, body },
+          { upsert: true }
+        ).catch(e => console.error(`⚠️  image save failed (${key}):`, e.message))
+      ));
+      // Clean up image docs that no longer exist in memory (deleted by the user).
+      await _pruneDeletedImages(guildId, gd).catch(() => {});
+    }
   } catch (e) {
     console.error(`⚠️  MongoDB save failed for guild ${guildId}:`, e.message);
+  } finally {
+    _reattachImages(gd, detached);   // put the bodies back in memory
   }
+}
+
+// Pull every base64 image body out of gd.__profiles.images, replacing each with a small
+// placeholder marker in the guild doc. Returns the list of {uid,key,body} removed.
+function _detachImages(gd) {
+  const removed = [];
+  const imgs = gd.__profiles?.images;
+  if (!imgs) return removed;
+  for (const uid of Object.keys(imgs)) {
+    const byKey = imgs[uid] || {};
+    for (const key of Object.keys(byKey)) {
+      const body = byKey[key];
+      if (typeof body === 'string' && body.startsWith('data:')) {
+        removed.push({ uid, key, body });
+        byKey[key] = '__EXTERNAL__';   // marker: the real body lives in the images collection
+      }
+    }
+  }
+  return removed;
+}
+function _reattachImages(gd, detached) {
+  const imgs = gd.__profiles?.images;
+  if (!imgs) return;
+  for (const { uid, key, body } of detached) {
+    if (imgs[uid]) imgs[uid][key] = body;
+  }
+}
+// Remove image docs from the collection that are no longer referenced in memory.
+async function _pruneDeletedImages(guildId, gd) {
+  if (!mongoImages) return;
+  const live = new Set();
+  const imgs = gd.__profiles?.images || {};
+  for (const uid of Object.keys(imgs)) for (const key of Object.keys(imgs[uid] || {})) live.add(`${guildId}:${uid}:${key}`);
+  const existing = await mongoImages.find({ guildId }, { projection: { _id: 1 } }).toArray();
+  const stale = existing.filter(d => !live.has(d._id)).map(d => d._id);
+  if (stale.length) await mongoImages.deleteMany({ _id: { $in: stale } });
 }
 
 // Immediate, durable save for high-value events (POTD wins, lottery payouts, etc.)
@@ -1706,6 +1797,8 @@ if (commandName === 'db-forget') {
     try {
       const res = await mongoCollection.deleteOne({ _id: targetId });
       mongoDeleted = res.deletedCount || 0;
+      // also remove this guild's externalised images so they don't orphan
+      if (mongoImages) await mongoImages.deleteMany({ guildId: targetId }).catch(() => {});
     } catch (e) {
       return interaction.reply({ content: `⚠️ Removed from memory, but the MongoDB delete failed: ${e.message}`, flags: 64 });
     }
