@@ -154,17 +154,20 @@ function saveData(guildIdHint) {
 async function _persistGuild(guildId) {
   if (!mongoCollection) return;
   const gd = db[guildId] || {};
-  // Detach image bodies before saving the guild doc, remember them, then restore.
-  const detached = _detachImages(gd);
+  // Build a SHALLOW-CLONED copy with image bodies stripped out, WITHOUT ever mutating
+  // the live in-memory object. (The old approach mutated gd in place during the async
+  // save, so any card render / dropdown read during that window saw '__EXTERNAL__'
+  // instead of the real image — causing images to vanish mid-save.)
+  const { doc, images } = _stripImagesForSave(gd);
   try {
     await mongoCollection.replaceOne(
       { _id: guildId },
-      { _id: guildId, data: gd },
+      { _id: guildId, data: doc },
       { upsert: true }
     );
     // Persist each image body to the images collection (one doc per image / coin skin).
-    if (mongoImages && detached.length) {
-      await Promise.all(detached.map(({ id, body }) =>
+    if (mongoImages && images.length) {
+      await Promise.all(images.map(({ id, body }) =>
         mongoImages.replaceOne(
           { _id: `${guildId}:${id}` },
           { _id: `${guildId}:${id}`, guildId, ref: id, body },
@@ -176,48 +179,57 @@ async function _persistGuild(guildId) {
     }
   } catch (e) {
     console.error(`⚠️  MongoDB save failed for guild ${guildId}:`, e.message);
-  } finally {
-    _reattachImages(gd, detached);   // put the bodies back in memory
   }
 }
 
-// Pull every base64 image body out of the guild doc, replacing each with a small
-// placeholder marker. Covers BOTH image sources that store base64 inline:
-//   • profile images:  gd.__profiles.images[uid][key]        → id "guildId:img:uid:key"
-//   • coin skins:       gd.__coinskins.custom[uid].data       → id "guildId:coin:uid"
-// Returns the list of {id, ref, body} removed (ref lets us reattach in memory).
-function _detachImages(gd) {
-  const removed = [];
-  // profile images
-  const imgs = gd.__profiles?.images;
-  if (imgs) {
-    for (const uid of Object.keys(imgs)) {
-      const byKey = imgs[uid] || {};
+// Return { doc, images } where `doc` is a copy of the guild data with every base64 image
+// body replaced by the '__EXTERNAL__' marker, and `images` is [{id, body}, ...]. The live
+// `gd` is never modified. Only the nested objects that actually hold images are cloned
+// (everything else is shared by reference — cheap, and safe because we don't mutate it).
+function _stripImagesForSave(gd) {
+  const images = [];
+  const doc = { ...gd };   // shallow clone of the top level
+
+  // profile images: gd.__profiles.images[uid][key]
+  if (gd.__profiles?.images) {
+    const profiles = { ...gd.__profiles };
+    const imgsClone = {};
+    for (const uid of Object.keys(gd.__profiles.images)) {
+      const byKey = gd.__profiles.images[uid] || {};
+      const byKeyClone = {};
       for (const key of Object.keys(byKey)) {
         const body = byKey[key];
         if (typeof body === 'string' && body.startsWith('data:')) {
-          removed.push({ id: `img:${uid}:${key}`, body, restore: () => { byKey[key] = body; } });
-          byKey[key] = '__EXTERNAL__';
+          images.push({ id: `img:${uid}:${key}`, body });
+          byKeyClone[key] = '__EXTERNAL__';
+        } else {
+          byKeyClone[key] = body;
         }
       }
+      imgsClone[uid] = byKeyClone;
     }
+    profiles.images = imgsClone;
+    doc.__profiles = profiles;
   }
-  // coin skin custom images
-  const coins = gd.__coinskins?.custom;
-  if (coins) {
-    for (const uid of Object.keys(coins)) {
-      const rec = coins[uid];
+
+  // coin skins: gd.__coinskins.custom[uid].data
+  if (gd.__coinskins?.custom) {
+    const coinskins = { ...gd.__coinskins };
+    const customClone = {};
+    for (const uid of Object.keys(gd.__coinskins.custom)) {
+      const rec = gd.__coinskins.custom[uid];
       if (rec && typeof rec.data === 'string' && rec.data.length > 100 && rec.data !== '__EXTERNAL__') {
-        const body = rec.data;
-        removed.push({ id: `coin:${uid}`, body, restore: () => { rec.data = body; } });
-        rec.data = '__EXTERNAL__';
+        images.push({ id: `coin:${uid}`, body: rec.data });
+        customClone[uid] = { ...rec, data: '__EXTERNAL__' };
+      } else {
+        customClone[uid] = rec;
       }
     }
+    coinskins.custom = customClone;
+    doc.__coinskins = coinskins;
   }
-  return removed;
-}
-function _reattachImages(gd, detached) {
-  for (const d of detached) { try { d.restore(); } catch { /* */ } }
+
+  return { doc, images };
 }
 // Remove image docs from the collection that are no longer referenced in memory.
 async function _pruneDeletedImages(guildId, gd) {
