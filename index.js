@@ -116,6 +116,18 @@ async function _persistGuild(guildId) {
   }
 }
 
+// Immediate, durable save for high-value events (POTD wins, lottery payouts, etc.)
+// where a lost write really matters. Unlike saveData (which debounces 2s and can be
+// lost if the process restarts inside that window), this cancels any pending debounce
+// and writes the guild document right now, returning a promise that resolves once the
+// write has actually landed in MongoDB. Callers can await it before replying so the
+// data is safe even if the bot restarts a moment later.
+async function saveNow(guildId) {
+  if (!guildId) return;
+  if (_saveTimers[guildId]) { clearTimeout(_saveTimers[guildId]); delete _saveTimers[guildId]; }
+  await _persistGuild(guildId);
+}
+
 // Periodic full save safety net — every 30 min is plenty since every real
 // mutation already does an immediate debounced write via saveData(guildId).
 setInterval(() => {
@@ -2521,7 +2533,7 @@ initBlackMarketExchange({ client, db, saveData });
 //initJobs({ client, db, saveData });
 
 // Post of the Day
-initPOTD({ client, db, saveData, awardLP });
+initPOTD({ client, db, saveData, saveNow, awardLP });
 
 // Libya Chat / Announce (owner-only bot messages)
 initLibyaChat(client);

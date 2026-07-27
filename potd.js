@@ -13,6 +13,11 @@
 const { SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits } = require('discord.js');
 const { awardDinar } = require('./gacha');
 
+// Holds the host's immediate-flush saver (set in initPOTD). Used to persist a POTD
+// win the instant it's awarded, so a restart can't roll the win back. Defaults to a
+// no-op until initPOTD runs.
+let _saveNow = async () => {};
+
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const ANNOUNCE_HOUR_UTC  = 19;   // 21:00 Libya (UTC+2)
@@ -253,6 +258,15 @@ async function runPOTD(client, db, saveData, awardLP, guildId, forced = false) {
     if (hof.streak > hof.bestStreak) hof.bestStreak = hof.streak;
     hof.wins++;
     hof.lastWinDate = todayStr;
+    // Also mark the run as done for today NOW, so this win + the date guard are durable
+    // together the instant they happen.
+    potd.lastRunDate = todayStr;
+
+    // Persist the win immediately and durably — a POTD win is a once-a-day, high-value
+    // event, so we don't rely on the debounced save (which a restart could lose). This
+    // write lands in the DB before we award LP/roles or announce.
+    try { await _saveNow(guildId); }
+    catch (e) { console.error('[POTD] immediate save of win failed:', e.message); }
 
     // ── Award LP ──────────────────────────────────────────────────────────────
     let lpAwarded  = LP_WIN;
@@ -404,7 +418,7 @@ async function runPOTD(client, db, saveData, awardLP, guildId, forced = false) {
 
     // ── Persist ───────────────────────────────────────────────────────────────
     potd.lastRunDate = todayStr;
-    saveData(guildId);
+    try { await _saveNow(guildId); } catch { saveData(guildId); }
 
     console.log(`[POTD] Winner for ${guild.name}: ${winner.author.username} with ${best.count} reactions (+${lpAwarded} LP, streak: ${hof.streak})`);
 }
@@ -494,6 +508,15 @@ const potdCommands = [
     new SlashCommandBuilder()
         .setName('potd-hall-of-fame')
         .setDescription('Show the Post of the Day Hall of Fame'),
+
+    // Correct a member's win count (fixes lost/miscounted wins)
+    new SlashCommandBuilder()
+        .setName('potd-adjust')
+        .setDescription('Adjust a member\'s POTD win count (Admin only)')
+        .addUserOption(o => o.setName('user').setDescription('Whose win count to adjust').setRequired(true))
+        .addIntegerOption(o => o.setName('amount').setDescription('Change to apply, e.g. 1 to add one, -1 to remove one').setRequired(true))
+        .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+        .setDMPermission(false),
 ].map(cmd => cmd.toJSON());
 
 // ─── Admin/reply helpers ──────────────────────────────────────────────────────
@@ -522,7 +545,12 @@ async function safeDefer(interaction, opts = {}) {
 
 // ─── Module init ──────────────────────────────────────────────────────────────
 
-function initPOTD({ client, db, saveData, awardLP }) {
+function initPOTD({ client, db, saveData, saveNow, awardLP }) {
+    // Make the immediate-flush saver available to runPOTD (falls back to a no-op-ish
+    // wrapper around saveData if the host didn't provide one, so nothing breaks).
+    _saveNow = (typeof saveNow === 'function')
+        ? saveNow
+        : async (gid) => { saveData(gid); };
 
     // Start the daily scheduler
     client.once('clientReady', () => {
@@ -669,6 +697,34 @@ function initPOTD({ client, db, saveData, awardLP }) {
                         .setTitle('⭐ Post of the Day — Hall of Fame')
                         .setDescription(lines.join('\n'))
                         .setFooter({ text: 'Sorted by total wins' })
+                        .setTimestamp()],
+                });
+            }
+
+            // ── /potd-adjust ──────────────────────────────────────────────────
+            if (commandName === 'potd-adjust') {
+                if (!isAdmin(interaction)) return safeReply(interaction, { content: '❌ Admin only.', flags: 64 });
+                const target = interaction.options.getUser('user', true);
+                const amount = interaction.options.getInteger('amount', true);
+                if (target.bot) return safeReply(interaction, { content: '❌ Bots can\'t be in the Hall of Fame.', flags: 64 });
+                if (amount === 0) return safeReply(interaction, { content: '❌ Amount can\'t be 0 — use a positive number to add wins or a negative one to remove them.', flags: 64 });
+
+                const potd = getPOTDData(db, guild.id);
+                const hof  = getHOFEntry(potd, target.id);
+                const before = hof.wins;
+                hof.wins = Math.max(0, hof.wins + amount);   // never go below 0
+                const after = hof.wins;
+
+                // durable immediate save so the correction can't be rolled back
+                try { await _saveNow(guild.id); } catch { saveData(guild.id); }
+
+                const applied = after - before;
+                return safeReply(interaction, {
+                    embeds: [new EmbedBuilder()
+                        .setColor(0xFFD700)
+                        .setTitle('⭐ POTD Win Count Adjusted')
+                        .setDescription(`<@${target.id}>'s wins: **${before} → ${after}** (${applied >= 0 ? '+' : ''}${applied}).`)
+                        .setFooter({ text: `Adjusted by ${interaction.user.username}` })
                         .setTimestamp()],
                 });
             }
