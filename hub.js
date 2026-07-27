@@ -352,6 +352,10 @@ function getShopCommands() {
       .addRoleOption(o => o.setName('role').setDescription('Your moderator role (custom roles go below this). Leave empty to auto-detect.').setRequired(false))
       .setDefaultMemberPermissions(0)   // admins only (Manage Server / Administrator via 0 = no default, admin override)
       .toJSON(),
+    new SlashCommandBuilder()
+      .setName('topprofiles')
+      .setDescription('See the most-hearted profiles — and how to get yours on the board')
+      .toJSON(),
   ];
 }
 
@@ -1349,7 +1353,12 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
       const key = profileApi.addUserImage(message.guild.id, message.author.id, dataUri);
       profileApi.addElement(message.guild.id, message.author.id, 'sticker', { imageKey: key, circle: false });
       console.log(`[profile] image stored for ${message.author.id} (key=${key}, ${(buf.length/1024).toFixed(0)}KB, ${mime})`);
-      await message.reply('🖼️ **Added to your card!** Open **🪪 My Profile → Edit Layout** to position and resize it (it starts near the top-left).').catch(()=>{});
+      // Discord doesn't auto-refresh an already-open Manage Images dropdown, so give the
+      // user buttons that open a FRESH view showing the image they just added.
+      const doneRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('prof:editmine').setLabel('Open Editor').setEmoji('🎨').setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId('prof:images').setLabel('Manage Images').setEmoji('🖼️').setStyle(ButtonStyle.Secondary));
+      await message.reply({ content: '🖼️ **Added to your card!** Tap **Open Editor** to position it, or **Manage Images** to set it as a banner. (It starts near the top-left.)', components: [doneRow] }).catch(()=>{});
     } catch (e) {
       console.error('[profile] image upload failed:', e.message, e.stack?.split('\n')[1]);
       try { await message.reply('⚠️ Something went wrong adding that image. Check the logs or try again.'); } catch {}
@@ -1386,6 +1395,44 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
           console.error('[profile] command failed:', e.message);
           return interaction.editReply({ content: '⚠️ Couldn\'t render that profile card.' });
         }
+      }
+      if (interaction.isChatInputCommand() && interaction.commandName === 'topprofiles') {
+        if (!interaction.guildId) return interaction.reply({ content: 'Use this in the server.', flags: 64 });
+        if (!profileApi) return interaction.reply({ content: 'Profiles aren\'t available right now.', flags: 64 });
+        const g = interaction.guildId;
+        // rank published profiles by hearts (desc)
+        const ranked = profileApi.publishedList(g)
+          .map(id => ({ id, hearts: profileApi.heartsFor(g, id) }))
+          .sort((a, b) => b.hearts - a.hearts)
+          .slice(0, 10);
+
+        const howTo =
+          '**❤️ Want your profile on this board?**\n' +
+          '1️⃣ Run `/hub` → **🪪 My Profile** (or `/profile`) and design your card.\n' +
+          '2️⃣ Hit **🌍 Publish to Showcase** so others can see it.\n' +
+          '3️⃣ People heart it with **/profile @you** → the **❤️ Heart** button.\n' +
+          'The more hearts, the higher you climb!';
+
+        if (!ranked.length) {
+          return interaction.reply({
+            embeds: [new EmbedBuilder().setColor(0xec4899).setTitle('🏆 Top Profiles')
+              .setDescription(`No published profiles yet — be the first!\n\n${howTo}`)],
+          });
+        }
+
+        const medals = ['🥇', '🥈', '🥉'];
+        const lines = ranked.map((r, i) => {
+          const rank = medals[i] || `**${i + 1}.**`;
+          return `${rank} <@${r.id}> — **${fmt(r.hearts)}** heart${r.hearts === 1 ? '' : 's'}`;
+        });
+
+        return interaction.reply({
+          embeds: [new EmbedBuilder().setColor(0xec4899)
+            .setTitle('🏆 Top Profiles — Most Hearted')
+            .setDescription(lines.join('\n') + `\n\n${howTo}`)
+            .setFooter({ text: 'Tip: /profile @someone to view and heart their card' })
+            .setTimestamp()],
+        });
       }
       if (interaction.isChatInputCommand() && interaction.commandName === 'hub-mod-role') {
         if (!interaction.guildId) return interaction.reply({ content: 'Use this in the server.', flags: 64 });
