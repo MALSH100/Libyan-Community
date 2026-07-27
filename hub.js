@@ -974,14 +974,22 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
     const keys = Object.keys(imgs);
     const used = keys.length, max = profileApi.MAX_IMAGES;
     const banner = profileApi.getBanner(gid, uid);
+    // map each image key → the custom name given to its element (if any), so the dropdowns
+    // show "My Logo" instead of a generic "Image 3" once the user has renamed it.
+    const layout = profileApi.getLayout(gid, uid);
+    const nameByKey = {};
+    for (const el of (layout.elements || [])) {
+      if (el.data?.imageKey && el.data?.name) nameByKey[el.data.imageKey] = el.data.name;
+    }
+    const imgLabel = (k, i) => nameByKey[k] ? nameByKey[k].slice(0, 60) : `Image ${i+1}`;
     const embed = new EmbedBuilder().setColor(0x8b5cf6).setTitle('🖼️ Manage Images')
       .setDescription(`You're using **${used} / ${max}** image slots.\nPress **📤 Upload Image** then drop an image in the channel — or caption any image with \`!cardimg\`.\n\n• **Delete** an image to free a slot (also removes it from your card).\n• **Set as Banner** to make an image fill your whole card background${banner ? ' *(one is currently set)*' : ''}.`);
     const rows = [];
     if (used) {
-      const delOpts = keys.slice(0, 25).map((k, i) => ({ label: `Image ${i+1}${banner===k?' (banner)':''}`, value: k, emoji: '🗑️' }));
+      const delOpts = keys.slice(0, 25).map((k, i) => ({ label: `${imgLabel(k, i)}${banner===k?' (banner)':''}`.slice(0, 100), value: k, emoji: '🗑️' }));
       rows.push(new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('prof:imgDelete').setPlaceholder('Delete an image…').addOptions(delOpts)));
       const banOpts = [{ label: 'No banner (use background cosmetic)', value: '__none__', emoji: '🚫' },
-        ...keys.slice(0, 24).map((k, i) => ({ label: `Use Image ${i+1} as banner`, value: k, emoji: '🖼️', default: banner===k }))];
+        ...keys.slice(0, 24).map((k, i) => ({ label: `${imgLabel(k, i)} as banner`.slice(0, 100), value: k, emoji: '🖼️', default: banner===k }))];
       rows.push(new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('prof:imgBanner').setPlaceholder('Set a banner…').addOptions(banOpts)));
     }
     rows.push(new ActionRowBuilder().addComponents(
