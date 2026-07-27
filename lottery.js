@@ -1,6 +1,6 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // lottery.js — Daily Dinar Lottery Wheel
-// Two unpredictable lotteries per day (11:00–23:00 Libya time, ≥2.5h apart).
+// One unpredictable lottery per day (11:00–23:00 Libya time).
 // Users wager 1–500 Dinar via /dinar-lotto; odds are wager-weighted; winner
 // takes the whole pool. Libyan-flag wheel rendered as animated GIFs.
 // Wire-up in index.js:
@@ -24,7 +24,7 @@ const WAGER_MAX         = 500;
 const LOTTO_DURATION_MS = 60 * 60 * 1000;   // each lottery runs for 1 hour
 const REMIND_EVERY_MS   = 15 * 60 * 1000;   // channel reminder cadence
 const JOIN_COOLDOWN_MS  = 12 * 1000;        // gap between ANY two entries (anti-spam)
-const PER_DAY           = 2;                // lotteries per day
+const PER_DAY           = 1;                // lotteries per day (one draw at a random time)
 const WIN_START         = 11;               // Libya-time spawn window
 const WIN_END           = 23;
 const MIN_GAP_MS        = 150 * 60 * 1000;  // ≥2.5h between the two draws
@@ -252,7 +252,7 @@ function renderWinnerStill(entries, winnerIdx, pool) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// schedule: two unpredictable draws per Libya-day, ≥2.5h apart, inside 11–23
+// schedule: one unpredictable draw per Libya-day, inside 11–23
 // ─────────────────────────────────────────────────────────────────────────────
 function libyaDayKey(nowMs) {
   const lib = new Date(nowMs + LIBYA_OFFSET_MS);
@@ -295,7 +295,7 @@ function getState(db, guildId) {
 
 function addEntry(state, db, guildId, saveData, userId, name, wager) {
   const L = state.active;
-  if (!L) return { error: 'No lottery is live right now — they spin up **twice a day at random times**. Keep an eye on the lottery channel!' };
+  if (!L) return { error: 'No lottery is live right now — one spins up **once a day at a random time**. Keep an eye on the lottery channel!' };
   const now = Date.now();
   if (now > L.endsAt) return { error: 'This lottery has just closed — catch the next one!' };
   if (L.lastJoinAt && now - L.lastJoinAt < JOIN_COOLDOWN_MS)
@@ -577,7 +577,7 @@ function initLotto({ client, db, saveData }) {
         if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild))
           return interaction.reply({ content: 'You need **Manage Server** to set the lottery channel.', flags: 64 });
         state.channelId = interaction.channelId; saveData(gid);
-        return interaction.reply({ content: `🎡 Lotteries will now take place in <#${interaction.channelId}> — twice a day at unpredictable times!` });
+        return interaction.reply({ content: `🎡 Lotteries will now take place in <#${interaction.channelId}> — once a day at an unpredictable time!` });
       }
 
       if (interaction.commandName === 'lottery-start') {
