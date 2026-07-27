@@ -90,32 +90,43 @@ async function loadData() {
       const guildId = doc._id;
       db[guildId]   = doc.data;
     }
-    // Stitch uploaded images back in from the separate collection, replacing the
-    // '__EXTERNAL__' markers with their real base64 bodies.
+    // Stitch externalised images back in from the separate collection, replacing the
+    // '__EXTERNAL__' markers with their real base64 bodies. ref is "img:uid:key" or "coin:uid".
     if (mongoImages) {
       const imgDocs = await mongoImages.find({}).toArray();
       let restored = 0;
       for (const im of imgDocs) {
         const g = db[im.guildId];
-        if (!g || !g.__profiles) continue;
-        g.__profiles.images ||= {};
-        g.__profiles.images[im.uid] ||= {};
-        g.__profiles.images[im.uid][im.key] = im.body;
-        restored++;
+        if (!g) continue;
+        const ref = im.ref || '';
+        if (ref.startsWith('img:')) {
+          const [, uid, key] = ref.split(':');
+          if (!g.__profiles) continue;
+          g.__profiles.images ||= {};
+          g.__profiles.images[uid] ||= {};
+          g.__profiles.images[uid][key] = im.body;
+          restored++;
+        } else if (ref.startsWith('coin:')) {
+          const [, uid] = ref.split(':');
+          if (!g.__coinskins?.custom?.[uid]) continue;
+          g.__coinskins.custom[uid].data = im.body;
+          restored++;
+        }
       }
-      // One-time migration: any guild still holding inline base64 images (from before
-      // the split) gets those images moved into the images collection on next save.
+      // One-time migration: any guild still holding inline base64 (profile images OR coin
+      // skins) gets those moved into the images collection on next save.
       let migrated = 0;
       for (const guildId of Object.keys(db)) {
-        const imgs = db[guildId]?.__profiles?.images;
-        if (!imgs) continue;
-        for (const uid of Object.keys(imgs)) {
-          for (const key of Object.keys(imgs[uid] || {})) {
-            if (typeof imgs[uid][key] === 'string' && imgs[uid][key].startsWith('data:')) migrated++;
-          }
-        }
-        if (migrated) saveData(guildId);   // schedules a split-save that externalises them
+        const gd = db[guildId];
+        const imgs = gd?.__profiles?.images;
+        if (imgs) for (const uid of Object.keys(imgs)) for (const key of Object.keys(imgs[uid] || {}))
+          if (typeof imgs[uid][key] === 'string' && imgs[uid][key].startsWith('data:')) migrated++;
+        const coins = gd?.__coinskins?.custom;
+        if (coins) for (const uid of Object.keys(coins))
+          if (coins[uid] && typeof coins[uid].data === 'string' && coins[uid].data.startsWith('data:')) migrated++;
       }
+      // schedule a split-save for every guild so any inline bodies get externalised
+      for (const guildId of Object.keys(db)) saveData(guildId);
       console.log(`✅ Loaded ${docs.length} guild(s); restored ${restored} image(s)${migrated ? `, migrating ${migrated} legacy image(s)` : ''}`);
     } else {
       console.log(`✅ Loaded data for ${docs.length} guild(s) from MongoDB`);
@@ -151,15 +162,14 @@ async function _persistGuild(guildId) {
       { _id: guildId, data: gd },
       { upsert: true }
     );
-    // Persist each image body to the images collection (upsert; only changed ones matter,
-    // but upserting all is cheap and keeps them in sync).
+    // Persist each image body to the images collection (one doc per image / coin skin).
     if (mongoImages && detached.length) {
-      await Promise.all(detached.map(({ uid, key, body }) =>
+      await Promise.all(detached.map(({ id, body }) =>
         mongoImages.replaceOne(
-          { _id: `${guildId}:${uid}:${key}` },
-          { _id: `${guildId}:${uid}:${key}`, guildId, uid, key, body },
+          { _id: `${guildId}:${id}` },
+          { _id: `${guildId}:${id}`, guildId, ref: id, body },
           { upsert: true }
-        ).catch(e => console.error(`⚠️  image save failed (${key}):`, e.message))
+        ).catch(e => console.error(`⚠️  image save failed (${id}):`, e.message))
       ));
       // Clean up image docs that no longer exist in memory (deleted by the user).
       await _pruneDeletedImages(guildId, gd).catch(() => {});
@@ -171,37 +181,52 @@ async function _persistGuild(guildId) {
   }
 }
 
-// Pull every base64 image body out of gd.__profiles.images, replacing each with a small
-// placeholder marker in the guild doc. Returns the list of {uid,key,body} removed.
+// Pull every base64 image body out of the guild doc, replacing each with a small
+// placeholder marker. Covers BOTH image sources that store base64 inline:
+//   • profile images:  gd.__profiles.images[uid][key]        → id "guildId:img:uid:key"
+//   • coin skins:       gd.__coinskins.custom[uid].data       → id "guildId:coin:uid"
+// Returns the list of {id, ref, body} removed (ref lets us reattach in memory).
 function _detachImages(gd) {
   const removed = [];
+  // profile images
   const imgs = gd.__profiles?.images;
-  if (!imgs) return removed;
-  for (const uid of Object.keys(imgs)) {
-    const byKey = imgs[uid] || {};
-    for (const key of Object.keys(byKey)) {
-      const body = byKey[key];
-      if (typeof body === 'string' && body.startsWith('data:')) {
-        removed.push({ uid, key, body });
-        byKey[key] = '__EXTERNAL__';   // marker: the real body lives in the images collection
+  if (imgs) {
+    for (const uid of Object.keys(imgs)) {
+      const byKey = imgs[uid] || {};
+      for (const key of Object.keys(byKey)) {
+        const body = byKey[key];
+        if (typeof body === 'string' && body.startsWith('data:')) {
+          removed.push({ id: `img:${uid}:${key}`, body, restore: () => { byKey[key] = body; } });
+          byKey[key] = '__EXTERNAL__';
+        }
+      }
+    }
+  }
+  // coin skin custom images
+  const coins = gd.__coinskins?.custom;
+  if (coins) {
+    for (const uid of Object.keys(coins)) {
+      const rec = coins[uid];
+      if (rec && typeof rec.data === 'string' && rec.data.length > 100 && rec.data !== '__EXTERNAL__') {
+        const body = rec.data;
+        removed.push({ id: `coin:${uid}`, body, restore: () => { rec.data = body; } });
+        rec.data = '__EXTERNAL__';
       }
     }
   }
   return removed;
 }
 function _reattachImages(gd, detached) {
-  const imgs = gd.__profiles?.images;
-  if (!imgs) return;
-  for (const { uid, key, body } of detached) {
-    if (imgs[uid]) imgs[uid][key] = body;
-  }
+  for (const d of detached) { try { d.restore(); } catch { /* */ } }
 }
 // Remove image docs from the collection that are no longer referenced in memory.
 async function _pruneDeletedImages(guildId, gd) {
   if (!mongoImages) return;
   const live = new Set();
   const imgs = gd.__profiles?.images || {};
-  for (const uid of Object.keys(imgs)) for (const key of Object.keys(imgs[uid] || {})) live.add(`${guildId}:${uid}:${key}`);
+  for (const uid of Object.keys(imgs)) for (const key of Object.keys(imgs[uid] || {})) live.add(`${guildId}:img:${uid}:${key}`);
+  const coins = gd.__coinskins?.custom || {};
+  for (const uid of Object.keys(coins)) if (coins[uid]) live.add(`${guildId}:coin:${uid}`);
   const existing = await mongoImages.find({ guildId }, { projection: { _id: 1 } }).toArray();
   const stale = existing.filter(d => !live.has(d._id)).map(d => d._id);
   if (stale.length) await mongoImages.deleteMany({ _id: { $in: stale } });
