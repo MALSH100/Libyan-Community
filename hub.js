@@ -1366,10 +1366,12 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
             .setTitle(`🪪 ${esc(member.displayName || target.username)}'s Profile`)
             .setDescription(`❤️ **${fmt(hearts)}** heart${hearts===1?'':'s'}`)
             .setImage(`attachment://${card.name}`);
-          // Two buttons: edit YOUR OWN profile (opens the editor), and heart THIS profile.
+          // Two buttons: "Edit your Profile" (opens the clicker's OWN editor) and "Heart".
+          // The Heart button always shows (the card is public, so anyone who sees it can
+          // heart it) — the handler itself blocks hearting your own profile with a private
+          // note, so it's safe to show even on your own /profile.
           const row = new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId('prof:editmine').setLabel('Edit your Profile').setEmoji('🎨').setStyle(ButtonStyle.Success));
-          if (!isMe) row.addComponents(
+            new ButtonBuilder().setCustomId('prof:editmine').setLabel('Edit your Profile').setEmoji('🎨').setStyle(ButtonStyle.Success),
             new ButtonBuilder().setCustomId(`prof:heartp:${target.id}`).setLabel('Heart').setEmoji('❤️').setStyle(ButtonStyle.Danger).setDisabled(target.bot));
           return interaction.editReply({ embeds: [embed], files: [card], components: [row] });
         } catch (e) {

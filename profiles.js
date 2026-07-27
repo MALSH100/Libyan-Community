@@ -321,8 +321,10 @@ function getElement(db, gid, uid, elId) {
 function updateElement(db, gid, uid, elId, patch, saveData) {
   const el = getElement(db, gid, uid, elId);
   if (!el) return null;
-  Object.assign(el, patch);
-  if (patch.data) el.data = { ...el.data, ...patch.data };
+  const origData = el.data || {};
+  const { data: patchData, ...rest } = patch;   // keep data out of the top-level assign
+  Object.assign(el, rest);
+  if (patchData) el.data = { ...origData, ...patchData };   // merge, never replace
   clampEl(el);
   getLayout(db, gid, uid).custom = true;
   if (saveData) saveData(gid);
