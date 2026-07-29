@@ -24,6 +24,34 @@ const { getDinar, spendDinar, awardDinar } = require('./gacha');
 const coins = require('./coinskins');
 const clans = require('./clanfns');
 
+// Determine an image's true MIME type from its magic bytes (file signature), because
+// filenames and Discord content-types are unreliable — a PNG is often served as ".webp".
+// resvg renders by the data-URI MIME, so a wrong label produces a blank image. Returns
+// one of image/png|jpeg|gif|webp, or null if it's not a supported image.
+function sniffImageMime(buf) {
+  if (!buf || buf.length < 12) return null;
+  // PNG: 89 50 4E 47 0D 0A 1A 0A
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4E && buf[3] === 0x47) return 'image/png';
+  // JPEG: FF D8 FF
+  if (buf[0] === 0xFF && buf[1] === 0xD8 && buf[2] === 0xFF) return 'image/jpeg';
+  // GIF: "GIF87a" / "GIF89a"
+  if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46) return 'image/gif';
+  // WEBP: "RIFF" .... "WEBP"
+  if (buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WEBP') return 'image/webp';
+  return null;
+}
+
+// Convert a WEBP image buffer to a PNG buffer, because resvg cannot render WEBP.
+// Uses `sharp` if it's installed; if not, returns null and the caller asks the user to
+// re-upload as PNG/JPG. (Adding `sharp` to package.json enables automatic conversion.)
+let _sharp; let _sharpTried = false;
+async function webpToPng(buf) {
+  if (!_sharpTried) { _sharpTried = true; try { _sharp = require('sharp'); } catch { _sharp = null; console.warn('[profile] sharp not installed — WEBP uploads will be rejected. Add "sharp" to package.json to auto-convert them.'); } }
+  if (!_sharp) return null;
+  try { return await _sharp(buf).png().toBuffer(); }
+  catch (e) { console.error('[profile] webp→png conversion failed:', e.message); return null; }
+}
+
 // Channel where clan join-request alerts (new request / accepted / declined) are posted,
 // and where leaders/officers get pinged. Set to null to disable the dedicated alerts channel.
 const CLAN_ALERTS_CHANNEL_ID = '908343919287341096';
@@ -1347,9 +1375,23 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
       const res = await fetch(att.url, { signal: AbortSignal.timeout(12000) }).catch((e)=>{ console.error('[profile] image fetch error:', e.message); return null; });
       if (!res || !res.ok) return message.reply('Couldn\'t download that image — try uploading it again.').catch(()=>{});
       const buf = Buffer.from(await res.arrayBuffer());
-      let mime = att.contentType && att.contentType.startsWith('image/') ? att.contentType.split(';')[0] : null;
-      if (!mime) mime = name.endsWith('.png') ? 'image/png' : name.endsWith('.gif') ? 'image/gif' : name.endsWith('.webp') ? 'image/webp' : 'image/jpeg';
-      const dataUri = `data:${mime};base64,${buf.toString('base64')}`;
+      // Determine the REAL format from magic bytes, not the filename/contentType. Discord
+      // (especially mobile) often serves images with a wrong extension — e.g. a PNG named
+      // ".webp". resvg decodes by the data-URI MIME, so a wrong label renders BLANK.
+      let sniffed = sniffImageMime(buf);
+      if (!sniffed) {
+        return message.reply('That image is in a format I can\'t use (I support PNG, JPG, GIF and WEBP). Try re-saving it as a PNG.').catch(()=>{});
+      }
+      let finalBuf = buf, finalMime = sniffed;
+      // resvg cannot render WEBP at all — convert real WEBP files to PNG first.
+      if (sniffed === 'image/webp') {
+        const converted = await webpToPng(buf);
+        if (!converted) {
+          return message.reply('That\'s a WEBP image, which I can\'t display. Please re-save it as a **PNG** or **JPG** and upload again.').catch(()=>{});
+        }
+        finalBuf = converted; finalMime = 'image/png';
+      }
+      const dataUri = `data:${finalMime};base64,${finalBuf.toString('base64')}`;
       const key = profileApi.addUserImage(message.guild.id, message.author.id, dataUri);
       profileApi.addElement(message.guild.id, message.author.id, 'sticker', { imageKey: key, circle: false });
       console.log(`[profile] image stored for ${message.author.id} (key=${key}, ${(buf.length/1024).toFixed(0)}KB, ${mime})`);
@@ -1472,6 +1514,8 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
       // profile as a fresh ephemeral reply (works even when viewing someone else's card).
       if (interaction.isButton() && interaction.customId === 'prof:editmine') {
         if (!profileApi) return interaction.reply({ content: 'Profiles aren\'t available right now.', flags: 64 });
+        const who = interaction.user?.username || uid;
+        console.log(`🎨 "Edit your Profile" pressed by ${who} (${uid}) in ${interaction.guild?.name || gid}`);
         await interaction.deferReply({ flags: 64 });
         try {
           const member = interaction.member || await interaction.guild.members.fetch(uid);
