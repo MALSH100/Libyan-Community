@@ -1394,7 +1394,7 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
       const dataUri = `data:${finalMime};base64,${finalBuf.toString('base64')}`;
       const key = profileApi.addUserImage(message.guild.id, message.author.id, dataUri);
       profileApi.addElement(message.guild.id, message.author.id, 'sticker', { imageKey: key, circle: false });
-      console.log(`[profile] image stored for ${message.author.id} (key=${key}, ${(buf.length / 1024).toFixed(0)}KB)`);
+      console.log(`[profile] image stored for ${message.author.id} (key=${key}, ${(buf.length/1024).toFixed(0)}KB, original=${sniffed}, final=${finalMime})`);
       // Discord doesn't auto-refresh an already-open Manage Images dropdown, so give the
       // user buttons that open a FRESH view showing the image they just added.
       const doneRow = new ActionRowBuilder().addComponents(
