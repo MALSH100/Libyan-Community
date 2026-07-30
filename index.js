@@ -112,6 +112,9 @@ async function loadData() {
           g.__coinskins.custom[uid].data = im.body;
           restored++;
         }
+        // Remember what's already stored so the next save doesn't needlessly
+        // re-upload an image that hasn't changed (the old egress leak).
+        _imgHashes.set(im._id, _fingerprint(im.body));
       }
       // One-time migration: any guild still holding inline base64 (profile images OR coin
       // skins) gets those moved into the images collection on next save.
@@ -160,26 +163,89 @@ async function _persistGuild(guildId) {
   // instead of the real image — causing images to vanish mid-save.)
   const { doc, images } = _stripImagesForSave(gd);
   try {
-    await mongoCollection.replaceOne(
-      { _id: guildId },
-      { _id: guildId, data: doc },
-      { upsert: true }
-    );
-    // Persist each image body to the images collection (one doc per image / coin skin).
+    // Skip the write entirely if nothing in the guild document changed. saveData()
+    // fires on almost every interaction, and most of those don't alter stored state.
+    const body = JSON.stringify(doc);
+    const bodyHash = _fingerprint(body);
+    if (_docHashes.get(guildId) !== bodyHash) {
+      await mongoCollection.replaceOne(
+        { _id: guildId },
+        { _id: guildId, data: doc },
+        { upsert: true }
+      );
+      _docHashes.set(guildId, bodyHash);
+      _egress.docBytes += body.length; _egress.docWrites++;
+    } else { _egress.skipped++; }
+    // ── EGRESS GUARD ─────────────────────────────────────────────────────
+    // Image bodies are large (MBs) and almost never change, but saveData()
+    // fires on nearly every interaction. Re-uploading every image on every
+    // save was burning gigabytes of egress a day. We now fingerprint each
+    // image and write ONLY the ones that actually changed, so a steady-state
+    // save costs zero image bandwidth.
     if (mongoImages && images.length) {
-      await Promise.all(images.map(({ id, body }) =>
-        mongoImages.replaceOne(
-          { _id: `${guildId}:${id}` },
-          { _id: `${guildId}:${id}`, guildId, ref: id, body },
-          { upsert: true }
-        ).catch(e => console.error(`⚠️  image save failed (${id}):`, e.message))
-      ));
-      // Clean up image docs that no longer exist in memory (deleted by the user).
-      await _pruneDeletedImages(guildId, gd).catch(() => {});
+      const changed = [];
+      const liveKeys = [];
+      for (const { id, body } of images) {
+        const key = `${guildId}:${id}`;
+        liveKeys.push(key);
+        const h = _fingerprint(body);
+        if (_imgHashes.get(key) !== h) changed.push({ key, id, body, h }); else _egress.skipped++;
+      }
+      if (changed.length) {
+        await Promise.all(changed.map(({ key, id, body, h }) =>
+          mongoImages.replaceOne(
+            { _id: key },
+            { _id: key, guildId, ref: id, body },
+            { upsert: true }
+          ).then(() => { _imgHashes.set(key, h); })
+           .then(() => { _egress.imgBytes += body.length; _egress.imgWrites++; })
+           .catch(e => console.error(`⚠️  image save failed (${id}):`, e.message))
+        ));
+        console.log(`[db] wrote ${changed.length}/${images.length} image(s) for ${guildId} (rest unchanged)`);
+      }
+      // Prune only when the set of live images actually changed — a find()
+      // on every save is pointless bandwidth of its own.
+      const sig = liveKeys.sort().join('|');
+      if (_imgKeySig.get(guildId) !== sig) {
+        _imgKeySig.set(guildId, sig);
+        await _pruneDeletedImages(guildId, gd).catch(() => {});
+      }
     }
   } catch (e) {
     console.error(`⚠️  MongoDB save failed for guild ${guildId}:`, e.message);
   }
+}
+
+// Cheap, fast, non-cryptographic fingerprint of a (large) base64 body. We sample
+// the string rather than hashing every byte so this stays microseconds even on
+// multi-MB images — collisions are irrelevant here, we only need "did it change".
+// ── egress meter ──────────────────────────────────────────────────────────
+// Counts the bytes we actually send to MongoDB. Logged hourly so a bandwidth
+// problem is visible immediately rather than showing up on a bill weeks later.
+const _egress = { docBytes: 0, imgBytes: 0, docWrites: 0, imgWrites: 0, skipped: 0, since: Date.now() };
+function _egressReport() {
+  const mins = Math.max(1, (Date.now() - _egress.since) / 60000);
+  const mb = (b) => (b / 1048576).toFixed(2);
+  const perHour = ((_egress.docBytes + _egress.imgBytes) / 1048576) * (60 / mins);
+  console.log(`📊 [egress] last ${mins.toFixed(0)}min — docs ${_egress.docWrites} (${mb(_egress.docBytes)}MB), `
+    + `images ${_egress.imgWrites} (${mb(_egress.imgBytes)}MB), skipped ${_egress.skipped} unchanged `
+    + `→ ~${perHour.toFixed(1)} MB/hr`);
+  Object.assign(_egress, { docBytes: 0, imgBytes: 0, docWrites: 0, imgWrites: 0, skipped: 0, since: Date.now() });
+}
+setInterval(_egressReport, 60 * 60 * 1000);   // hourly
+setTimeout(_egressReport, 10 * 60 * 1000);    // plus one early report 10 min after boot
+
+const _imgHashes = new Map();   // "guild:ref" -> fingerprint of last written body
+const _docHashes = new Map();   // guildId -> fingerprint of last written guild document
+const _imgKeySig = new Map();   // guildId -> signature of the live image key set
+// Full content hash. An earlier version sampled the string for speed, but that
+// could miss a single-byte change in the middle of an image and silently fail to
+// save it — losing data. SHA-1 is native and fast enough (a few ms per MB), and
+// correctness matters far more here than shaving microseconds.
+const _crypto = require('crypto');
+function _fingerprint(s) {
+  if (typeof s !== 'string') return 'x';
+  return _crypto.createHash('sha1').update(s).digest('base64');
 }
 
 // Return { doc, images } where `doc` is a copy of the guild data with every base64 image
@@ -2683,5 +2749,35 @@ initShop({ client, db, saveData, runFlip: gachaApi && gachaApi.runFlip, warApi: 
 //initTranslator(client, db, saveData);
 
 // ─── Login ────────────────────────────────────────────────────────────────────
+
+/* ── crash guards ──────────────────────────────────────────────────────────
+   An unhandled 'error' event on the Client (e.g. DiscordAPIError 10062
+   "Unknown interaction" when a reply arrives after Discord's 3s window) will
+   otherwise take the whole process down. Every restart then re-reads the DB and
+   re-writes state, so crashes were quietly costing bandwidth as well as uptime.
+   These handlers log and keep the bot alive instead.                          */
+const _IGNORABLE = new Set([
+  10062, // Unknown interaction (expired — usually a slow/blocked reply)
+  10008, // Unknown message (deleted before we edited it)
+  40060, // Interaction already acknowledged
+  10003, // Unknown channel
+]);
+client.on('error', (err) => {
+  const code = err && err.code;
+  if (_IGNORABLE.has(code)) return console.warn(`[discord] ignorable error ${code}: ${err.message}`);
+  console.error('[discord] client error:', err && err.message);
+});
+client.on('shardError', (err) => console.error('[discord] shard error:', err && err.message));
+process.on('unhandledRejection', (reason) => {
+  const code = reason && reason.code;
+  if (_IGNORABLE.has(code)) return console.warn(`[discord] ignorable rejection ${code}`);
+  console.error('[process] unhandled rejection:', (reason && reason.message) || reason);
+});
+process.on('uncaughtException', (err) => {
+  const code = err && err.code;
+  if (_IGNORABLE.has(code)) return console.warn(`[discord] ignorable exception ${code}`);
+  console.error('[process] uncaught exception:', err && err.stack ? err.stack.split('\n').slice(0, 3).join(' | ') : err);
+  // deliberately not exiting: a single bad interaction should not end the bot
+});
 
 client.login(process.env.DISCORD_TOKEN);

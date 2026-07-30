@@ -939,7 +939,7 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
     const layout = profileApi.getLayout(gid, uid);
     let selId = profileSel.get(uid);
     if (selId && !layout.elements.find(e => e.id === selId)) { selId = null; profileSel.delete(uid); }
-    const card = await profileApi.renderCard(gid, member, { selectedId: selId, forceStatic: true });
+    const card = await profileApi.renderCard(gid, member, { selectedId: selId, forceStatic: true, preview: true });
     const sel = selId ? layout.elements.find(e => e.id === selId) : null;
 
     const desc = sel

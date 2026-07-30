@@ -784,12 +784,31 @@ function customCardSvg(ctx, gid, member, stats, equip, layout, opts = {}) {
 }
 
 // ── render helpers ──────────────────────────────────────────────────────────
-function svgToPng(svg) {
+// `width` lets callers render a cheaper image. Editor previews re-render on every
+// nudge/resize/select, so shipping those at full size was a large share of the
+// bot's outbound bandwidth — they now render small, while the real card that
+// people actually see stays full quality.
+function svgToPng(svg, width) {
   const r = new Resvg(svg, {
     font: { fontFiles: ALL_FONT_FILES, loadSystemFonts: false, defaultFontFamily: 'DejaVu Sans' },
-    fitTo: { mode: 'width', value: CARD_W },
+    fitTo: { mode: 'width', value: Math.max(120, Math.round(width || CARD_W)) },
   });
   return r.render().asPng();
+}
+const PREVIEW_W = 520;   // editor preview width (vs 900 for a real card)
+
+// Cache of finished renders, keyed by everything that can change the picture.
+const _renderCache = new Map();
+function _renderSig(uid, layout, equip, hearts, images, av, opts, outW) {
+  // image bodies are huge — fingerprint by key + length instead of content
+  const imgSig = Object.keys(images || {}).sort()
+    .map(k => `${k}:${(images[k] || '').length}`).join(',');
+  return JSON.stringify({
+    uid, outW, hearts,
+    l: layout, e: equip, i: imgSig,
+    a: av ? av.length : 0,
+    s: opts.selectedId || null, f: !!opts.forceStatic, p: !!opts.preview,
+  });
 }
 
 // fetch a Discord avatar and return a data URI (so resvg can embed it offline)
@@ -934,14 +953,33 @@ async function renderCard(ctx, gid, member, opts = {}) {
   };
 
   const animate = wantAnim && (isAnimatedEquip(equip) || hasGif);
+  // Editor previews are re-rendered constantly, so they go out small.
+  const outW = opts.preview ? PREVIEW_W : CARD_W;
+
+  // ── render cache ─────────────────────────────────────────────────────────
+  // Identical inputs produce an identical image. Re-rendering a card that has
+  // not changed wastes CPU (which blocks the event loop and makes Discord
+  // interactions time out with "Unknown interaction") and re-uploads bytes we
+  // already sent. Cache on a signature of everything that affects the output.
+  const sig = _renderSig(uid, layout, equip, hearts, images, av, opts, outW);
+  const hit = _renderCache.get(sig);
+  if (hit && hit.exp > Date.now()) return { ...hit.res, cached: true };
+
+  const finish = (res) => {
+    if (_renderCache.size > 60) _renderCache.delete(_renderCache.keys().next().value);
+    _renderCache.set(sig, { res, exp: Date.now() + 5 * 60 * 1000 });
+    return res;
+  };
 
   if (!animate) {
-    const png = svgToPng(drawSvg(0, 0));
-    return { attachment: png, name: `profile-${uid}.png`, animated: false };
+    const png = svgToPng(drawSvg(0, 0), outW);
+    return finish({ attachment: png, name: `profile-${uid}.png`, animated: false });
   }
   const { GIFEncoder, quantize, applyPalette } = require('gifenc');
   const enc = GIFEncoder();
-  const FRAMES_N = Math.min(30, Math.max(20, gifFrames));
+  // Fewer frames = dramatically smaller GIFs. 14 still reads as smooth motion
+  // but roughly halves the bytes of the old 20-30 frame cards.
+  const FRAMES_N = Math.min(16, Math.max(12, gifFrames));
   const DELAY = 80;
 
   // Render every frame's RGBA first, then build ONE shared palette from a sample of all
@@ -951,7 +989,7 @@ async function renderCard(ctx, gid, member, opts = {}) {
   const rgbaFrames = [];
   let W = 0, H = 0;
   for (let f = 0; f < FRAMES_N; f++) {
-    const png = svgToPng(drawSvg(f / FRAMES_N, f));
+    const png = svgToPng(drawSvg(f / FRAMES_N, f), outW);
     const { data, width, height } = pngToRGBA(png);
     W = width; H = height;
     rgbaFrames.push(data);
@@ -976,7 +1014,7 @@ async function renderCard(ctx, gid, member, opts = {}) {
     enc.writeFrame(index, W, H, { palette, delay: DELAY, first: f === 0 });
   }
   enc.finish();
-  return { attachment: Buffer.from(enc.bytes()), name: `profile-${uid}.gif`, animated: true };
+  return finish({ attachment: Buffer.from(enc.bytes()), name: `profile-${uid}.gif`, animated: true });
 }
 
 // decode a PNG buffer to raw RGBA for gifenc
