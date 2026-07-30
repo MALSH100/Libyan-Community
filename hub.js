@@ -2069,15 +2069,37 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
       // Manage Images: list uploaded images, delete them (frees the cap), or set one as banner
       // "Upload Image" button — arms a short window, then the user just posts an image
       // in the channel (no caption needed). Also works via the !cardimg caption anytime.
-      if (interaction.isButton() && interaction.customId === 'prof:upload') {
-        if (!profileApi) return interaction.reply({ content: 'Unavailable.', flags: 64 });
-        const used = profileApi.imageCount(gid, uid);
-        if (used >= profileApi.MAX_IMAGES) {
-          return interaction.reply({ content: `🚫 You're at the max of **${profileApi.MAX_IMAGES} images**. Delete one in **Edit Layout → Manage Images** first.`, flags: 64 });
-        }
-        awaitingUpload.set(uid, Date.now() + UPLOAD_WINDOW_MS);
-        return interaction.reply({ content: `📤 **Ready for your image!** Just drag an image into this channel and send it (no caption needed) within the next **2 minutes**, and I'll add it to your card.\n\n*Works with PNG, JPG, GIF or WEBP. You can also caption any image with \`!cardimg\` anytime.*`, flags: 64 });
-      }
+if (interaction.isButton() && interaction.customId === 'prof:upload') {
+  if (!profileApi) {
+    return interaction.reply({
+      content: 'Unavailable.',
+      flags: 64
+    }).catch(() => {});
+  }
+
+  const used = profileApi.imageCount(gid, uid);
+
+  if (used >= profileApi.MAX_IMAGES) {
+    return interaction.reply({
+      content: `🚫 You're at the max of **${profileApi.MAX_IMAGES} images**. Delete one in **Edit Layout → Manage Images** first.`,
+      flags: 64
+    }).catch(() => {});
+  }
+
+  // Arm the upload window before acknowledging the interaction
+  awaitingUpload.set(uid, Date.now() + UPLOAD_WINDOW_MS);
+
+  try {
+    await interaction.reply({
+      content: `📤 **Ready for your image!** Just drag an image into this channel and send it (no caption needed) within the next **2 minutes**, and I'll add it to your card.\n\n*Works with PNG, JPG, GIF or WEBP. You can also caption any image with \`!cardimg\` anytime.*`,
+      flags: 64
+    });
+  } catch (err) {
+    console.error('[profile] upload button reply failed:', err.message);
+  }
+
+  return;
+}
       if (interaction.isButton() && interaction.customId === 'prof:images') {
         return interaction.reply(manageImagesView(gid, uid));
       }
