@@ -86,10 +86,29 @@ async function loadData() {
   if (!mongoCollection) return;
   try {
     const docs = await mongoCollection.find({}).toArray();
+    let compressed = 0;
     for (const doc of docs) {
       const guildId = doc._id;
-      db[guildId]   = doc.data;
+      // v2 documents store gzipped JSON in `gz`; older ones store plain `data`.
+      // Both are read here so an upgrade (or a rollback) needs no migration.
+      if (doc.gz) {
+        try {
+          // MongoDB may hand this back as a driver Binary (whose .buffer IS the data)
+          // or as a plain Buffer (whose .buffer is the shared ArrayBuffer pool — reading
+          // that would return garbage). Check for a real Buffer first.
+          const raw = Buffer.isBuffer(doc.gz) ? doc.gz
+                    : (doc.gz.buffer ? Buffer.from(doc.gz.buffer) : Buffer.from(doc.gz));
+          db[guildId] = JSON.parse(zlib.gunzipSync(raw).toString('utf8'));
+          compressed++;
+        } catch (e) {
+          console.error(`⚠️  could not decompress guild ${guildId}:`, e.message);
+          db[guildId] = doc.data || {};
+        }
+      } else {
+        db[guildId] = doc.data || {};
+      }
     }
+    if (compressed) console.log(`   (${compressed} guild document(s) read compressed)`);
     // Stitch externalised images back in from the separate collection, replacing the
     // '__EXTERNAL__' markers with their real base64 bodies. ref is "img:uid:key" or "coin:uid".
     if (mongoImages) {
@@ -180,13 +199,21 @@ async function _persistGuildInner(guildId) {
     const body = JSON.stringify(doc);
     const bodyHash = _fingerprint(body);
     if (_docHashes.get(guildId) !== bodyHash) {
-      await mongoCollection.replaceOne(
-        { _id: guildId },
-        { _id: guildId, data: doc },
-        { upsert: true }
-      );
+      // The guild document is written far more often than images (every dinar change,
+      // clan edit, profile tweak). JSON compresses ~70% because of all the repeated
+      // keys, and it costs about 2ms — a good trade for spare CPU against bandwidth.
+      // Written as `gz` (a Binary); loadData still understands the old plain `data`
+      // field, so this rolls out with no migration.
+      let payload;
+      try {
+        payload = { _id: guildId, gz: zlib.gzipSync(Buffer.from(body), { level: 6 }), v: 2 };
+      } catch (e) {
+        payload = { _id: guildId, data: doc };   // compression should never cost us a save
+      }
+      await mongoCollection.replaceOne({ _id: guildId }, payload, { upsert: true });
       _docHashes.set(guildId, bodyHash);
-      _egress.docBytes += body.length; _egress.docWrites++;
+      const sent = payload.gz ? payload.gz.length : body.length;
+      _egress.docBytes += sent; _egress.docWrites++;
     } else { _egress.skipped++; }
     // ── EGRESS GUARD ─────────────────────────────────────────────────────
     // Image bodies are large (MBs) and almost never change, but saveData()
@@ -263,6 +290,7 @@ const _imgKeySig = new Map();   // guildId -> signature of the live image key se
 // save it — losing data. SHA-1 is native and fast enough (a few ms per MB), and
 // correctness matters far more here than shaving microseconds.
 const _crypto = require('crypto');
+const zlib = require('zlib');
 function _fingerprint(s) {
   if (typeof s !== 'string') return 'x';
   return _crypto.createHash('sha1').update(s).digest('base64');
@@ -1880,6 +1908,35 @@ if (commandName === 'db-prune') {
     }
     if (touched) _persistGuild(gId);   // write the slimmed document back to Mongo so it won't reload
   }
+
+  // ── orphaned profile images ──────────────────────────────────────────────
+  // Deleting a sticker element removes it from the card but leaves the stored
+  // image behind. Those orphans consume an image slot, sit in RAM, and get
+  // written to Mongo forever. Anything not referenced by an element or set as a
+  // banner is safe to drop.
+  let orphanImgs = 0, orphanBytes = 0;
+  for (const gId of Object.keys(db)) {
+    const p = db[gId] && db[gId].__profiles;
+    if (!p || !p.images) continue;
+    let touched = false;
+    for (const uid of Object.keys(p.images)) {
+      const imgs = p.images[uid] || {};
+      const layout = (p.layouts && p.layouts[uid]) || {};
+      const used = new Set();
+      for (const el of (layout.elements || [])) if (el && el.data && el.data.imageKey) used.add(el.data.imageKey);
+      if (layout.bannerKey) used.add(layout.bannerKey);
+      for (const key of Object.keys(imgs)) {
+        if (!used.has(key)) {
+          orphanBytes += size(imgs[key]); orphanImgs++;
+          delete imgs[key];
+          touched = true;
+        }
+      }
+    }
+    if (touched) { freed += 0; _persistGuild(gId); }
+  }
+  if (orphanImgs) removed.push(`${orphanImgs} orphaned profile image(s) — ${fmt(orphanBytes)}`);
+  freed += orphanBytes;
 
   const msg = removed.length
     ? `🧹 Pruned ${removed.length} leftover key(s), freed **${fmt(freed)}** from RAM and Mongo:\n` + removed.map(r => `• ${r}`).join('\n')
