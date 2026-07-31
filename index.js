@@ -109,50 +109,13 @@ async function loadData() {
       }
     }
     if (compressed) console.log(`   (${compressed} guild document(s) read compressed)`);
-    // Stitch externalised images back in from the separate collection, replacing the
-    // '__EXTERNAL__' markers with their real base64 bodies. ref is "img:uid:key" or "coin:uid".
-    if (mongoImages) {
-      const imgDocs = await mongoImages.find({}).toArray();
-      let restored = 0;
-      for (const im of imgDocs) {
-        const g = db[im.guildId];
-        if (!g) continue;
-        const ref = im.ref || '';
-        if (ref.startsWith('img:')) {
-          const [, uid, key] = ref.split(':');
-          if (!g.__profiles) continue;
-          g.__profiles.images ||= {};
-          g.__profiles.images[uid] ||= {};
-          g.__profiles.images[uid][key] = im.body;
-          restored++;
-        } else if (ref.startsWith('coin:')) {
-          const [, uid] = ref.split(':');
-          if (!g.__coinskins?.custom?.[uid]) continue;
-          g.__coinskins.custom[uid].data = im.body;
-          restored++;
-        }
-        // Remember what's already stored so the next save doesn't needlessly
-        // re-upload an image that hasn't changed (the old egress leak).
-        _imgHashes.set(im._id, _fingerprint(im.body));
-      }
-      // One-time migration: any guild still holding inline base64 (profile images OR coin
-      // skins) gets those moved into the images collection on next save.
-      let migrated = 0;
-      for (const guildId of Object.keys(db)) {
-        const gd = db[guildId];
-        const imgs = gd?.__profiles?.images;
-        if (imgs) for (const uid of Object.keys(imgs)) for (const key of Object.keys(imgs[uid] || {}))
-          if (typeof imgs[uid][key] === 'string' && imgs[uid][key].startsWith('data:')) migrated++;
-        const coins = gd?.__coinskins?.custom;
-        if (coins) for (const uid of Object.keys(coins))
-          if (coins[uid] && typeof coins[uid].data === 'string' && coins[uid].data.startsWith('data:')) migrated++;
-      }
-      // schedule a split-save for every guild so any inline bodies get externalised
-      for (const guildId of Object.keys(db)) saveData(guildId);
-      console.log(`✅ Loaded ${docs.length} guild(s); restored ${restored} image(s)${migrated ? `, migrating ${migrated} legacy image(s)` : ''}`);
-    } else {
-      console.log(`✅ Loaded data for ${docs.length} guild(s) from MongoDB`);
-    }
+    // ── images load in the BACKGROUND ────────────────────────────────────
+    // Previously every image was pulled with .toArray(), which buffers the whole
+    // set (tens of MB) before the bot could come online — that was the long delay
+    // after a redeploy. We now return as soon as the guild data is in, and stream
+    // the image bodies in behind it, so the bot is usable within seconds.
+    console.log(`✅ Loaded ${docs.length} guild(s) — bot starting; images loading in background`);
+    if (mongoImages) _loadImagesInBackground();
   } catch (e) {
     console.error('⚠️  Could not load from MongoDB:', e.message);
   }
@@ -183,6 +146,72 @@ function _persistGuild(guildId) {
   _persistChain.set(guildId, next);
   next.finally(() => { if (_persistChain.get(guildId) === next) _persistChain.delete(guildId); });
   return next;
+}
+
+// Streams image bodies in one at a time (a cursor, not .toArray()) so nothing is
+// buffered and the event loop stays free. Cards render without their images for the
+// first few seconds after a restart, then fill in as each arrives.
+let _imagesReady = false;
+let _imagesLoading = null;
+async function _loadImagesInBackground() {
+  if (_imagesLoading) return _imagesLoading;
+  _imagesLoading = (async () => {
+    const t0 = Date.now();
+    let restored = 0, bytes = 0;
+    try {
+      // Work out exactly which image documents this data actually references, and ask
+      // only for those. The collection can accumulate orphans (deleted users, old
+      // uploads, images from guilds the bot has left) and downloading those was pure
+      // waste on every boot.
+      const needed = [];
+      for (const guildId of Object.keys(db)) {
+        const g = db[guildId];
+        const imgs = g?.__profiles?.images;
+        if (imgs) for (const uid of Object.keys(imgs))
+          for (const key of Object.keys(imgs[uid] || {})) needed.push(`${guildId}:img:${uid}:${key}`);
+        const coins = g?.__coinskins?.custom;
+        if (coins) for (const uid of Object.keys(coins)) needed.push(`${guildId}:coin:${uid}`);
+      }
+      if (!needed.length) { _imagesReady = true; return console.log('🖼️  no images to load'); }
+
+      const total = await mongoImages.countDocuments().catch(() => null);
+      if (total != null && total > needed.length)
+        console.log(`🖼️  fetching ${needed.length} referenced image(s) — skipping ${total - needed.length} orphan(s) in the collection`);
+
+      const cursor = mongoImages.find({ _id: { $in: needed } });
+      for await (const im of cursor) {
+        const g = db[im.guildId];
+        if (g) {
+          const ref = im.ref || '';
+          if (ref.startsWith('img:')) {
+            const [, uid, key] = ref.split(':');
+            if (g.__profiles) {
+              g.__profiles.images ||= {};
+              g.__profiles.images[uid] ||= {};
+              g.__profiles.images[uid][key] = im.body;
+              restored++; bytes += (im.body || '').length;
+            }
+          } else if (ref.startsWith('coin:')) {
+            const [, uid] = ref.split(':');
+            if (g.__coinskins?.custom?.[uid]) {
+              g.__coinskins.custom[uid].data = im.body;
+              restored++; bytes += (im.body || '').length;
+            }
+          }
+        }
+        // seed the fingerprint so the first save after boot doesn't re-upload anything
+        _imgHashes.set(im._id, _fingerprint(im.body));
+        await new Promise(r => setImmediate(r));   // never hold the event loop
+      }
+      _imagesReady = true;
+      console.log(`🖼️  ${restored} image(s) loaded in background (${(bytes/1048576).toFixed(1)}MB, ${((Date.now()-t0)/1000).toFixed(1)}s)`);
+      // now that hashes are seeded, a save can safely externalise any legacy inline data
+      for (const guildId of Object.keys(db)) saveData(guildId);
+    } catch (e) {
+      console.error('⚠️  background image load failed:', e.message);
+    }
+  })();
+  return _imagesLoading;
 }
 
 async function _persistGuildInner(guildId) {
