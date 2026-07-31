@@ -154,7 +154,19 @@ function saveData(guildIdHint) {
 // document and written to a separate `images` collection (one doc per image), so the
 // guild doc stays tiny and never hits MongoDB's 16MB per-document limit. In memory the
 // images stay exactly where the rest of the code expects them.
-async function _persistGuild(guildId) {
+// Serialise saves per guild. Without this, a slow write (a big image upload can take
+// seconds) lets the next debounced save start while the first is still in flight, so the
+// same data goes out twice. Chaining them guarantees one save at a time per guild.
+const _persistChain = new Map();
+function _persistGuild(guildId) {
+  const prev = _persistChain.get(guildId) || Promise.resolve();
+  const next = prev.catch(() => {}).then(() => _persistGuildInner(guildId));
+  _persistChain.set(guildId, next);
+  next.finally(() => { if (_persistChain.get(guildId) === next) _persistChain.delete(guildId); });
+  return next;
+}
+
+async function _persistGuildInner(guildId) {
   if (!mongoCollection) return;
   const gd = db[guildId] || {};
   // Build a SHALLOW-CLONED copy with image bodies stripped out, WITHOUT ever mutating
@@ -192,14 +204,22 @@ async function _persistGuild(guildId) {
         if (_imgHashes.get(key) !== h) changed.push({ key, id, body, h }); else _egress.skipped++;
       }
       if (changed.length) {
+        // Claim each fingerprint BEFORE the write starts. A large image (an 8MB GIF is
+        // ~11MB as base64) can take seconds to reach Atlas, and any save that fires in
+        // that window would otherwise see the hash still unset and upload the very same
+        // image again. Recording it upfront makes the write idempotent; we roll the
+        // fingerprint back only if the write actually fails.
+        for (const c of changed) _imgHashes.set(c.key, c.h);
         await Promise.all(changed.map(({ key, id, body, h }) =>
           mongoImages.replaceOne(
             { _id: key },
             { _id: key, guildId, ref: id, body },
             { upsert: true }
-          ).then(() => { _imgHashes.set(key, h); })
-           .then(() => { _egress.imgBytes += body.length; _egress.imgWrites++; })
-           .catch(e => console.error(`⚠️  image save failed (${id}):`, e.message))
+          ).then(() => { _egress.imgBytes += body.length; _egress.imgWrites++; })
+           .catch(e => {
+             _imgHashes.delete(key);   // failed — allow a retry on the next save
+             console.error(`⚠️  image save failed (${id}):`, e.message);
+           })
         ));
         console.log(`[db] wrote ${changed.length}/${images.length} image(s) for ${guildId} (rest unchanged)`);
       }
