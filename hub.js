@@ -1094,7 +1094,7 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
   function navRow(idx, n, targetId, viewerId, disabledHeart) {
     return new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId(`hub:showcase:${idx-1}`).setLabel('◀ Prev').setStyle(ButtonStyle.Secondary).setDisabled(n<=1),
-      new ButtonBuilder().setCustomId(`prof:heart:${targetId}:${idx}`).setLabel('Heart').setEmoji('❤️').setStyle(ButtonStyle.Danger).setDisabled(disabledHeart || targetId===viewerId),
+      new ButtonBuilder().setCustomId(`prof:heart:${targetId}:${idx}`).setLabel('Heart').setEmoji('❤️').setStyle(ButtonStyle.Secondary).setDisabled(disabledHeart || targetId===viewerId),
       new ButtonBuilder().setCustomId(`hub:showcase:${idx+1}`).setLabel('Next ▶').setStyle(ButtonStyle.Secondary).setDisabled(n<=1));
   }
 
@@ -1431,7 +1431,7 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
           // note, so it's safe to show even on your own /profile.
           const row = new ActionRowBuilder().addComponents(
             new ButtonBuilder().setCustomId('prof:editmine').setLabel('Edit your Profile').setEmoji('🎨').setStyle(ButtonStyle.Success),
-            new ButtonBuilder().setCustomId(`prof:heartp:${target.id}`).setLabel('Heart').setEmoji('❤️').setStyle(ButtonStyle.Danger).setDisabled(target.bot));
+            new ButtonBuilder().setCustomId(`prof:heartp:${target.id}`).setLabel('Heart').setEmoji('❤️').setStyle(ButtonStyle.Secondary).setDisabled(target.bot));
           return interaction.editReply({ embeds: [embed], files: [card], components: [row] });
         } catch (e) {
           console.error('[profile] command failed:', e.message);
@@ -2057,7 +2057,11 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
         if (v === '__avatar') el = profileApi.addElement(gid, uid, 'avatar', {});
         else if (v === '__name') el = profileApi.addElement(gid, uid, 'name', { color: '#ffffff', size: 40 });
         else if (v === '__clan') el = profileApi.addElement(gid, uid, 'clan', { color: '#a5b4fc', size: 18 });
-        else el = profileApi.addElement(gid, uid, 'stat', { stat: v });
+        else {
+          el = profileApi.addElement(gid, uid, 'stat', { stat: v });
+          // list-style stats need room for several lines
+          if (v === 'cities') profileApi.updateElement(gid, uid, el.id, { w: 300, h: 116 });
+        }
         profileSel.set(uid, el.id);
         const label = v === '__avatar' ? 'Avatar' : v === '__name' ? 'Name' : v === '__clan' ? 'Clan' : 'Stat';
         await interaction.update({ content: `✅ ${label} added — go back to the editor to position it.`, components: [] });

@@ -233,15 +233,57 @@ const fontByKey = (k) => FONTS.find(f => f.key === k) || FONTS[0];
 const STAT_DEFS = {
   dinar:     { label: 'DINAR',       accent: '#fbbf24', get: (s) => fmt(s.dinar) },
   rank:      { label: 'WEALTH RANK', accent: '#f9fafb', get: (s) => s.wealthRank ? `#${s.wealthRank}` : 'Unranked' },
+  activity:  { label: 'ACTIVITY RANK', accent: '#fb923c', get: (s) => s.activityRank ? `#${s.activityRank}` : 'Unranked' },
   flips:     { label: 'COIN FLIPS',  accent: '#34d399', get: (s) => `${(s.flip||{}).wins||0}W / ${(s.flip||{}).losses||0}L` },
   winrate:   { label: 'WIN RATE',    accent: '#38bdf8', get: (s) => `${((s.flip||{}).winPct||0).toFixed(0)}%` },
   net:       { label: 'NET FLIP',    accent: '#34d399', get: (s) => { const n=(s.flip||{}).net||0; return `${n>=0?'+':''}${fmt(n)}`; } },
   streak:    { label: 'STREAK',      accent: '#f472b6', get: (s) => { const k=(s.flip||{}).streak||0; return k>0?`${k}W`:k<0?`${Math.abs(k)}L`:'—'; } },
   cards:     { label: 'CARDS',       accent: '#c4b5fd', get: (s) => `${(s.collection||{}).count||0}` },
-  coin:      { label: 'COIN DESIGN', accent: '#fcd34d', get: (s) => truncate(s.coin || 'Default', 12) },
-  clan:      { label: 'CLAN',        accent: '#a5b4fc', get: (s) => s.clan ? truncate(s.clan.name, 12) : 'None' },
+  coin:      { label: 'COIN DESIGN', accent: '#fcd34d', get: (s) => s.coin || 'Default' },
+  clan:      { label: 'CLAN',        accent: '#a5b4fc', get: (s) => s.clan ? s.clan.name : 'None' },
+  joined:    { label: 'JOINED',      accent: '#67e8f9', get: (s) => s.joined || '—' },
+  cities:    { label: 'CITIES HELD', accent: '#f87171', multiline: true,
+               get: (s) => (s.cities && s.cities.length) ? s.cities.join(', ') : 'None' },
 };
 const STAT_KEYS = Object.keys(STAT_DEFS);
+
+// ── text fitting ──────────────────────────────────────────────────────────
+// resvg gives us no way to measure text before drawing, so we approximate.
+// DejaVu Sans Bold averages ~0.60x the font size per character; digits and caps
+// run a little wider, so 0.62 keeps us on the safe side of the box.
+const CHAR_W = 0.62;
+const textWidth = (s, size) => String(s).length * size * CHAR_W;
+function fitFont(text, maxW, preferred, min) {
+  if (textWidth(text, preferred) <= maxW) return preferred;
+  return Math.max(min, Math.floor(maxW / (Math.max(1, String(text).length) * CHAR_W)));
+}
+// Greedy word wrap. Falls back to hard-splitting a single over-long word, and
+// marks the final line with an ellipsis if we run out of room.
+function wrapToWidth(text, maxW, size, maxLines) {
+  const words = String(text).split(/[\s,]+/).filter(Boolean);
+  const lines = [];
+  let cur = '';
+  for (const w of words) {
+    const test = cur ? `${cur}, ${w}` : w;
+    if (textWidth(test, size) <= maxW) { cur = test; continue; }
+    if (cur) lines.push(cur);
+    cur = w;
+    while (textWidth(cur, size) > maxW && cur.length > 1) {
+      const keep = Math.max(1, Math.floor(maxW / (size * CHAR_W)) - 1);
+      lines.push(cur.slice(0, keep));
+      cur = cur.slice(keep);
+    }
+    if (lines.length >= maxLines) break;
+  }
+  if (cur && lines.length < maxLines) lines.push(cur);
+  if (lines.length > maxLines) lines.length = maxLines;
+  const consumed = lines.join(', ').length;
+  if (consumed < String(text).length && lines.length) {
+    const last = lines[lines.length - 1];
+    lines[lines.length - 1] = last.replace(/[,\s]+$/, '') + '…';
+  }
+  return lines;
+}
 
 let __eid = 0;
 const newElementId = () => `e${Date.now().toString(36)}${(__eid++).toString(36)}`;
@@ -368,9 +410,39 @@ function resetLayout(db, gid, uid, saveData) {
 // STATS GATHERING — pulls live data from the other systems for the card.
 // gachaApi (hubApi) gives flip stats via flipBoard, Dinar via balance, collection.
 // ───────────────────────────────────────────────────────────────────────────
-function gatherStats(ctx, gid, uid) {
+function gatherStats(ctx, gid, uid, member) {
   const { db, gachaApi, getDinar } = ctx;
-  const out = { dinar: 0, wealthRank: null, flip: null, collection: null, clan: null, coin: null, potd: 0 };
+  const out = { dinar: 0, wealthRank: null, activityRank: null, flip: null, collection: null,
+                clan: null, coin: null, potd: 0, cities: [], joined: null };
+
+  // ── activity rank: position on the LP (levels/activity) board ──
+  try {
+    const lp = (db[gid] && db[gid].__lp) || {};
+    const board = Object.entries(lp)
+      .map(([id, v]) => ({ id, total: (v && v.total) || 0 }))
+      .filter(e => e.total > 0)
+      .sort((a, b) => b.total - a.total);
+    const i = board.findIndex(e => e.id === uid);
+    if (i !== -1) out.activityRank = i + 1;
+  } catch { /* */ }
+
+  // ── cities conquered in Diyar ──
+  try {
+    const d = db[gid] && db[gid].__diyar;
+    if (d && d.cities) {
+      out.cities = Object.values(d.cities)
+        .filter(c => c && c.ownerId === uid)
+        .map(c => c.name)
+        .sort();
+    }
+  } catch { /* */ }
+
+  // ── server join date ──
+  try {
+    const at = member && member.joinedAt ? new Date(member.joinedAt) : null;
+    if (at && !isNaN(at)) out.joined = at.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+  } catch { /* */ }
+
 
   try { out.dinar = getDinar ? getDinar(db, gid, uid) : (gachaApi ? gachaApi.balance(gid, uid) : 0); } catch { /* */ }
 
@@ -670,10 +742,27 @@ function elementSvg(el, ctx2) {
     inner = `<text x="${el.x}" y="${el.y + size}" font-family="'${font}'" font-size="${size}" fill="${color}"${weight}>${esc(truncate(d.text || 'Text', 40))}</text>`;
   } else if (el.type === 'stat') {
     const def = STAT_DEFS[el.data?.stat] || STAT_DEFS.dinar;
+    const pad = 14, innerW = Math.max(20, el.w - pad * 2);
+    const raw = String(def.get(stats) ?? '');
+    // Label shrinks if the box is narrow so it never spills either.
+    const labSize = fitFont(def.label, innerW, 13, 8);
+    let body;
+    if (def.multiline) {
+      // Lists (e.g. captured cities) wrap onto as many lines as the box allows.
+      const maxLines = Math.max(1, Math.floor((el.h - 30) / 18));
+      const lines = wrapToWidth(raw, innerW, 15, maxLines);
+      body = lines.map((ln, i) =>
+        `<text x="${el.x+pad}" y="${el.y+46+i*18}" font-family="'DejaVu Sans'" font-size="15" font-weight="700" fill="${def.accent}">${esc(ln)}</text>`
+      ).join('');
+    } else {
+      // Single values scale down until they fit rather than being cut off.
+      const size = fitFont(raw, innerW, 24, 11);
+      body = `<text x="${el.x+pad}" y="${el.y+Math.min(el.h-12, 54)}" font-family="'DejaVu Sans'" font-size="${size}" font-weight="700" fill="${def.accent}">${esc(raw)}</text>`;
+    }
     inner = `<g>
       <rect x="${el.x}" y="${el.y}" width="${el.w}" height="${el.h}" rx="10" fill="#000000" fill-opacity="0.55"/>
-      <text x="${el.x+14}" y="${el.y+26}" font-family="'DejaVu Sans'" font-size="13" fill="#cbd5e1" letter-spacing="1">${esc(def.label)}</text>
-      <text x="${el.x+14}" y="${el.y+54}" font-family="'DejaVu Sans'" font-size="24" font-weight="700" fill="${def.accent}">${esc(def.get(stats))}</text>
+      <text x="${el.x+pad}" y="${el.y+26}" font-family="'DejaVu Sans'" font-size="${labSize}" fill="#cbd5e1" letter-spacing="1">${esc(def.label)}</text>
+      ${body}
     </g>`;
   } else if (el.type === 'avatar') {
     // circular avatar (or monogram fallback)
@@ -954,7 +1043,7 @@ function buildGifCache(layout, images) {
 async function renderCard(ctx, gid, member, opts = {}) {
   const { db } = ctx;
   const uid = (member.user || member).id;
-  const stats = gatherStats(ctx, gid, uid);
+  const stats = gatherStats(ctx, gid, uid, member);
   const equip = getEquipped(db, gid, uid);
   const hearts = heartsFor(db, gid, uid);
   const layout = getLayout(db, gid, uid);
@@ -1090,7 +1179,7 @@ function initProfiles({ db, saveData, gachaApi, getDinar, spendDinar }) {
     setPublished:(gid, uid, on) => { pState(db, gid).published[uid] = !!on; saveData(gid); },
     publishedList:(gid) => Object.keys(pState(db, gid).published).filter(u => pState(db, gid).published[u]),
 
-    gatherStats: (gid, uid) => gatherStats(ctx, gid, uid),
+    gatherStats: (gid, uid, member) => gatherStats(ctx, gid, uid, member),
     renderCard:  (gid, member, opts) => renderCard(ctx, gid, member, opts),
 
     // ── layout / editor API ──
