@@ -797,6 +797,39 @@ function svgToPng(svg, width) {
 }
 const PREVIEW_W = 520;   // editor preview width (vs 900 for a real card)
 
+// ── GIF optimiser ─────────────────────────────────────────────────────────
+// gifsicle rewrites a finished GIF to store only the changed region of each
+// frame, typically cutting a card by 50-70% with pixel-identical output. It
+// runs as a separate process, so unlike the frame rendering it does NOT block
+// Node's event loop. If the binary is missing or fails for any reason we simply
+// return the original GIF — cards must never break over an optimisation.
+let GIFSICLE = null;
+try { GIFSICLE = require('gifsicle'); } catch { GIFSICLE = null; }
+if (GIFSICLE && typeof GIFSICLE === 'object') GIFSICLE = GIFSICLE.default || null;
+if (GIFSICLE) { try { fs.accessSync(GIFSICLE, fs.constants.X_OK); } catch {
+  try { fs.chmodSync(GIFSICLE, 0o755); } catch { GIFSICLE = null; } } }
+if (!GIFSICLE) console.warn('[profile] gifsicle not available — animated cards will be sent unoptimised.');
+
+function optimiseGif(buf) {
+  return new Promise((resolve) => {
+    if (!GIFSICLE || !buf || !buf.length) return resolve(buf);
+    let done = false;
+    const finish = (out) => { if (!done) { done = true; resolve(out); } };
+    try {
+      const { execFile } = require('child_process');
+      const child = execFile(GIFSICLE, ['-O3', '--no-warnings'],
+        { encoding: 'buffer', maxBuffer: 96 * 1024 * 1024, timeout: 20000 },
+        (err, stdout) => {
+          if (err || !stdout || !stdout.length) return finish(buf);
+          finish(stdout.length < buf.length ? stdout : buf);   // never send a bigger file
+        });
+      child.on('error', () => finish(buf));
+      child.stdin.on('error', () => finish(buf));
+      child.stdin.end(buf);
+    } catch { finish(buf); }
+  });
+}
+
 // Cache of finished renders, keyed by everything that can change the picture.
 const _renderCache = new Map();
 function _renderSig(uid, layout, equip, hearts, images, av, opts, outW) {
@@ -979,7 +1012,9 @@ async function renderCard(ctx, gid, member, opts = {}) {
   const enc = GIFEncoder();
   // Fewer frames = dramatically smaller GIFs. 14 still reads as smooth motion
   // but roughly halves the bytes of the old 20-30 frame cards.
-  const FRAMES_N = Math.min(16, Math.max(12, gifFrames));
+  // gifsicle roughly halves the finished file, which buys back the smoothness we
+  // previously had to trade away for bandwidth.
+  const FRAMES_N = Math.min(22, Math.max(16, gifFrames));
   const DELAY = 80;
 
   // Render every frame's RGBA first, then build ONE shared palette from a sample of all
@@ -993,6 +1028,11 @@ async function renderCard(ctx, gid, member, opts = {}) {
     const { data, width, height } = pngToRGBA(png);
     W = width; H = height;
     rgbaFrames.push(data);
+    // Each frame is synchronous CPU work. Without yielding, a 20-frame card blocks
+    // the event loop for seconds and other people's button presses expire with
+    // "Unknown interaction". Handing control back between frames keeps the bot
+    // responsive throughout the render.
+    if (f % 3 === 2) await new Promise(r => setImmediate(r));
   }
   // Build a representative sample by combining pixels across frames (subsampled for speed),
   // so the shared palette covers colours that appear in any frame.
@@ -1014,7 +1054,9 @@ async function renderCard(ctx, gid, member, opts = {}) {
     enc.writeFrame(index, W, H, { palette, delay: DELAY, first: f === 0 });
   }
   enc.finish();
-  return finish({ attachment: Buffer.from(enc.bytes()), name: `profile-${uid}.gif`, animated: true });
+  const raw = Buffer.from(enc.bytes());
+  const out = await optimiseGif(raw);
+  return finish({ attachment: out, name: `profile-${uid}.gif`, animated: true });
 }
 
 // decode a PNG buffer to raw RGBA for gifenc
