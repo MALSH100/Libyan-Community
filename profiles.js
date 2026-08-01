@@ -746,22 +746,43 @@ function elementSvg(el, ctx2) {
     const raw = String(def.get(stats) ?? '');
     // Label shrinks if the box is narrow so it never spills either.
     const labSize = fitFont(def.label, innerW, 13, 8);
+    const labBase = el.y + 10 + labSize;              // label baseline
+    const valTop  = labBase + 6;                      // value area starts under the label
+    const availH  = Math.max(12, el.y + el.h - valTop - 8);
+    // A dark outline behind the glyphs lifts the value off the panel so it reads
+    // clearly against any background image. paint-order keeps the stroke behind
+    // the fill so the letterforms stay crisp rather than looking bloated.
+    const pop = `stroke="#000000" stroke-opacity="0.55" stroke-width="0.5" paint-order="stroke fill"`;
     let body;
     if (def.multiline) {
       // Lists (e.g. captured cities) wrap onto as many lines as the box allows.
-      const maxLines = Math.max(1, Math.floor((el.h - 30) / 18));
-      const lines = wrapToWidth(raw, innerW, 15, maxLines);
+      // Grow the type until either the line count or the box height runs out.
+      let lnSize = 22, lines = null;
+      for (; lnSize >= 11; lnSize--) {
+        const lh = lnSize * 1.24;
+        const maxLines = Math.max(1, Math.floor(availH / lh));
+        const cand = wrapToWidth(raw, innerW, lnSize, maxLines);
+        if (cand.length && cand.length * lh <= availH && !cand[cand.length - 1].endsWith('…')) { lines = cand; break; }
+        if (!lines && lnSize === 11) lines = cand;
+      }
+      lines = lines || [raw];
+      const lh = lnSize * 1.24;
+      const startY = valTop + Math.max(0, (availH - lines.length * lh) / 2) + lnSize;
       body = lines.map((ln, i) =>
-        `<text x="${el.x+pad}" y="${el.y+46+i*18}" font-family="'DejaVu Sans'" font-size="15" font-weight="700" fill="${def.accent}">${esc(ln)}</text>`
+        `<text x="${el.x+pad}" y="${(startY + i*lh).toFixed(1)}" font-family="'DejaVu Sans'" font-size="${lnSize}" font-weight="700" fill="${def.accent}" ${pop}>${esc(ln)}</text>`
       ).join('');
     } else {
-      // Single values scale down until they fit rather than being cut off.
-      const size = fitFont(raw, innerW, 24, 11);
-      body = `<text x="${el.x+pad}" y="${el.y+Math.min(el.h-12, 54)}" font-family="'DejaVu Sans'" font-size="${size}" font-weight="700" fill="${def.accent}">${esc(raw)}</text>`;
+      // Single values grow to fill the panel, limited by width AND height so a big
+      // box gets big type instead of leaving the gray space half empty.
+      const byW = fitFont(raw, innerW, 38, 11);
+      const byH = Math.floor(availH / 1.18);
+      const size = Math.max(11, Math.min(byW, byH, 38));
+      const base = valTop + Math.max(0, (availH - size * 1.18) / 2) + size;
+      body = `<text x="${el.x+pad}" y="${base.toFixed(1)}" font-family="'DejaVu Sans'" font-size="${size}" font-weight="700" fill="${def.accent}" ${pop}>${esc(raw)}</text>`;
     }
     inner = `<g>
       <rect x="${el.x}" y="${el.y}" width="${el.w}" height="${el.h}" rx="10" fill="#000000" fill-opacity="0.55"/>
-      <text x="${el.x+pad}" y="${el.y+26}" font-family="'DejaVu Sans'" font-size="${labSize}" fill="#cbd5e1" letter-spacing="1">${esc(def.label)}</text>
+      <text x="${el.x+pad}" y="${labBase}" font-family="'DejaVu Sans'" font-size="${labSize}" font-weight="700" fill="#e2e8f0" letter-spacing="1">${esc(def.label)}</text>
       ${body}
     </g>`;
   } else if (el.type === 'avatar') {
@@ -979,18 +1000,32 @@ function decodeGifFrames(dataUri) {
     const n = reader.numFrames();
     if (n <= 1) return null;  // single-frame gif → treat as static
     const frames = [];
-    // omggif frames can be partial (disposal); blit cumulatively onto a persistent canvas
+    // omggif frames are usually PARTIAL — a GIF stores only the pixels that changed
+    // since the previous frame, blitted onto a persistent canvas. So every frame must
+    // be decoded in order or the canvas is left half-composed (which showed up as
+    // overlapping, smeared, "fuzzy" animation). We decode all of them and only choose
+    // which ones to KEEP, rather than skipping the decode itself.
     const canvas = new Uint8Array(w * h * 4);
-    const MAX = 30;  // cap frames to keep render time sane
-    const step = Math.max(1, Math.floor(n / MAX));
-    for (let i = 0; i < n; i += step) {
-      reader.decodeAndBlitFrameRGBA(i, canvas);
-      const png = new PNG({ width: w, height: h });
-      png.data = Buffer.from(canvas);
-      const pngBuf = PNG.sync.write(png);
-      frames.push('data:image/png;base64,' + pngBuf.toString('base64'));
+    const MAX = 28;                                   // cap on frames we keep (matches the card's frame cap)
+    const step = n > MAX ? n / MAX : 1;               // fractional: spreads evenly, keeps the end
+    let nextKeep = 0;
+    let lastDelay = 8;
+    const delays = [];
+    for (let i = 0; i < n; i++) {
+      reader.decodeAndBlitFrameRGBA(i, canvas);       // ALWAYS decode, never skip
+      // Keep this frame if it's on the sampling schedule, or if it's the very last one —
+      // otherwise the animation visibly stops short of its true end.
+      if (i + 1e-9 >= nextKeep || i === n - 1) {
+        const png = new PNG({ width: w, height: h });
+        png.data = Buffer.from(canvas);
+        frames.push('data:image/png;base64,' + PNG.sync.write(png).toString('base64'));
+        try { lastDelay = reader.frameInfo(i).delay || lastDelay; } catch { /* */ }
+        // when we drop frames, the kept ones must hold longer so timing is preserved
+        delays.push(Math.max(2, Math.round(lastDelay * step)));
+        nextKeep += step;
+      }
     }
-    return frames.length > 1 ? frames : null;
+    return frames.length > 1 ? { frames, delays } : null;
   } catch (e) {
     console.error('[profile] gif decode failed:', e.message);
     return null;
@@ -1027,14 +1062,24 @@ function buildGifCache(layout, images) {
   const keys = new Set();
   if (layout.bannerKey) keys.add(layout.bannerKey);
   for (const el of (layout.elements || [])) if (el.data?.imageKey) keys.add(el.data.imageKey);
+  let srcDelay = 0;
   for (const key of keys) {
     const uri = images[key];
     if (isGifUri(uri)) {
-      const frames = decodeGifFramesCached(uri);
-      if (frames && frames.length > 1) { cache[key] = frames; maxFrames = Math.max(maxFrames, frames.length); }
+      const got = decodeGifFramesCached(uri);
+      const frames = got && (got.frames || got);        // tolerate the older array shape
+      if (frames && frames.length > 1) {
+        cache[key] = frames;
+        maxFrames = Math.max(maxFrames, frames.length);
+        // keep the source GIF's own pace so it doesn't play too fast or too slow
+        if (got && got.delays && got.delays.length) {
+          const avg = got.delays.reduce((a, b) => a + b, 0) / got.delays.length;
+          srcDelay = Math.max(srcDelay, avg);
+        }
+      }
     }
   }
-  return { cache, maxFrames };
+  return { cache, maxFrames, srcDelay };
 }
 
 // Render the card as a PNG buffer, or an animated GIF if any equipped cosmetic OR any
@@ -1048,11 +1093,23 @@ async function renderCard(ctx, gid, member, opts = {}) {
   const hearts = heartsFor(db, gid, uid);
   const layout = getLayout(db, gid, uid);
   const images = userImages(db, gid, uid);
+  // Right after a restart an image body may still be the '__EXTERNAL__' placeholder
+  // because the background load hasn't reached it yet. Pull just the ones this card
+  // needs so a profile viewed seconds after a redeploy still renders properly.
+  if (ctx.ensureImages) {
+    const pending = [];
+    const wantKey = (k) => { if (k && images[k] === '__EXTERNAL__') pending.push(`img:${uid}:${k}`); };
+    for (const el of (layout.elements || [])) wantKey(el.data?.imageKey);
+    wantKey(layout.bannerKey);
+    if (pending.length) {
+      try { await ctx.ensureImages(gid, [...new Set(pending)]); } catch { /* render without it */ }
+    }
+  }
   const av = await avatarDataUri(member);
 
   // decode any GIF stickers/banner into frames (skipped for static editor previews)
   const wantAnim = !opts.forceStatic && !opts.selectedId;
-  const { cache: gifCache, maxFrames: gifFrames } = wantAnim ? buildGifCache(layout, images) : { cache: {}, maxFrames: 1 };
+  const { cache: gifCache, maxFrames: gifFrames, srcDelay } = wantAnim ? buildGifCache(layout, images) : { cache: {}, maxFrames: 1, srcDelay: 0 };
   const hasGif = Object.keys(gifCache).length > 0;
 
   // For a given animation frame f, produce the images map where each GIF key resolves to
@@ -1103,8 +1160,13 @@ async function renderCard(ctx, gid, member, opts = {}) {
   // but roughly halves the bytes of the old 20-30 frame cards.
   // gifsicle roughly halves the finished file, which buys back the smoothness we
   // previously had to trade away for bandwidth.
-  const FRAMES_N = Math.min(22, Math.max(16, gifFrames));
-  const DELAY = 80;
+  // Enough frames that an uploaded GIF plays through to its end (the old 22 cap cut
+  // animations short), but capped so a single card can't tie up the CPU for 12s.
+  // 28 lands at roughly 8s worst case, and gifsicle keeps the file size down.
+  const FRAMES_N = Math.min(28, Math.max(16, gifFrames));
+  // Match the uploaded GIF's own timing where we know it (omggif delays are in
+  // hundredths of a second); otherwise fall back to a smooth default.
+  const DELAY = srcDelay ? Math.min(200, Math.max(40, Math.round(srcDelay * 10))) : 80;
 
   // Render every frame's RGBA first, then build ONE shared palette from a sample of all
   // frames and apply it to each. Re-quantizing per frame (the old approach) gives each
@@ -1160,8 +1222,8 @@ function pngToRGBA(pngBuf) {
 // ───────────────────────────────────────────────────────────────────────────
 // EXPORTS — a factory the hub consumes
 // ───────────────────────────────────────────────────────────────────────────
-function initProfiles({ db, saveData, gachaApi, getDinar, spendDinar }) {
-  const ctx = { db, saveData, gachaApi, getDinar, spendDinar };
+function initProfiles({ db, saveData, gachaApi, getDinar, spendDinar, ensureImages }) {
+  const ctx = { db, saveData, gachaApi, getDinar, spendDinar, ensureImages };
 
   return {
     CATALOGUE, SLOT_LABEL, catalogueItem,

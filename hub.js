@@ -970,7 +970,7 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
       new ButtonBuilder().setCustomId('prof:mv:down').setLabel('▼').setStyle(ButtonStyle.Secondary).setDisabled(noSel),
       new ButtonBuilder().setCustomId('prof:mv:left').setLabel('◀').setStyle(ButtonStyle.Secondary).setDisabled(noSel),
       new ButtonBuilder().setCustomId('prof:mv:right').setLabel('▶').setStyle(ButtonStyle.Secondary).setDisabled(noSel),
-      new ButtonBuilder().setCustomId('prof:step').setLabel(`Movement Speed: ${(moveStep.get(uid)||20)}x`).setStyle(ButtonStyle.Primary)));
+      new ButtonBuilder().setCustomId('prof:step').setLabel(`Movement Speed: ${(moveStep.get(uid)||80)}x`).setStyle(ButtonStyle.Primary)));
     // row 3: size / rotate / layer / delete
     rows.push(new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId('prof:sz:down').setLabel('➖').setStyle(ButtonStyle.Secondary).setDisabled(noSel),
@@ -1938,9 +1938,9 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
         return interaction.editReply(await profileEditorView(gid, member));
       }
       if (interaction.isButton() && interaction.customId === 'prof:step') {
-        const cur = moveStep.get(uid) || 20;
-        // cycle 1x → 5x → 20x → 50x → 80x → 1x  (value = pixels moved per nudge)
-        const next = cur === 1 ? 5 : cur === 5 ? 20 : cur === 20 ? 50 : cur === 50 ? 80 : 1;
+        const cur = moveStep.get(uid) || 80;
+        // cycle 1x → 5x → 20x → 50x → 80x → 120x → 1x  (value = pixels moved per nudge)
+        const next = cur === 1 ? 5 : cur === 5 ? 20 : cur === 20 ? 50 : cur === 50 ? 80 : cur === 80 ? 120 : 1;
         moveStep.set(uid, next);
         await interaction.deferUpdate();
         const member = interaction.member || await interaction.guild.members.fetch(uid);
@@ -1952,7 +1952,7 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
         if (selId) {
           const el = profileApi.getElement(gid, uid, selId);
           if (el) {
-            const step = moveStep.get(uid) || 20;
+            const step = moveStep.get(uid) || 80;
             const patch = {};
             if (dir === 'up') patch.y = el.y - step;
             if (dir === 'down') patch.y = el.y + step;

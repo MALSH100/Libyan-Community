@@ -153,65 +153,166 @@ function _persistGuild(guildId) {
 // first few seconds after a restart, then fill in as each arrives.
 let _imagesReady = false;
 let _imagesLoading = null;
+// ── local image cache ──────────────────────────────────────────────────────
+// Pulling every image body from Atlas on each boot is the slow part of a restart
+// (the free shared tier moves a few hundred KB/s, so ~47MB takes minutes). Local
+// disk reads the same data in well under a second. If a Railway Volume is mounted
+// the cache survives redeploys entirely; without one it still helps across plain
+// restarts of the same container. It's only ever a cache — anything missing or
+// stale is fetched from Mongo, so deleting it is always safe.
+const _os = require('os');
+const IMG_CACHE_DIR = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || _os.tmpdir(), 'img-cache');
+const IMG_CACHE_PERSISTENT = !!process.env.RAILWAY_VOLUME_MOUNT_PATH;
+function _cacheFile(id) {
+  return path.join(IMG_CACHE_DIR, id.replace(/[^a-zA-Z0-9]/g, '_'));
+}
+function _cacheRead(id, wantHash) {
+  try {
+    const raw = fs.readFileSync(_cacheFile(id), 'utf8');
+    const nl = raw.indexOf('\n');
+    if (nl < 1) return null;
+    const h = raw.slice(0, nl);                  // first line is the fingerprint
+    if (wantHash && h !== wantHash) return null; // stale — Mongo has a newer copy
+    return { body: raw.slice(nl + 1), hash: h };
+  } catch { return null; }
+}
+function _cacheWrite(id, body, hash) {
+  try {
+    fs.mkdirSync(IMG_CACHE_DIR, { recursive: true });
+    const tmp = _cacheFile(id) + '.tmp';
+    fs.writeFileSync(tmp, hash + '\n' + body);
+    fs.renameSync(tmp, _cacheFile(id));          // atomic, so a crash can't leave a partial file
+  } catch (e) { /* cache is best-effort */ }
+}
+// Put an image body into the in-memory db at the place its ref points to.
+function _applyImage(ref, guildId, body) {
+  const g = db[guildId];
+  if (!g || !body) return false;
+  if (ref.startsWith('img:')) {
+    const [, uid, key] = ref.split(':');
+    if (!g.__profiles) return false;
+    g.__profiles.images ||= {};
+    g.__profiles.images[uid] ||= {};
+    g.__profiles.images[uid][key] = body;
+    return true;
+  }
+  if (ref.startsWith('coin:')) {
+    const [, uid] = ref.split(':');
+    if (!g.__coinskins?.custom?.[uid]) return false;
+    g.__coinskins.custom[uid].data = body;
+    return true;
+  }
+  return false;
+}
+
 async function _loadImagesInBackground() {
   if (_imagesLoading) return _imagesLoading;
   _imagesLoading = (async () => {
     const t0 = Date.now();
-    let restored = 0, bytes = 0;
+    let fromCache = 0, fromMongo = 0, bytes = 0;
     try {
-      // Work out exactly which image documents this data actually references, and ask
-      // only for those. The collection can accumulate orphans (deleted users, old
-      // uploads, images from guilds the bot has left) and downloading those was pure
-      // waste on every boot.
-      const needed = [];
+      // Which image documents does the loaded data actually reference? The collection
+      // accumulates orphans (deleted users, replaced uploads, guilds we've left) and
+      // downloading those was pure waste on every boot.
+      const needed = [];   // [{id, ref, guildId}]
       for (const guildId of Object.keys(db)) {
         const g = db[guildId];
         const imgs = g?.__profiles?.images;
         if (imgs) for (const uid of Object.keys(imgs))
-          for (const key of Object.keys(imgs[uid] || {})) needed.push(`${guildId}:img:${uid}:${key}`);
+          for (const key of Object.keys(imgs[uid] || {}))
+            needed.push({ id: `${guildId}:img:${uid}:${key}`, ref: `img:${uid}:${key}`, guildId });
         const coins = g?.__coinskins?.custom;
-        if (coins) for (const uid of Object.keys(coins)) needed.push(`${guildId}:coin:${uid}`);
+        if (coins) for (const uid of Object.keys(coins))
+          needed.push({ id: `${guildId}:coin:${uid}`, ref: `coin:${uid}`, guildId });
       }
       if (!needed.length) { _imagesReady = true; return console.log('🖼️  no images to load'); }
 
-      const total = await mongoImages.countDocuments().catch(() => null);
-      if (total != null && total > needed.length)
-        console.log(`🖼️  fetching ${needed.length} referenced image(s) — skipping ${total - needed.length} orphan(s) in the collection`);
+      // Step 1: ask Mongo only for fingerprints, not bodies. This is a few KB even for
+      // hundreds of images, so it costs almost nothing and tells us exactly which
+      // cached copies are still current.
+      const ids = needed.map(n => n.id);
+      let hashById = new Map();
+      try {
+        const metas = await mongoImages.find({ _id: { $in: ids } }, { projection: { h: 1 } }).toArray();
+        for (const m of metas) if (m.h) hashById.set(m._id, m.h);
+      } catch (e) { console.warn('[db] image fingerprint check failed, falling back to full fetch:', e.message); }
 
-      const cursor = mongoImages.find({ _id: { $in: needed } });
-      for await (const im of cursor) {
-        const g = db[im.guildId];
-        if (g) {
-          const ref = im.ref || '';
-          if (ref.startsWith('img:')) {
-            const [, uid, key] = ref.split(':');
-            if (g.__profiles) {
-              g.__profiles.images ||= {};
-              g.__profiles.images[uid] ||= {};
-              g.__profiles.images[uid][key] = im.body;
-              restored++; bytes += (im.body || '').length;
-            }
-          } else if (ref.startsWith('coin:')) {
-            const [, uid] = ref.split(':');
-            if (g.__coinskins?.custom?.[uid]) {
-              g.__coinskins.custom[uid].data = im.body;
-              restored++; bytes += (im.body || '').length;
-            }
-          }
-        }
-        // seed the fingerprint so the first save after boot doesn't re-upload anything
-        _imgHashes.set(im._id, _fingerprint(im.body));
-        await new Promise(r => setImmediate(r));   // never hold the event loop
+      // Step 2: serve everything we can from local disk.
+      const missing = [];
+      for (const n of needed) {
+        const wantHash = hashById.get(n.id);
+        const hit = wantHash ? _cacheRead(n.id, wantHash) : null;
+        if (hit && _applyImage(n.ref, n.guildId, hit.body)) {
+          _imgHashes.set(n.id, hit.hash);
+          fromCache++; bytes += hit.body.length;
+        } else missing.push(n);
       }
+      if (fromCache) console.log(`🖼️  ${fromCache} image(s) restored from local cache in ${Date.now() - t0}ms`);
+
+      // Step 3: fetch only what the cache couldn't supply, and cache it for next boot.
+      if (missing.length) {
+        const backfill = [];
+        const cursor = mongoImages.find({ _id: { $in: missing.map(m => m.id) } });
+        for await (const im of cursor) {
+          const ref = im.ref || '';
+          if (_applyImage(ref, im.guildId, im.body)) { fromMongo++; bytes += (im.body || '').length; }
+          const h = _fingerprint(im.body);
+          _imgHashes.set(im._id, h);        // so the first save after boot re-uploads nothing
+          _cacheWrite(im._id, im.body, h);
+          if (!im.h) backfill.push({ _id: im._id, h });   // older docs have no stored fingerprint
+          await new Promise(r => setImmediate(r));        // never hold the event loop
+        }
+        // Give older documents a stored fingerprint so future boots can use the cache.
+        if (backfill.length) {
+          try {
+            await mongoImages.bulkWrite(backfill.map(b =>
+              ({ updateOne: { filter: { _id: b._id }, update: { $set: { h: b.h } } } })), { ordered: false });
+            console.log(`[db] backfilled fingerprints for ${backfill.length} image(s) — next restart will use the cache`);
+          } catch (e) { console.warn('[db] fingerprint backfill failed:', e.message); }
+        }
+      }
+
       _imagesReady = true;
-      console.log(`🖼️  ${restored} image(s) loaded in background (${(bytes/1048576).toFixed(1)}MB, ${((Date.now()-t0)/1000).toFixed(1)}s)`);
-      // now that hashes are seeded, a save can safely externalise any legacy inline data
+      const secs = ((Date.now() - t0) / 1000).toFixed(1);
+      console.log(`🖼️  images ready — ${fromCache} cached + ${fromMongo} downloaded `
+        + `(${(bytes / 1048576).toFixed(1)}MB, ${secs}s)${IMG_CACHE_PERSISTENT ? '' : ' [cache is not on a volume — see /imgcache]'}`);
+      // hashes are seeded now, so a save can safely externalise any legacy inline data
       for (const guildId of Object.keys(db)) saveData(guildId);
     } catch (e) {
       console.error('⚠️  background image load failed:', e.message);
+      _imagesReady = true;   // never leave renders blocked forever
     }
   })();
   return _imagesLoading;
+}
+
+// Fetch specific images right now, jumping ahead of the background load. Used when a
+// card is rendered before its images have arrived, so a profile viewed seconds after a
+// restart still shows correctly instead of rendering blank.
+async function ensureImages(guildId, refs) {
+  if (!mongoImages || !Array.isArray(refs) || !refs.length) return;
+  const wanted = refs
+    .map(ref => ({ id: `${guildId}:${ref}`, ref, guildId }))
+    .filter(n => {
+      const g = db[guildId];
+      if (!g) return false;
+      const [, uid, key] = n.ref.split(':');
+      const cur = n.ref.startsWith('img:')
+        ? g.__profiles?.images?.[uid]?.[key]
+        : g.__coinskins?.custom?.[uid]?.data;
+      return cur === '__EXTERNAL__' || cur == null;   // only what's actually missing
+    });
+  if (!wanted.length) return;
+  try {
+    const cursor = mongoImages.find({ _id: { $in: wanted.map(w => w.id) } });
+    for await (const im of cursor) {
+      if (_applyImage(im.ref || '', im.guildId, im.body)) {
+        const h = _fingerprint(im.body);
+        _imgHashes.set(im._id, h);
+        _cacheWrite(im._id, im.body, h);
+      }
+    }
+  } catch (e) { console.warn('[db] on-demand image fetch failed:', e.message); }
 }
 
 async function _persistGuildInner(guildId) {
@@ -269,9 +370,14 @@ async function _persistGuildInner(guildId) {
         await Promise.all(changed.map(({ key, id, body, h }) =>
           mongoImages.replaceOne(
             { _id: key },
-            { _id: key, guildId, ref: id, body },
+            // `h` lets a restart validate its local cache with a tiny metadata query
+            // instead of downloading every body again.
+            { _id: key, guildId, ref: id, body, h },
             { upsert: true }
-          ).then(() => { _egress.imgBytes += body.length; _egress.imgWrites++; })
+          ).then(() => {
+            _egress.imgBytes += body.length; _egress.imgWrites++;
+            _cacheWrite(key, body, h);   // keep the local cache in step
+          })
            .catch(e => {
              _imgHashes.delete(key);   // failed — allow a retry on the next save
              console.error(`⚠️  image save failed (${id}):`, e.message);
@@ -2848,7 +2954,7 @@ initBattleCards({ client, db, saveData, awardLP });
 initDiyar({ client, db, saveData, awardLP });
 initLotto({ client, db, saveData });
 const { initProfiles } = require('./profiles');
-const profileApi = initProfiles({ db, saveData, gachaApi: gachaApi && gachaApi.hubApi, getDinar, spendDinar });
+const profileApi = initProfiles({ db, saveData, gachaApi: gachaApi && gachaApi.hubApi, getDinar, spendDinar, ensureImages });
 initShop({ client, db, saveData, runFlip: gachaApi && gachaApi.runFlip, warApi: hubWarApi, gachaApi: gachaApi && gachaApi.hubApi, exchangeView: initBlackMarketExchange.getHubView, profileApi });
 
 // Translator (reaction-based Arabic → English)
