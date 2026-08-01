@@ -929,6 +929,7 @@ const { getGachaCommands, initGacha, awardDinar, isAtDinarCap, dinarDailyCap, ge
 const { CLAN_CREATE_COST, CLAN_JOIN_COST, CLAN_CHANNEL_COST } = require('./clanfns');
 const { getBattleCardsCommands, initBattleCards } = require('./battlecards');
 const { getDiyarCommands, initDiyar } = require('./diyar');
+const { getFootballCommands, initFootball } = require('./football');
 
 const { getLottoCommands, initLotto } = require('./lottery');
 
@@ -999,6 +1000,12 @@ function getAllCommands() {
   } catch (e) {
     console.error('Could not load diyar.js commands:', e.message);
   }
+  let footballCommands = [];
+  try {
+    footballCommands = getFootballCommands();
+  } catch (e) {
+    console.error('Could not load football.js commands:', e.message);
+  }
   let lottoCommands = [];
   try {
     lottoCommands = getLottoCommands();
@@ -1011,7 +1018,7 @@ function getAllCommands() {
   } catch (e) {
     console.error('Could not load shop.js commands:', e.message);
   }
-  _allCommands = [...commands, ...pokeCommands, ...yaraytCommands, ...exchangeCommands, ...newsCommands, ...jobsCommands, ...potdCommands, ...translatorCommands, ...libyaChatCommands, ...gachaCommands, ...battleCardsCommands, ...diyarCommands, ...lottoCommands, ...shopCommands];
+  _allCommands = [...commands, ...pokeCommands, ...yaraytCommands, ...exchangeCommands, ...newsCommands, ...jobsCommands, ...potdCommands, ...translatorCommands, ...libyaChatCommands, ...gachaCommands, ...battleCardsCommands, ...diyarCommands, ...footballCommands, ...lottoCommands, ...shopCommands];
   console.log(`📋 Command list built: ${_allCommands.map(c => c.name).join(', ')}`);
   return _allCommands;
 }
@@ -2954,6 +2961,14 @@ initBattleCards({ client, db, saveData, awardLP });
 
 // Diyar — Libyan conquest game (Dinar economy)
 initDiyar({ client, db, saveData, awardLP });
+
+// Football Manager — clubs, transfers, retainers and live animated matches.
+// Uses the same Dinar wallet as the rest of the bot.
+try {
+  initFootball({ client, db, saveData, getDinar, spendDinar, awardDinar });
+} catch (e) {
+  console.error('Could not start Football Manager:', e.message);
+}
 initLotto({ client, db, saveData });
 const { initProfiles } = require('./profiles');
 const profileApi = initProfiles({ db, saveData, gachaApi: gachaApi && gachaApi.hubApi, getDinar, spendDinar, ensureImages });
