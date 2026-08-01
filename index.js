@@ -48,6 +48,8 @@ async function safeDefer(interaction, opts = {}) {
 }
 
 const { MongoClient } = require('mongodb');
+const fs = require('fs');
+const path = require('path');
 
 // ─── Persistent Storage (MongoDB) ────────────────────────────────────────────
 // Uses MongoDB Atlas free tier — survives Railway restarts and redeploys.
