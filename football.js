@@ -2,26 +2,32 @@
 /* ══════════════════════════════════════════════════════════════════════════
    FOOTBALL MANAGER  —  a full club-management game mode for the Libya hub
    ------------------------------------------------------------------------
-   • Clubs are one-of-one. Buying one gives you its permanent captain (never
-     sellable, stays with the club forever, even on resale).
+   • Clubs are one-of-one, across the Libyan league and Europe's big five.
+     Buying one gives you its permanent captain (never sellable, stays with
+     the club forever, even on resale).
    • Every other squad slot is a FREE placeholder with a Libyan-flavoured
      generated name, until you buy a real player into it.
-   • Real players are one-of-one across the whole server. No duplicates.
+   • Players are browsed BY CLUB: pick a league, pick a club, pick a player.
+     Real players are one-of-one across the whole server. No duplicates.
    • RETAINER: every owned asset holds a prepaid balance. While it has funds,
      nobody can buy it off you. At zero you keep it — it simply becomes
      purchasable by anyone, instantly, with no warning.
-   • Matches are simulated live and animated into the channel by editing one
-     message ~60 times over ~3 minutes. Full colour, no GIF, no links.
+   • Matches run for 90 seconds of wall clock and are decided by TACTICS, not
+     dice: mentality, pressing, tempo, width, passing directness, the offside
+     trap and time-wasting all feed the same maths that produces the result.
+     Both managers can change theirs mid-match and see the other's choices.
    ══════════════════════════════════════════════════════════════════════════ */
 
 const {
   SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle,
-  StringSelectMenuBuilder, PermissionFlagsBits, AttachmentBuilder,
+  StringSelectMenuBuilder, UserSelectMenuBuilder, PermissionFlagsBits, AttachmentBuilder,
 } = require('discord.js');
-const { Resvg } = require('@resvg/resvg-js');
 const path = require('path');
 const fs = require('fs');
 const { frame } = require('./fm-render');
+const DATA = require('./fm-data');
+
+const { LEAGUES, CLUBS, PLAYERS, clubById, playerById, clubsInLeague, leagueList, squadOf } = DATA;
 
 // ─── fonts ────────────────────────────────────────────────────────────────
 function findFont(name) {
@@ -35,80 +41,19 @@ const FONT_FILES = ['DejaVuSans.ttf', 'DejaVuSans-Bold.ttf'].map(findFont).filte
 
 // ─── economy scale ────────────────────────────────────────────────────────
 // The average member holds ~200 Dinar, so the curve below is tuned so that a
-// small club is a realistic first goal, a mid player is a few weeks of saving,
-// and a superstar is a genuine long-term chase.
+// Libyan club is a realistic first goal, a good European player is weeks of
+// saving, and Real Madrid is a genuine long-term chase.
 const SQUAD_SIZE   = 11;          // starting XI (subs come later)
 const RETAINER_PCT = 0.20;        // starting retainer = 20% of price
-const DRAIN_PCT    = 0.02;        // 2% of price drains per day → ~10 days cover
 
-const playerPrice = (rating) => Math.max(10, Math.round(25 * Math.pow(1.15, rating - 60)));
+const playerPrice  = (rating) => Math.max(10, Math.round(25 * Math.pow(1.15, rating - 60)));
 const startRetainer = (price) => Math.max(5, Math.ceil(price * RETAINER_PCT));
-const dailyDrain   = (price) => Math.max(1, Math.ceil(price * DRAIN_PCT));
+// Sub-linear so a 20,000 Dinar club doesn't cost 400/day to hold. Cheap assets
+// keep their original ~10-day cover; expensive ones get ~18-20 days.
+const dailyDrain   = (price) => Math.max(1, Math.ceil(Math.pow(Math.max(price, 1), 0.85) * 0.045));
 
-// ─── Libyan Premier League clubs (one-of-one assets) ──────────────────────
-// colours: [primary shirt, secondary/trim, number text]
-const CLUBS = [
-  { id:'ahli-tripoli',  name:'Al-Ahli Tripoli',   short:'AHL', city:'Tripoli',  tier:1, price:1200, c:['#D32F2F','#7f1d1d','#ffffff'], cap:{ name:'Ahmed Krawa\'a',        pos:'FWD', rating:84 } },
-  { id:'ittihad-tripoli',name:'Al-Ittihad Tripoli',short:'ITT', city:'Tripoli', tier:1, price:1200, c:['#1f2937','#f8fafc','#ffffff'], cap:{ name:'Muad Eisa',             pos:'FWD', rating:83 } },
-  { id:'hilal-benghazi',name:'Al-Hilal Benghazi', short:'HIL', city:'Benghazi', tier:2, price:800,  c:['#1d4ed8','#bfdbfe','#ffffff'], cap:{ name:'Sayfulnasr Jaddour',   pos:'DEF', rating:79 } },
-  { id:'ahli-benghazi', name:'Al-Ahli Benghazi',  short:'AHB', city:'Benghazi', tier:2, price:800,  c:['#b91c1c','#fecaca','#ffffff'], cap:{ name:'Ismael Tajouri-Shradi',pos:'FWD', rating:80 } },
-  { id:'nasr-benghazi', name:'Al-Nasr Benghazi',  short:'NSR', city:'Benghazi', tier:2, price:750,  c:['#f59e0b','#78350f','#1f2937'], cap:{ name:'Muhanad Madyen',        pos:'DEF', rating:77 } },
-  { id:'akhdar',        name:'Al-Akhdar',         short:'AKH', city:'Bayda',    tier:3, price:500,  c:['#15803d','#bbf7d0','#ffffff'], cap:{ name:'Abdallah Dagou',        pos:'MID', rating:74 } },
-  { id:'madina',        name:'Al-Madina',         short:'MDN', city:'Tripoli',  tier:3, price:500,  c:['#0ea5e9','#e0f2fe','#ffffff'], cap:{ name:'Osamah Al Shuraimi',    pos:'MID', rating:73 } },
-  { id:'ittihad-misrata',name:'Al-Ittihad Misrata',short:'ITM',city:'Misrata',  tier:3, price:480,  c:['#047857','#a7f3d0','#ffffff'], cap:{ name:'Mahmoud Al Shilw',      pos:'MID', rating:72 } },
-  { id:'swihli',        name:'Al-Swihli',         short:'SWH', city:'Misrata',  tier:3, price:480,  c:['#6d28d9','#ddd6fe','#ffffff'], cap:{ name:'Marwan Mabrook',        pos:'MID', rating:72 } },
-  { id:'olympic-zawiya',name:'Olympic Zawiya',    short:'OLZ', city:'Zawiya',   tier:4, price:280,  c:['#ea580c','#ffedd5','#ffffff'], cap:{ name:'Husain Taqtaq',         pos:'FWD', rating:68 } },
-  { id:'tahaddi',       name:'Al-Tahaddi',        short:'THD', city:'Benghazi', tier:4, price:260,  c:['#1e3a8a','#dbeafe','#ffffff'], cap:{ name:'Talal Farhat',          pos:'DEF', rating:67 } },
-  { id:'abu-salim',     name:'Abu Salim',         short:'ABS', city:'Tripoli',  tier:4, price:260,  c:['#831843','#fbcfe8','#ffffff'], cap:{ name:'Faisal Al-Badri',       pos:'MID', rating:67 } },
-  { id:'khaleej-sirte', name:'Khaleej Sirte',     short:'KHS', city:'Sirte',    tier:4, price:240,  c:['#0f766e','#ccfbf1','#ffffff'], cap:{ name:'Moayad Al-Lafi',        pos:'FWD', rating:66 } },
-  { id:'asaria',        name:'Asaria',            short:'ASR', city:'Tripoli',  tier:4, price:240,  c:['#525252','#e5e5e5','#ffffff'], cap:{ name:'Badr Hassan',           pos:'MID', rating:65 } },
-  { id:'shat',          name:'Al-Shat',           short:'SHT', city:'Tripoli',  tier:4, price:220,  c:['#a16207','#fef3c7','#ffffff'], cap:{ name:'Ahmed Huwaydi',         pos:'DEF', rating:65 } },
-];
-const clubById = (id) => CLUBS.find(c => c.id === id) || null;
-
-// ─── real player pool (one-of-one, tradeable) ─────────────────────────────
-const P = (name, pos, rating) => ({ name, pos, rating, id: name.toLowerCase().replace(/[^a-z]+/g, '-') });
-const REAL_PLAYERS = [
-  // GK
-  P('Alisson','GK',89), P('Thibaut Courtois','GK',89), P('Jan Oblak','GK',88), P('Marc-Andre ter Stegen','GK',88),
-  P('Gianluigi Donnarumma','GK',88), P('Ederson','GK',87), P('Manuel Neuer','GK',87), P('Mike Maignan','GK',86),
-  P('Emiliano Martinez','GK',85), P('Andre Onana','GK',84), P('David Raya','GK',84), P('Yann Sommer','GK',84),
-  P('Guglielmo Vicario','GK',83), P('Gregor Kobel','GK',83), P('Diogo Costa','GK',82), P('Bart Verbruggen','GK',79),
-  // DEF
-  P('Virgil van Dijk','DEF',89), P('Ruben Dias','DEF',88), P('Antonio Rudiger','DEF',87), P('Joshua Kimmich','DEF',87),
-  P('William Saliba','DEF',86), P('Alessandro Bastoni','DEF',86), P('Marquinhos','DEF',86), P('Ronald Araujo','DEF',86),
-  P('Trent Alexander-Arnold','DEF',86), P('Andrew Robertson','DEF',86), P('Gabriel Magalhaes','DEF',85),
-  P('Josko Gvardiol','DEF',85), P('Theo Hernandez','DEF',85), P('Jules Kounde','DEF',85), P('Eder Militao','DEF',85),
-  P('David Alaba','DEF',85), P('Achraf Hakimi','DEF',85), P('Alphonso Davies','DEF',84), P('Kyle Walker','DEF',84),
-  P('Joao Cancelo','DEF',84), P('Dayot Upamecano','DEF',84), P('Matthijs de Ligt','DEF',84), P('Ibrahima Konate','DEF',84),
-  P('Ben White','DEF',84), P('Reece James','DEF',84), P('Alejandro Grimaldo','DEF',84), P('Jonathan Tah','DEF',83),
-  P('Nico Schlotterbeck','DEF',82), P('Sven Botman','DEF',82), P('Jeremie Frimpong','DEF',82), P('Denzel Dumfries','DEF',82),
-  P('Noussair Mazraoui','DEF',81), P('Jurrien Timber','DEF',81), P('Pervis Estupinan','DEF',81), P('Ben Chilwell','DEF',80),
-  P('Levi Colwill','DEF',79), P('Micky van de Ven','DEF',82), P('Cristian Romero','DEF',85),
-  // MID
-  P('Rodri','MID',90), P('Kevin De Bruyne','MID',90), P('Jude Bellingham','MID',89), P('Federico Valverde','MID',88),
-  P('Toni Kroos','MID',87), P('Bernardo Silva','MID',87), P('Phil Foden','MID',87), P('Martin Odegaard','MID',87),
-  P('Bruno Fernandes','MID',87), P('Luka Modric','MID',86), P('Declan Rice','MID',86), P('Nicolo Barella','MID',86),
-  P('Hakan Calhanoglu','MID',86), P('Florian Wirtz','MID',86), P('Jamal Musiala','MID',86), P('Cole Palmer','MID',86),
-  P('Pedri','MID',85), P('Bruno Guimaraes','MID',85), P('Aurelien Tchouameni','MID',84), P('Eduardo Camavinga','MID',84),
-  P('Michael Olise','MID',84), P('Granit Xhaka','MID',84), P('Enzo Fernandez','MID',84), P('Vitinha','MID',84),
-  P('Alexis Mac Allister','MID',84), P('Gavi','MID',83), P('Martin Zubimendi','MID',83), P('Moises Caicedo','MID',83),
-  P('Dominik Szoboszlai','MID',83), P('Mikel Merino','MID',82), P('Sandro Tonali','MID',82), P('James Maddison','MID',82),
-  P('Ruben Neves','MID',82), P('Warren Zaire-Emery','MID',82), P('Eberechi Eze','MID',82), P('Ryan Gravenberch','MID',82),
-  P('Davide Frattesi','MID',81), P('Manuel Ugarte','MID',79), P('Kobbie Mainoo','MID',78), P('Adam Wharton','MID',78),
-  // FWD
-  P('Kylian Mbappe','FWD',91), P('Erling Haaland','FWD',91), P('Vinicius Junior','FWD',90), P('Harry Kane','FWD',90),
-  P('Mohamed Salah','FWD',89), P('Robert Lewandowski','FWD',89), P('Antoine Griezmann','FWD',88), P('Victor Osimhen','FWD',88),
-  P('Lautaro Martinez','FWD',87), P('Son Heung-min','FWD',87), P('Bukayo Saka','FWD',87), P('Rafael Leao','FWD',86),
-  P('Khvicha Kvaratskhelia','FWD',86), P('Alexander Isak','FWD',85), P('Viktor Gyokeres','FWD',85), P('Raphinha','FWD',85),
-  P('Lamine Yamal','FWD',85), P('Dusan Vlahovic','FWD',84), P('Ollie Watkins','FWD',84), P('Christopher Nkunku','FWD',84),
-  P('Marcus Rashford','FWD',83), P('Benjamin Sesko','FWD',82), P('Lois Openda','FWD',82), P('Randal Kolo Muani','FWD',82),
-  P('Kai Havertz','FWD',82), P('Gabriel Martinelli','FWD',82), P('Jeremy Doku','FWD',82), P('Federico Chiesa','FWD',82),
-  P('Bryan Mbeumo','FWD',82), P('Jarrod Bowen','FWD',82), P('Darwin Nunez','FWD',82), P('Leon Bailey','FWD',81),
-  P('Nicolas Jackson','FWD',81), P('Ivan Toney','FWD',81), P('Dominic Solanke','FWD',81), P('Yoane Wissa','FWD',80),
-  P('Joao Felix','FWD',81), P('Rasmus Hojlund','FWD',79), P('Joshua Zirkzee','FWD',79), P('Antony','FWD',78),
-];
-const realById = (id) => REAL_PLAYERS.find(p => p.id === id) || null;
+const REAL_PLAYERS = PLAYERS;                       // kept for backwards compatibility
+const realById = (id) => playerById(id);
 
 // ─── placeholder name generator (Libyan flavoured, shuffled — not real people)
 const FIRST = ['Ahmed','Mohamed','Ali','Omar','Khaled','Youssef','Hamza','Tariq','Faisal','Bilal','Nasser','Salem',
@@ -118,9 +63,11 @@ const LAST = ['Al-Mabrouk','Al-Sharif','Al-Trabelsi','Ben Ali','Al-Zawi','Al-Mis
   'Al-Werfalli','Al-Obeidi','Ben Omar','Al-Sanussi','Al-Ghariani','Al-Darsi','Al-Hasi','Bin Nasser','Al-Tuhami',
   'Al-Shibani','Al-Areibi','Al-Fakhri','Al-Jilani','Al-Rayyani','Al-Mahdi','Al-Ferjani','Al-Khoja','Al-Zintani',
   'Al-Bakoush','Al-Hariri','Al-Suwaidi','Al-Gheryani','Al-Nuwairi','Al-Kabir'];
-const pick = (a) => a[Math.floor(Math.random() * a.length)];
+const pick  = (a) => a[Math.floor(Math.random() * a.length)];
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const genName = () => `${pick(FIRST)} ${pick(LAST)}`;
+const rnd = (a, b) => a + Math.random() * (b - a);
+const money = (n) => `${Math.round(n).toLocaleString('en-US')} 🪙`;
 
 // ─── formations ───────────────────────────────────────────────────────────
 // slot positions in pitch space (x = depth 0..100 attacking right, y = width)
@@ -133,7 +80,12 @@ const FORMATIONS = {
 };
 const FORMATION_KEYS = Object.keys(FORMATIONS);
 
-// ─── mentality & instructions ─────────────────────────────────────────────
+/* ══════════════════════════════════════════════════════════════════════════
+   TACTICS
+   Mentality is the dial everything else hangs off. Instructions are the
+   detail. Both feed planOf(), and planOf() is the ONLY thing the match
+   engine reads — so every switch a manager flips has a traceable effect.
+   ══════════════════════════════════════════════════════════════════════════ */
 const MENTALITIES = {
   defensive: { name:'Defensive', emoji:'🛡️', push:-9,  attack:-0.22, defend:+0.20, tempo:-0.15 },
   cautious:  { name:'Cautious',  emoji:'🧱', push:-4,  attack:-0.10, defend:+0.10, tempo:-0.07 },
@@ -141,11 +93,21 @@ const MENTALITIES = {
   positive:  { name:'Positive',  emoji:'📈', push:+5,  attack:+0.11, defend:-0.09, tempo:+0.08 },
   attacking: { name:'Attacking', emoji:'⚔️', push:+10, attack:+0.24, defend:-0.20, tempo:+0.17 },
 };
+const MENTALITY_KEYS = Object.keys(MENTALITIES);
+
 const INSTRUCTIONS = {
-  press:  { name:'Pressing',  opts:{ low:'Sit Deep', mid:'Balanced', high:'Press High' } },
-  tempo:  { name:'Tempo',     opts:{ slow:'Slow', normal:'Normal', fast:'High Tempo' } },
-  width:  { name:'Width',     opts:{ narrow:'Narrow', normal:'Normal', wide:'Wide' } },
-  pass:   { name:'Passing',   opts:{ short:'Short', mixed:'Mixed', direct:'Direct' } },
+  press: { name:'Pressing', emoji:'🏃', opts:{ low:'Sit Deep', mid:'Balanced', high:'Press High' },
+    help:'High press wins the ball back higher, but drains stamina and concedes fouls. Long balls beat it.' },
+  tempo: { name:'Tempo', emoji:'⏩', opts:{ slow:'Slow', normal:'Normal', fast:'High Tempo' },
+    help:'High tempo creates more of everything — for both sides — and tires your legs.' },
+  width: { name:'Width', emoji:'↔️', opts:{ narrow:'Narrow', normal:'Normal', wide:'Wide' },
+    help:'Wide beats a narrow defence in the box. Narrow wins the midfield against a wide side.' },
+  pass:  { name:'Passing', emoji:'🎯', opts:{ short:'Short', mixed:'Mixed', direct:'Direct' },
+    help:'Direct passing bypasses a high press and punishes a high line. Short play dies against a press.' },
+};
+const TOGGLES = {
+  offside:   { name:'Offside Trap',  emoji:'🚩', help:'Kills through balls, but if it is beaten the striker is clean through.' },
+  timeWaste: { name:'Time-Wasting', emoji:'🐢', help:'Kills the game when ahead. Wastes your own time when you are not, and risks cards.' },
 };
 const SHOUTS = {
   encourage: { name:'Encourage',   emoji:'👏', morale:+6,  desc:'lifts a struggling side' },
@@ -153,6 +115,35 @@ const SHOUTS = {
   demand:    { name:'Demand More', emoji:'📢', morale:+4,  desc:'sparks a flat team' },
   calm:      { name:'Calm Down',   emoji:'🧊', morale:+5,  desc:'steadies a nervy lead' },
   berate:    { name:'Berate',      emoji:'🔥', morale:-2,  desc:'high risk, high reward' },
+};
+
+const DEFAULT_INSTR = () => ({ press:'mid', tempo:'normal', width:'normal', pass:'mixed', offside:false, timeWaste:false });
+
+/* Turn a manager's settings into the numbers the engine actually uses. */
+function planOf(ctx) {
+  const men = MENTALITIES[ctx.mentality] || MENTALITIES.balanced;
+  const I = Object.assign(DEFAULT_INSTR(), ctx.instr || {});
+  const press  = I.press === 'high' ? 1 : I.press === 'low' ? -1 : 0;
+  const tempo  = I.tempo === 'fast' ? 1 : I.tempo === 'slow' ? -1 : 0;
+  const width  = I.width === 'wide' ? 1 : I.width === 'narrow' ? -1 : 0;
+  const direct = I.pass === 'direct' ? 1 : I.pass === 'short' ? -1 : 0;
+  return {
+    men,
+    press:  press + men.push / 14,                              // -1.7 … +1.7
+    tempo:  tempo + men.tempo * 3,                              // -1.5 … +1.5
+    width, direct,
+    line:   clamp(38 + men.push * 1.5 + press * 7 + (I.offside ? 9 : 0), 18, 72),
+    offside: !!I.offside,
+    waste:   !!I.timeWaste,
+  };
+}
+const styleLine = (ctx) => {
+  const I = Object.assign(DEFAULT_INSTR(), ctx.instr || {});
+  const bits = [INSTRUCTIONS.press.opts[I.press], INSTRUCTIONS.tempo.opts[I.tempo],
+    INSTRUCTIONS.width.opts[I.width], INSTRUCTIONS.pass.opts[I.pass]];
+  if (I.offside) bits.push('Offside Trap');
+  if (I.timeWaste) bits.push('Time-Wasting');
+  return bits.join(' · ');
 };
 
 // ─── state ────────────────────────────────────────────────────────────────
@@ -168,21 +159,19 @@ function fState(db, gid) {
 }
 function getManager(db, gid, uid) {
   const f = fState(db, gid);
-  if (!f.managers[uid]) {
-    f.managers[uid] = {
-      clubId: null,
-      squad: [],
-      formation: '4-3-3',
-      mentality: 'balanced',
-      instr: { press:'mid', tempo:'normal', width:'normal', pass:'mixed' },
-      morale: 65, cohesion: 50,
-      p:0, w:0, d:0, l:0, gf:0, ga:0,
-      created: Date.now(),
-    };
-  }
-  return f.managers[uid];
+  const m = (f.managers[uid] ||= {
+    clubId: null, squad: [], formation: '4-3-3', mentality: 'balanced',
+    instr: DEFAULT_INSTR(), morale: 65, cohesion: 50,
+    p:0, w:0, d:0, l:0, gf:0, ga:0, created: Date.now(),
+  });
+  // migrate older saves that predate the toggles / new instruction keys
+  m.instr = Object.assign(DEFAULT_INSTR(), m.instr || {});
+  if (!MENTALITIES[m.mentality]) m.mentality = 'balanced';
+  if (!FORMATIONS[m.formation]) m.formation = '4-3-3';
+  if (typeof m.morale !== 'number') m.morale = 65;
+  if (typeof m.cohesion !== 'number') m.cohesion = 50;
+  return m;
 }
-// build a fresh free placeholder for a formation slot
 function makePlaceholder(slot, num) {
   return {
     uid: `ph${Date.now().toString(36)}${Math.floor(Math.random()*1e5).toString(36)}`,
@@ -237,30 +226,56 @@ function lineRating(squad, formation, line) {
 
 /* ══════════════════════════════════════════════════════════════════════════
    MATCH ENGINE
-   A possession/momentum model. Each tick is ~1.5 game-minutes; 60 ticks make
-   a 90-minute match that plays out over about 3 real minutes.
+   ------------------------------------------------------------------------
+   Every number below traces back to planOf(). Nothing here is a coin flip
+   dressed up as tactics — the rock-paper-scissors matchups are explicit:
+
+     high press      beaten by  direct passing        (long balls skip it)
+     short passing   beaten by  high press            (turnovers in your half)
+     high line       beaten by  direct passing        (space in behind)
+     offside trap    beaten by  direct passing        (but kills it otherwise)
+     narrow          beaten by  wide  (in the box)
+     wide            beaten by  narrow (in midfield)
+     high press/tempo beaten by the 70th minute       (stamina)
+     time-wasting    only works if you are ahead
    ══════════════════════════════════════════════════════════════════════════ */
 
-const TICKS = 60, TICK_MS = 3000, MIN_PER_TICK = 1.5;
+const TICKS = 41;                 // engine steps in a match
+const MATCH_MS = 90000;           // 90 seconds of wall clock, as requested
+const HT_PAUSE_MS = 8000;         // team-talk window, counted inside MATCH_MS
+const HT_TICK = 20;               // half time lands after this tick
+const TICK_MS = Math.round((MATCH_MS - HT_PAUSE_MS) / TICKS);
+const CHANGES_PER_HALF = 3;       // tactical changes allowed while play is live
 
-function strength(ctx) {
+function sideStrength(ctx, m, side) {
   const sq = ctx.squad, f = ctx.formation;
   const gk  = lineRating(sq, f, 'GK');
   const def = lineRating(sq, f, 'DEF');
   const mid = lineRating(sq, f, 'MID');
   const fwd = lineRating(sq, f, 'FWD');
-  const men = MENTALITIES[ctx.mentality] || MENTALITIES.balanced;
+  const p   = planOf(ctx);
   const mor = 0.86 + (clamp(ctx.morale, 0, 100) / 100) * 0.28;
   const coh = 0.93 + (clamp(ctx.cohesion, 0, 100) / 100) * 0.14;
-  const pressBoost = ctx.instr && ctx.instr.press === 'high' ? 0.05 : ctx.instr && ctx.instr.press === 'low' ? -0.03 : 0;
+  const stam = m.stam[side];
+  const fat  = 1 - Math.max(0, 72 - stam) * 0.0070;   // legs go after ~72
+  const settle = (ctx.settle > 0) ? 0.94 : 1;          // just changed shape
+  const short  = m.men[side] < 11;                     // down to ten
   return {
-    att: (fwd * 0.62 + mid * 0.38) * (1 + men.attack) * mor * coh,
-    mid: mid * (1 + men.tempo * 0.4 + pressBoost) * mor * coh,
-    def: (def * 0.72 + gk * 0.28) * (1 + men.defend) * mor * coh,
-    gk,
+    p, gk,
+    att: (fwd * 0.62 + mid * 0.38) * (1 + p.men.attack) * mor * coh * fat * settle * (short ? 0.86 : 1),
+    mid: mid * (1 + p.men.tempo * 0.4 + p.press * 0.03) * mor * coh * fat * settle * (short ? 0.84 : 1),
+    def: (def * 0.72 + gk * 0.28) * (1 + p.men.defend) * mor * coh * fat * (short ? 0.91 : 1),
   };
 }
-const rnd = (a, b) => a + Math.random() * (b - a);
+
+function stamDrain(plan) {
+  return 0.55
+    + Math.max(0, plan.press) * 0.34
+    + Math.max(0, plan.tempo) * 0.26
+    + (plan.men.push > 0 ? 0.12 : 0)
+    - (plan.waste ? 0.15 : 0)
+    - (plan.men.push < -6 ? 0.10 : 0);
+}
 
 // pick a named player from a side for commentary flavour
 function whoFrom(ctx, prefer) {
@@ -276,56 +291,162 @@ const C = {
   press:  ['{T} win it back high up the pitch!', 'Turnover — {T} pounce on a loose touch.', '{P} nicks it and {T} surge forward.'],
   turn:   ['Misplaced pass — {T} take over.', '{T} lose it cheaply in midfield.', 'Cleared away, {T} regain possession.',
            'Heavy touch from {P} and it runs away.'],
+  long:   ['{T} go long over the press.', '{P} clips it over the top for the runner.', '{T} skip midfield entirely.'],
   wide:   ['{P} takes it down the flank.', '{T} stretch it wide looking for the cross.', '{P} beats his man on the outside!'],
   final:  ['{T} into the final third now.', '{P} threads it into a dangerous area.', '{T} are camped in the opposition half.'],
   chance: ['A big chance opens up for {T}!', '{P} finds space in the box!', 'It falls to {P} eight yards out!'],
   goal:   ['GOAL! {P} buries it!', 'GOAL! {P} finishes coolly for {T}!', 'GOAL! A brilliant strike from {P}!',
            'GOAL! {P} makes no mistake!', 'GOAL! {T} break through — {P} with the finish!'],
-  save:   ['Saved! A strong hand keeps {P} out.', 'Great stop! {P} denied from close range.', 'The keeper holds {P}\'s effort.'],
+  save:   ['Saved! A strong hand keeps {P} out.', 'Great stop! {P} denied from close range.', "The keeper holds {P}'s effort."],
   miss:   ['{P} drags it wide.', 'Over the bar from {P}!', '{P} snatches at it — off target.'],
-  post:   ['Off the post! {P} is inches away!', 'Crashes off the woodwork! {T} can\'t believe it.'],
+  post:   ['Off the post! {P} is inches away!', "Crashes off the woodwork! {T} can't believe it."],
   block:  ['Blocked! Brave defending from {T}.', 'The shot is charged down.'],
   keep:   ['{T} keep possession, slowing it down.', '{T} recycle it patiently.'],
+  waste:  ['{T} are taking their time over everything.', '{P} goes down and stays down. Clock ticking.'],
+  counter:['{T} break at speed!', 'Three on two — {T} are away!', '{T} catch them square at the back!'],
+  offs:   ['Flag up — {P} is caught offside.', 'The trap works! {P} strays beyond the line.'],
+  foul:   ['Cynical from {T}. Free kick.', '{P} clatters through the back of him.'],
+  tired:  ['{T} are running on empty here.', 'Legs going for {T} — they can not get out.'],
 };
 const say = (arr, T, Pn) => pick(arr).replace(/\{T\}/g, T).replace(/\{P\}/g, Pn || 'the forward');
 
 function newMatch(home, away) {
+  for (const c of [home, away]) { c.changes = 0; c.settle = 0; }
   return {
-    home, away, hg: 0, ag: 0, minute: 0, tick: 0,
+    home, away, hg: 0, ag: 0, minute: 0, tick: 0, ticks: TICKS,
     poss: Math.random() < 0.5 ? 'H' : 'A',
     ballX: 50, ballY: 50, trail: [],
     possTicks: { H: 1, A: 1 },
-    stats: { H: { shots: 0, sot: 0, chances: 0 }, A: { shots: 0, sot: 0, chances: 0 } },
-    scorers: [], feed: [], ended: false, ballOwner: null,
+    stam:  { H: 100, A: 100 },
+    cards: { H: { y:0, r:0 }, A: { y:0, r:0 } },
+    men:   { H: 11, A: 11 },
+    counter: null,
+    stats: { H: { shots:0, sot:0, chances:0, fouls:0, offside:0 }, A: { shots:0, sot:0, chances:0, fouls:0, offside:0 } },
+    scorers: [], feed: [], ended: false, ballOwner: null, read: '',
   };
+}
+
+/* The tactical read — a plain-English line explaining WHY the game looks the
+   way it does, generated from the same modifiers the engine just used. */
+function readOut(m, atkT, dfnT, pa, pd, sa, sd, side) {
+  const obs = [];
+  if (pd.press > 0.6 && pa.direct > 0)
+    obs.push([0.9, `${atkT} are going long to beat the ${dfnT} press.`]);
+  if (pd.press > 0.6 && pa.direct < 0)
+    obs.push([0.85, `${dfnT}'s press is suffocating ${atkT}'s short passing.`]);
+  if (pd.line > 52 && pa.direct > 0)
+    obs.push([0.8, `${dfnT}'s high line is leaving space in behind.`]);
+  if (pd.offside)
+    obs.push([0.5, `${dfnT} are playing the offside trap.`]);
+  if (pa.width > 0 && pd.width < 0)
+    obs.push([0.6, `${atkT} are stretching a narrow ${dfnT} back four.`]);
+  if (pa.width < 0 && pd.width > 0)
+    obs.push([0.55, `${atkT} are outnumbering ${dfnT} through the middle.`]);
+  if (m.stam[side === 'H' ? 'A' : 'H'] < 45)
+    obs.push([1.0, `${dfnT} are visibly tiring.`]);
+  if (m.stam[side] < 45)
+    obs.push([0.95, `${atkT} have nothing left in the legs.`]);
+  if (pa.waste && (side === 'H' ? m.hg <= m.ag : m.ag <= m.hg))
+    obs.push([0.7, `${atkT} are wasting time without a lead — it is only helping ${dfnT}.`]);
+  if (!obs.length) return m.read;
+  obs.sort((a, b) => b[0] - a[0]);
+  return obs[0][1];
 }
 
 function advance(m) {
   m.tick++;
-  m.minute = Math.min(90, Math.round(m.tick * MIN_PER_TICK));
-  const isH = m.poss === 'H';
-  const atk = isH ? m.home : m.away;
-  const dfn = isH ? m.away : m.home;
-  const sa = strength(atk), sd = strength(dfn);
-  const T = atk.club.short, Tf = atk.club.name;
-  m.possTicks[m.poss]++;
-  let event = null, commentary = '';
+  m.minute = Math.min(90, Math.round(m.tick * (90 / m.ticks)));
 
-  // ── contest the ball ──
-  const keep = clamp(0.70 + (sa.mid - sd.mid) / 240, 0.46, 0.88);
-  if (Math.random() > keep) {
-    m.poss = isH ? 'A' : 'H';
-    const nT = (isH ? m.away : m.home).club.short;
-    commentary = Math.random() < 0.45
-      ? say(C.press, nT, whoFrom(isH ? m.away : m.home, 'MID'))
-      : say(C.turn, nT, whoFrom(atk, 'MID'));
-    m.ballY = clamp(m.ballY + rnd(-18, 18), 8, 92);
-    m.ballOwner = null;
-    return { event, commentary };
+  // ── stamina + settling, for both sides, every tick ──
+  for (const s of ['H', 'A']) {
+    const ctx = s === 'H' ? m.home : m.away;
+    m.stam[s] = clamp(m.stam[s] - stamDrain(planOf(ctx)), 5, 100);
+    if (ctx.settle > 0) ctx.settle--;
   }
 
-  // ── carry the ball forward ──
-  const drive = 9 + (sa.att - sd.def) / 6.5 + rnd(-4, 14);
+  const isH = m.poss === 'H';
+  const A = isH ? 'H' : 'A', D = isH ? 'A' : 'H';
+  const atk = isH ? m.home : m.away;
+  const dfn = isH ? m.away : m.home;
+  const sa = sideStrength(atk, m, A), sd = sideStrength(dfn, m, D);
+  const pa = sa.p, pd = sd.p;
+  const T = atk.club.short, dT = dfn.club.short;
+  m.possTicks[m.poss]++;
+  let event = null, commentary = '';
+  const wasCounter = m.counter === m.poss;
+  m.counter = null;
+
+  if (m.tick % 5 === 0) m.read = readOut(m, T, dT, pa, pd, sa, sd, A);
+
+  // ── fouls from the defending side (pressing high costs you) ──────────────
+  const deepForDef = isH ? m.ballX > 66 : m.ballX < 34;
+  const foulChance = 0.055 + Math.max(0, pd.press) * 0.035 + (pd.waste ? 0.02 : 0);
+  if (Math.random() < foulChance) {
+    m.stats[D].fouls++;
+    const yellowChance = 0.20 + Math.max(0, pd.press) * 0.10 + (pd.waste ? 0.06 : 0);
+    if (Math.random() < yellowChance) {
+      m.cards[D].y++;
+      // a third booking stands in for a second yellow on one player
+      if (m.cards[D].y >= 3 && !m.cards[D].r && Math.random() < 0.5) {
+        m.cards[D].r++; m.men[D] = 10;
+        m.feed.push(`🟥 **${m.minute}'** Red card — ${dT} down to ten`);
+        m.lastEvent = null;
+        return { event: { type:'RED', sub:`${dfn.club.name} · ${m.minute}'` },
+                 commentary: `${dT} are down to ten men!` };
+      }
+      m.feed.push(`🟨 **${m.minute}'** Booking — ${dT}`);
+      if (deepForDef && Math.random() < 0.16) {
+        // a foul in the box
+        const taker = whoFrom(atk, 'FWD');
+        m.stats[A].shots++;
+        if (Math.random() < 0.76) {
+          if (isH) m.hg++; else m.ag++;
+          m.stats[A].sot++;
+          m.scorers.push({ side: A, name: taker, minute: m.minute, pen: true });
+          m.feed.push(`⚽ **${m.minute}'** ${taker} (${T}) pen. — ${m.hg}-${m.ag}`);
+          m.ballX = 50; m.ballY = 50; m.trail = []; m.poss = D; m.ballOwner = null;
+          return { event: { type:'GOAL', sub:`${taker} · pen · ${m.minute}'` }, commentary: `PENALTY — and ${taker} scores!` };
+        }
+        m.poss = D;
+        return { event: { type:'SAVE', sub:'Penalty saved!' }, commentary: `Penalty saved! ${taker} is denied from the spot.` };
+      }
+      return { event: { type:'YELLOW', sub:`${dfn.club.name} · ${m.minute}'` }, commentary: say(C.foul, dT, whoFrom(dfn,'MID')) };
+    }
+  }
+
+  // ── contest the ball ─────────────────────────────────────────────────────
+  // Base is the midfield battle. Then every instruction matchup shifts it.
+  let keep = 0.70 + (sa.mid - sd.mid) / 240;
+  keep -= Math.max(0, pd.press) * 0.045;                         // being pressed
+  if (pa.direct > 0) keep += Math.max(0, pd.press) * 0.062;      // long balls beat the press
+  if (pa.direct < 0) keep -= Math.max(0, pd.press) * 0.040;      // short play dies against it
+  keep += (pd.width - pa.width) * 0.020;                         // narrow wins the middle
+  if (pa.width < 0) keep += Math.max(0, pd.press) * 0.030;       // narrow resists a press
+  keep += (pa.direct < 0 ? 0.030 : 0) - (pa.direct > 0 ? 0.025 : 0);  // short holds it, direct gives it away
+  keep += (pa.waste ? 0.05 : 0);                                 // killing the game
+  keep -= Math.max(0, pa.tempo) * 0.015;                         // fast tempo turns it over more
+  keep = clamp(keep, 0.42, 0.90);
+
+  if (Math.random() > keep) {
+    m.poss = D;
+    // losing it against a high line + attacking opponent = counter for them
+    if (pa.line > 48 && pa.men.push > 0) m.counter = D;
+    const highPress = Math.max(0, pd.press) > 0.6;
+    commentary = highPress && Math.random() < 0.6
+      ? say(C.press, dT, whoFrom(dfn, 'MID'))
+      : say(C.turn, dT, whoFrom(atk, 'MID'));
+    m.ballY = clamp(m.ballY + rnd(-18, 18), 8, 92);
+    m.ballOwner = null;
+    return { event: m.counter ? { type:'COUNTER' } : null, commentary };
+  }
+
+  // ── carry the ball forward ───────────────────────────────────────────────
+  let drive = 9 + (sa.att - sd.def) / 6.5 + rnd(-4, 12);
+  drive += pa.direct * 5;                                        // direct covers ground
+  drive += Math.max(0, pd.line - 40) * 0.16;                     // space behind a high line
+  drive += pa.tempo * 2;
+  drive -= pa.waste ? 5 : 0;
+  if (wasCounter) drive += 18;                                   // breaking at speed
   m.ballX = clamp(m.ballX + (isH ? drive : -drive), 4, 96);
   m.ballY = clamp(m.ballY + rnd(-14, 14), 8, 92);
   m.trail.push({ x: m.ballX, y: m.ballY });
@@ -333,31 +454,60 @@ function advance(m) {
 
   const deep = isH ? m.ballX > 72 : m.ballX < 28;
   const mid3 = isH ? m.ballX > 58 : m.ballX < 42;
+  let through = false;               // trap beaten on THIS attack only
 
-  // ── chance creation in the final third ──
+  // ── the offside trap ─────────────────────────────────────────────────────
+  if (deep && pd.offside && Math.random() < 0.40) {
+    const beaten = 0.45 + pa.direct * 0.24 + (atk.cohesion - 50) / 320;
+    if (Math.random() > beaten) {
+      m.stats[A].offside++;
+      const who = whoFrom(atk, 'FWD');
+      m.feed.push(`🚩 **${m.minute}'** Offside — ${who} (${T})`);
+      m.ballX = isH ? 30 : 70; m.ballY = rnd(30, 70); m.trail = [];
+      m.poss = D; m.ballOwner = null;
+      return { event: { type:'OFFSIDE' }, commentary: say(C.offs, T, who) };
+    }
+    through = true;                                              // trap beaten
+  }
+
+  // ── chance creation in the final third ───────────────────────────────────
   if (deep) {
-    const q = clamp(0.52 + (sa.att - sd.def) / 150, 0.22, 0.80);
+    let q = 0.52 + (sa.att - sd.def) / 150;
+    if (pa.width > 0 && pd.width < 0) q += 0.11;                 // wide vs narrow
+    if (wasCounter) q += 0.10;
+    if (pd.line < 28) q -= 0.06;                                 // bodies behind the ball
+    if (pa.direct < 0 && pd.line < 30) q += 0.09;                // patient build-up unpicks a low block
+    if (pa.width > 0 && pd.line < 30) q += 0.08;                 // width stretches a packed defence
+    q = clamp(q, 0.20, 0.82);
+
     if (Math.random() < q) {
-      m.stats[m.poss].chances++;
+      m.stats[A].chances++;
       const shooter = whoFrom(atk, Math.random() < 0.7 ? 'FWD' : 'MID');
-      m.stats[m.poss].shots++;
-      // shot quality vs keeper
-      const xg = clamp(0.26 + (sa.att - sd.gk) / 190 + rnd(-0.12, 0.16), 0.06, 0.60);
+      m.stats[A].shots++;
+      let xg = 0.24 + (sa.att - sd.gk) / 190 + rnd(-0.10, 0.14);
+      if (pa.width > 0 && pd.width < 0) xg += 0.08;
+      if (pa.direct > 0 && pd.line > 50) xg += 0.06;             // through balls in behind
+      if (wasCounter) xg += 0.10;
+      if (through) xg += 0.16;                                   // clean through on goal
+      if (pa.direct < 0 && pd.line < 30) xg += 0.05;
+      if (pa.width > 0 && pd.line < 30) xg += 0.04;
+      if (pd.line < 28) xg -= 0.05;
+      xg = clamp(xg, 0.06, 0.68);
+
       const roll = Math.random();
       if (roll < xg) {
         if (isH) m.hg++; else m.ag++;
-        m.stats[m.poss].sot++;
-        m.scorers.push({ side: m.poss, name: shooter, minute: m.minute });
+        m.stats[A].sot++;
+        m.scorers.push({ side: A, name: shooter, minute: m.minute });
         event = { type: 'GOAL', sub: `${shooter} · ${m.minute}'` };
         commentary = say(C.goal, T, shooter);
         m.feed.push(`⚽ **${m.minute}'** ${shooter} (${T}) — ${m.hg}-${m.ag}`);
         m.ballX = 50; m.ballY = 50; m.trail = [];
-        m.poss = isH ? 'A' : 'H';
-        m.ballOwner = null;
+        m.poss = D; m.ballOwner = null;
         return { event, commentary };
       }
       if (roll < xg + 0.30) {
-        m.stats[m.poss].sot++;
+        m.stats[A].sot++;
         event = { type: 'SAVE' }; commentary = say(C.save, T, shooter);
         m.feed.push(`🧤 **${m.minute}'** Save — ${shooter} (${T})`);
       } else if (roll < xg + 0.38) {
@@ -369,17 +519,25 @@ function advance(m) {
         event = { type: 'MISS' }; commentary = say(C.miss, T, shooter);
       }
       m.ballX = isH ? 26 : 74; m.ballY = rnd(30, 70); m.trail = [];
-      m.poss = isH ? 'A' : 'H';
-      m.ballOwner = null;
+      m.poss = D; m.ballOwner = null;
       return { event, commentary };
     }
     commentary = say(C.chance, T, whoFrom(atk, 'FWD'));
     event = { type: 'CHANCE' };
+  } else if (wasCounter) {
+    commentary = say(C.counter, T, whoFrom(atk, 'FWD'));
+    event = { type: 'COUNTER' };
   } else if (mid3) {
-    commentary = Math.random() < 0.5 ? say(C.final, T, whoFrom(atk, 'MID')) : say(C.wide, T, whoFrom(atk, 'MID'));
+    commentary = pa.direct > 0 && Math.random() < 0.45 ? say(C.long, T, whoFrom(atk, 'DEF'))
+      : Math.random() < 0.5 ? say(C.final, T, whoFrom(atk, 'MID')) : say(C.wide, T, whoFrom(atk, 'MID'));
+  } else if (pa.waste && Math.random() < 0.5) {
+    commentary = say(C.waste, T, whoFrom(atk, 'DEF'));
+  } else if (m.stam[A] < 42 && Math.random() < 0.3) {
+    commentary = say(C.tired, T, whoFrom(atk, 'MID'));
   } else {
     commentary = Math.random() < 0.75 ? say(C.build, T, whoFrom(atk, 'MID')) : say(C.keep, T, whoFrom(atk, 'DEF'));
   }
+
   // who is on the ball (for the highlight ring) — nearest slot to the ball
   const form = FORMATIONS[atk.formation] || FORMATIONS['4-3-3'];
   let best = 0, bestD = 1e9;
@@ -388,18 +546,17 @@ function advance(m) {
     const d = Math.abs(px - m.ballX) + Math.abs(s.y - m.ballY) * 0.6;
     if (d < bestD) { bestD = d; best = i; }
   });
-  m.ballOwner = `${isH ? 'H' : 'A'}${best}`;
+  m.ballOwner = `${A}${best}`;
   return { event, commentary };
 }
 
 /* team shape for rendering — the unit shifts with the ball and mentality */
 function shapeFor(ctx, isHome, m) {
   const form = FORMATIONS[ctx.formation] || FORMATIONS['4-3-3'];
-  const men = MENTALITIES[ctx.mentality] || MENTALITIES.balanced;
+  const p = planOf(ctx);
   const hasBall = (m.poss === 'H') === isHome;
-  // convert ball to this team's attacking frame (0 = own goal, 100 = opponent goal)
   const relBall = isHome ? m.ballX : 100 - m.ballX;
-  const widthMul = ctx.instr && ctx.instr.width === 'wide' ? 1.12 : ctx.instr && ctx.instr.width === 'narrow' ? 0.86 : 1;
+  const widthMul = p.width > 0 ? 1.12 : p.width < 0 ? 0.86 : 1;
   return form.slots.map((s, i) => {
     let x, y;
     if (s.p === 'GK') {
@@ -407,7 +564,7 @@ function shapeFor(ctx, isHome, m) {
       y = 50 + (m.ballY - 50) * 0.16;
     } else {
       const follow = (relBall - 50) * 0.24;
-      const push = (hasBall ? 7 : -6) + men.push * 0.55;
+      const push = (hasBall ? 7 : -6) + p.men.push * 0.55 + (p.line - 38) * 0.22;
       x = s.x + follow + push;
       y = 50 + (s.y - 50) * widthMul + (m.ballY - 50) * 0.14;
     }
@@ -418,6 +575,7 @@ function shapeFor(ctx, isHome, m) {
 
 function matchFrameState(m) {
   const total = m.possTicks.H + m.possTicks.A;
+  const hp = planOf(m.home), ap = planOf(m.away);
   return {
     home: m.home.club, away: m.away.club,
     hg: m.hg, ag: m.ag, minute: m.minute,
@@ -428,21 +586,46 @@ function matchFrameState(m) {
     awayPos: shapeFor(m.away, false, m),
     commentary: m.lastCommentary || 'Kick off.',
     event: m.lastEvent || null,
+    // tactical HUD
+    hMent: (MENTALITIES[m.home.mentality] || MENTALITIES.balanced).name,
+    aMent: (MENTALITIES[m.away.mentality] || MENTALITIES.balanced).name,
+    hStyle: styleLine(m.home), aStyle: styleLine(m.away),
+    hStam: m.stam.H, aStam: m.stam.A,
+    hCards: m.cards.H, aCards: m.cards.A,
+    hMen: m.men.H, aMen: m.men.A,
+    showLines: true, hLine: hp.line, aLine: ap.line,
   };
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
-   LIVE MATCH RUNNER  —  one message, edited ~60 times over ~3 minutes
+   LIVE MATCH RUNNER
+   One message, edited ~41 times over 90 seconds, with both managers able to
+   change their setup while it runs.
    ══════════════════════════════════════════════════════════════════════════ */
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-const money = (n) => `${Math.round(n).toLocaleString('en-US')} 🪙`;
 
-function shoutRow(disabled = false) {
-  const r = new ActionRowBuilder();
+function liveRows(disabled = false) {
+  const ment = new ActionRowBuilder().addComponents(
+    new StringSelectMenuBuilder().setCustomId('fm:live:ment').setPlaceholder('🧠 Change mentality…')
+      .setDisabled(disabled)
+      .addOptions(MENTALITY_KEYS.map(k => ({ label: MENTALITIES[k].name, value: k, emoji: MENTALITIES[k].emoji }))));
+  const instr = new ActionRowBuilder().addComponents(
+    new StringSelectMenuBuilder().setCustomId('fm:live:instr').setPlaceholder('⚙️ Team instruction…')
+      .setDisabled(disabled)
+      .addOptions(Object.entries(INSTRUCTIONS).flatMap(([k, v]) =>
+        Object.entries(v.opts).map(([ok, ol]) => ({ label: `${v.name}: ${ol}`, value: `${k}|${ok}`, emoji: v.emoji })))));
+  const tog = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('fm:live:tog:offside').setLabel('Offside Trap').setEmoji('🚩')
+      .setStyle(ButtonStyle.Secondary).setDisabled(disabled),
+    new ButtonBuilder().setCustomId('fm:live:tog:timeWaste').setLabel('Time-Wasting').setEmoji('🐢')
+      .setStyle(ButtonStyle.Secondary).setDisabled(disabled),
+    new ButtonBuilder().setCustomId('fm:live:mine').setLabel('My Setup').setEmoji('📋')
+      .setStyle(ButtonStyle.Primary).setDisabled(disabled));
+  const shout = new ActionRowBuilder();
   for (const [k, s] of Object.entries(SHOUTS))
-    r.addComponents(new ButtonBuilder().setCustomId(`fm:shout:${k}`).setLabel(s.name).setEmoji(s.emoji)
+    shout.addComponents(new ButtonBuilder().setCustomId(`fm:live:shout:${k}`).setLabel(s.name).setEmoji(s.emoji)
       .setStyle(k === 'berate' ? ButtonStyle.Danger : ButtonStyle.Secondary).setDisabled(disabled));
-  return r;
+  return [ment, instr, tog, shout];
 }
 
 function applyShout(ctx, key, m, side) {
@@ -459,78 +642,172 @@ function applyShout(ctx, key, m, side) {
   return d;
 }
 
+/* The AI reads the game the same way a manager would. */
+function aiThink(ctx, m, side) {
+  if (!ctx.ai) return;
+  const diff = side === 'H' ? m.hg - m.ag : m.ag - m.hg;
+  const late = m.tick > TICKS * 0.66;
+  const tired = m.stam[side] < 50;
+  const opp = side === 'H' ? m.away : m.home;
+  const oppPlan = planOf(opp);
+  if (diff <= -2)      { ctx.mentality = 'attacking'; ctx.instr.press = 'high'; ctx.instr.tempo = 'fast'; }
+  else if (diff === -1){ ctx.mentality = late ? 'attacking' : 'positive'; ctx.instr.tempo = 'fast'; }
+  else if (diff >= 2 && late) { ctx.mentality = 'cautious'; ctx.instr.press = 'low'; ctx.instr.timeWaste = true; }
+  else if (diff === 1 && late){ ctx.mentality = 'cautious'; ctx.instr.timeWaste = true; }
+  else                 { ctx.mentality = 'balanced'; ctx.instr.timeWaste = false; }
+  // counter the opponent: long balls against a press, sit deeper against pace
+  ctx.instr.pass  = oppPlan.press > 0.6 ? 'direct' : oppPlan.line < 30 ? 'short' : 'mixed';
+  ctx.instr.width = oppPlan.press > 0.6 ? 'narrow' : oppPlan.line < 30 ? 'wide' : 'normal';
+  if (tired) { ctx.instr.press = 'low'; ctx.instr.tempo = 'slow'; }
+  ctx.settle = 1;
+}
+
+function setupField(ctx, m, side) {
+  const men = MENTALITIES[ctx.mentality] || MENTALITIES.balanced;
+  const c = m.cards[side];
+  const bits = [`${men.emoji} **${men.name}**`, styleLine(ctx),
+    `💪 Stamina **${Math.round(m.stam[side])}%**`];
+  if (c.y || c.r) bits.push(`${'🟨'.repeat(Math.min(c.y, 3))}${c.r ? ' 🟥 **10 men**' : ''}`);
+  return bits.join('\n');
+}
+
 function matchEmbed(m, live = true) {
   const feed = m.feed.slice(-6).join('\n') || '_No goals yet._';
   const e = new EmbedBuilder()
     .setColor(parseInt((m.hg > m.ag ? m.home.club.c[0] : m.ag > m.hg ? m.away.club.c[0] : '#fbbf24').slice(1), 16))
     .setTitle(`${m.home.club.name}  ${m.hg} – ${m.ag}  ${m.away.club.name}`)
-    .setDescription(live ? `⏱️ **${m.minute}'** · ${m.lastCommentary || 'Kick off.'}` : `**Full time.**`)
-    .setImage('attachment://pitch.png')
-    .addFields({ name: 'Match feed', value: feed, inline: false });
+    .setDescription(live ? `⏱️ **${m.minute}'** · ${m.lastCommentary || 'Kick off.'}` : '**Full time.**')
+    .setImage('attachment://pitch.png');
+  if (live && m.read) e.addFields({ name: '🔍 Tactical read', value: m.read, inline: false });
+  e.addFields(
+    { name: `🏠 ${m.home.club.short}`, value: setupField(m.home, m, 'H'), inline: true },
+    { name: `🛫 ${m.away.club.short}`, value: setupField(m.away, m, 'A'), inline: true },
+    { name: 'Match feed', value: feed, inline: false },
+  );
   if (!live) {
     const hs = m.stats.H, as = m.stats.A;
     e.addFields(
-      { name: `${m.home.club.short} stats`, value: `Shots **${hs.shots}** · On target **${hs.sot}**`, inline: true },
-      { name: `${m.away.club.short} stats`, value: `Shots **${as.shots}** · On target **${as.sot}**`, inline: true },
+      { name: `${m.home.club.short} stats`, value: `Shots **${hs.shots}** · On target **${hs.sot}** · Offside ${hs.offside} · Fouls ${hs.fouls}`, inline: true },
+      { name: `${m.away.club.short} stats`, value: `Shots **${as.shots}** · On target **${as.sot}** · Offside ${as.offside} · Fouls ${as.fouls}`, inline: true },
     );
+  } else {
+    e.setFooter({ text: 'Both managers can change mentality and instructions live. ' +
+      `${CHANGES_PER_HALF} changes per half — free at half time.` });
   }
   return e;
 }
 
 async function runLiveMatch(channel, m, seatMap, db, gid, saveData) {
   m.lastCommentary = 'Kick off.'; m.lastEvent = { type: 'KICK' };
-  let png = frame(matchFrameState(m));
+  let png;
+  try { png = frame(matchFrameState(m)); }
+  catch (e) { console.error('[fm] render failed:', e.message); return null; }
+
   let msg;
   try {
     msg = await channel.send({
       embeds: [matchEmbed(m)],
       files: [new AttachmentBuilder(png, { name: 'pitch.png' })],
-      components: [shoutRow()],
+      components: liveRows(),
     });
   } catch (e) { console.error('[fm] could not post match:', e.message); return null; }
 
-  const collector = msg.createMessageComponentCollector({ time: TICKS * TICK_MS + 15000 });
+  const sideOf = (uid) => seatMap[uid] || null;
+  const ctxOf  = (side) => side === 'H' ? m.home : m.away;
+
+  const collector = msg.createMessageComponentCollector({ time: MATCH_MS + 20000 });
   collector.on('collect', async (i) => {
-    const side = seatMap[i.user.id];
-    if (!side) return i.reply({ content: 'Only the two managers can shout from the touchline.', flags: 64 }).catch(()=>{});
-    const key = i.customId.split(':')[2];
-    const ctx = side === 'H' ? m.home : m.away;
-    const d = applyShout(ctx, key, m, side);
-    const s = SHOUTS[key];
-    await i.reply({
-      content: `${s.emoji} **${s.name}** — morale ${d >= 0 ? '+' : ''}${d} (now ${Math.round(ctx.morale)}).${d < 0 ? ' That did not land well.' : ''}`,
-      flags: 64,
-    }).catch(()=>{});
+    try {
+      const side = sideOf(i.user.id);
+      if (!side) return i.reply({ content: 'Only the two managers can work the touchline.', flags: 64 }).catch(()=>{});
+      const ctx = ctxOf(side);
+      const id = i.customId;
+
+      if (id === 'fm:live:mine') {
+        return i.reply({ content: `📋 **Your setup**\n${setupField(ctx, m, side)}\n\nChanges used this half: **${ctx.changes}/${CHANGES_PER_HALF}**`, flags: 64 }).catch(()=>{});
+      }
+      if (id.startsWith('fm:live:shout:')) {
+        const key = id.split(':')[3];
+        const d = applyShout(ctx, key, m, side);
+        const s = SHOUTS[key];
+        return i.reply({ content: `${s.emoji} **${s.name}** — morale ${d >= 0 ? '+' : ''}${d} (now ${Math.round(ctx.morale)}).${d < 0 ? ' That did not land well.' : ''}`, flags: 64 }).catch(()=>{});
+      }
+
+      // ── tactical changes are rationed while the ball is in play ──
+      const free = !!m.htWindow;
+      if (!free && ctx.changes >= CHANGES_PER_HALF)
+        return i.reply({ content: `🚫 You have used all **${CHANGES_PER_HALF}** changes this half. Half time is free.`, flags: 64 }).catch(()=>{});
+
+      let note = '';
+      if (id === 'fm:live:ment') {
+        const v = i.values[0];
+        if (!MENTALITIES[v]) return i.deferUpdate().catch(()=>{});
+        ctx.mentality = v;
+        note = `${MENTALITIES[v].emoji} Mentality → **${MENTALITIES[v].name}**`;
+      } else if (id === 'fm:live:instr') {
+        const [k, v] = String(i.values[0]).split('|');
+        if (!INSTRUCTIONS[k] || !INSTRUCTIONS[k].opts[v]) return i.deferUpdate().catch(()=>{});
+        ctx.instr[k] = v;
+        note = `${INSTRUCTIONS[k].emoji} ${INSTRUCTIONS[k].name} → **${INSTRUCTIONS[k].opts[v]}**\n_${INSTRUCTIONS[k].help}_`;
+      } else if (id.startsWith('fm:live:tog:')) {
+        const k = id.split(':')[3];
+        if (!TOGGLES[k]) return i.deferUpdate().catch(()=>{});
+        ctx.instr[k] = !ctx.instr[k];
+        note = `${TOGGLES[k].emoji} ${TOGGLES[k].name} → **${ctx.instr[k] ? 'ON' : 'OFF'}**\n_${TOGGLES[k].help}_`;
+      } else {
+        return i.deferUpdate().catch(()=>{});
+      }
+
+      if (!free) { ctx.changes++; ctx.settle = 2; }
+      const tail = free ? ' _(free at half time)_' : `\nThe side needs a moment to settle. Changes left this half: **${CHANGES_PER_HALF - ctx.changes}**`;
+      return i.reply({ content: note + tail, flags: 64 }).catch(()=>{});
+    } catch (e) { console.error('[fm] live control error:', e.message); }
   });
 
-  for (let t = 0; t < TICKS && !m.ended; t++) {
-    const { event, commentary } = advance(m);
-    m.lastEvent = event; m.lastCommentary = commentary;
-    if (m.tick === Math.floor(TICKS / 2)) m.lastEvent = { type: 'HT' };
+  const paint = async (live = true) => {
     try {
-      png = frame(matchFrameState(m));
+      const buf = frame(matchFrameState(m));
       await msg.edit({
-        embeds: [matchEmbed(m)],
-        files: [new AttachmentBuilder(png, { name: 'pitch.png' })],
+        embeds: [matchEmbed(m, live)],
+        files: [new AttachmentBuilder(buf, { name: 'pitch.png' })],
         attachments: [],
-        components: [shoutRow()],
+        components: liveRows(!live),
       });
     } catch (e) { /* a dropped frame is not worth killing the match over */ }
-    await sleep(TICK_MS);
+  };
+
+  for (let t = 0; t < TICKS && !m.ended; t++) {
+    const started = Date.now();
+    const { event, commentary } = advance(m);
+    m.lastEvent = event; m.lastCommentary = commentary;
+
+    if (m.tick === HT_TICK) {
+      m.lastEvent = { type: 'HT' };
+      m.lastCommentary = 'Half time. Both managers can change everything now — no limit for the next few seconds.';
+      m.htWindow = true;
+      m.home.changes = 0; m.away.changes = 0;
+      m.stam.H = clamp(m.stam.H + 8, 5, 100);
+      m.stam.A = clamp(m.stam.A + 8, 5, 100);
+      aiThink(m.home, m, 'H'); aiThink(m.away, m, 'A');
+      await paint();
+      await sleep(HT_PAUSE_MS);
+      m.htWindow = false;
+      m.lastEvent = { type: 'TALK' };
+      m.lastCommentary = 'Back under way.';
+      await paint();
+      continue;
+    }
+    if (m.tick % 8 === 0) { aiThink(m.home, m, 'H'); aiThink(m.away, m, 'A'); }
+
+    await paint();
+    await sleep(Math.max(0, TICK_MS - (Date.now() - started)));
   }
 
   // full time
   m.ended = true; m.minute = 90;
   m.lastEvent = { type: 'FT' };
   m.lastCommentary = m.hg === m.ag ? 'It ends level.' : `${(m.hg > m.ag ? m.home : m.away).club.name} take it.`;
-  try {
-    png = frame(matchFrameState(m));
-    await msg.edit({
-      embeds: [matchEmbed(m, false)],
-      files: [new AttachmentBuilder(png, { name: 'pitch.png' })],
-      attachments: [], components: [shoutRow(true)],
-    });
-  } catch { /* */ }
+  await paint(false);
   collector.stop();
   return m;
 }
@@ -540,21 +817,43 @@ async function runLiveMatch(channel, m, seatMap, db, gid, saveData) {
    ══════════════════════════════════════════════════════════════════════════ */
 const POS_EMOJI = { GK:'🧤', DEF:'🛡️', MID:'🎯', FWD:'⚡' };
 
+// per-user browsing state for the multi-step dropdowns
+const uiState = new Map();
+function getUI(uid) {
+  let s = uiState.get(uid);
+  if (!s) { s = { lg: null, mlg: null, clubId: null, pos: 'FWD' }; uiState.set(uid, s); }
+  return s;
+}
+const leagueOptions = (sel) => leagueList().map(l => ({
+  label: l.name, value: l.id, description: `${clubsInLeague(l.id).length} clubs`,
+  default: l.id === sel,
+}));
+
+function ownerState(f, uid, playerId) {
+  const owner = f.playerOwner[playerId];
+  if (!owner) return { state: 'free', owner: null };
+  if (owner === uid) return { state: 'mine', owner };
+  const om = f.managers[owner];
+  const held = om && (om.squad || []).find(q => q.playerId === playerId);
+  return { state: held && isProtected(held) ? 'locked' : 'buyable', owner };
+}
+const STATE_ICON = { free:'⚪', mine:'🟢', locked:'🔒', buyable:'🔓' };
+
 function homeView(db, gid, uid, getDinar) {
-  const f = fState(db, gid);
   const mgr = getManager(db, gid, uid);
   ensureSquad(mgr);
   const club = mgr.clubId ? clubById(mgr.clubId) : null;
   const bal = getDinar(db, gid, uid);
   const rating = squadRating(mgr.squad);
   const realCount = mgr.squad.filter(p => p.real).length;
+  const men = MENTALITIES[mgr.mentality] || MENTALITIES.balanced;
 
   const e = new EmbedBuilder()
     .setColor(club ? parseInt(club.c[0].slice(1), 16) : 0x22c55e)
     .setTitle('⚽ Football Manager')
     .setDescription(club
-      ? `**${club.name}** · ${club.city}\n_${MENTALITIES[mgr.mentality].emoji} ${MENTALITIES[mgr.mentality].name} · ${mgr.formation}_`
-      : '_You have no club yet. Buy one to get its permanent captain and start your career._')
+      ? `**${club.name}** · ${club.city} · _${LEAGUES[club.league].name}_\n${men.emoji} ${men.name} · ${mgr.formation}\n\`${styleLine(mgr)}\``
+      : '_You have no club yet. Buy one to get its captain and start your career._')
     .addFields(
       { name: '💰 Your Dinar', value: money(bal), inline: true },
       { name: '⭐ Squad rating', value: `**${rating.toFixed(1)}**`, inline: true },
@@ -563,7 +862,7 @@ function homeView(db, gid, uid, getDinar) {
       { name: '🔥 Morale', value: `${Math.round(mgr.morale)}%`, inline: true },
       { name: '🤝 Cohesion', value: `${Math.round(mgr.cohesion)}%`, inline: true },
     )
-    .setFooter({ text: 'Retainers protect your club and players from being bought out.' });
+    .setFooter({ text: `${CLUBS.length} clubs across ${leagueList().length} leagues · retainers protect what you own.` });
 
   const rows = [
     new ActionRowBuilder().addComponents(
@@ -582,19 +881,19 @@ function homeView(db, gid, uid, getDinar) {
 function squadView(db, gid, uid) {
   const mgr = getManager(db, gid, uid);
   ensureSquad(mgr);
-  const form = FORMATIONS[mgr.formation];
+  const form = FORMATIONS[mgr.formation] || FORMATIONS['4-3-3'];
   const club = mgr.clubId ? clubById(mgr.clubId) : null;
   const lines = mgr.squad.map((p, i) => {
     const slot = form.slots[i] || { p: p.pos };
-    const cap = club && p.captain ? ' 👑' : '';
-    const prot = p.real ? (isProtected(p) ? `🛡️${Math.ceil(daysLeft(p))}d` : '⚠️ exposed') : '';
+    const cap = p.captain ? ' 👑' : '';
+    const prot = p.real && !p.captain ? (isProtected(p) ? `🛡️${Math.ceil(daysLeft(p))}d` : '⚠️ exposed') : '';
     const tag = p.real ? `**${p.rating}**` : `${p.rating}`;
     return `\`${String(p.num).padStart(2)}\` ${POS_EMOJI[slot.p]} ${p.real ? '**' + p.name + '**' : p.name}${cap} · ${tag} ${prot}`;
   });
   const e = new EmbedBuilder().setColor(club ? parseInt(club.c[0].slice(1), 16) : 0x64748b)
     .setTitle(`👥 ${club ? club.name : 'Your Squad'} — ${mgr.formation}`)
     .setDescription(lines.join('\n'))
-    .setFooter({ text: 'Bold = real signing · plain = free academy player · 👑 = club captain' });
+    .setFooter({ text: 'Bold = real signing · plain = free academy player · 👑 = club captain (never sellable)' });
   return {
     embeds: [e],
     components: [new ActionRowBuilder().addComponents(
@@ -605,64 +904,126 @@ function squadView(db, gid, uid) {
   };
 }
 
+/* ── clubs: league dropdown, then a club dropdown ───────────────────────── */
 function clubsView(db, gid, uid, getDinar) {
   const f = fState(db, gid);
   const mgr = getManager(db, gid, uid);
-  const bal = getDinar(db, gid, uid);
-  const lines = CLUBS.map(c => {
+  const st = getUI(uid);
+  const myClub = mgr.clubId ? clubById(mgr.clubId) : null;
+  const lg = LEAGUES[st.lg] ? st.lg : (myClub ? myClub.league : 'ly');
+  st.lg = lg;
+
+  const list = clubsInLeague(lg).slice().sort((a, b) => a.price - b.price);
+  const lines = list.map(c => {
     const owner = f.clubOwner[c.id];
     if (owner === uid) return `🟢 **${c.name}** — yours`;
     if (owner) {
       const om = f.managers[owner];
-      const asset = om && om.clubAsset;
-      const prot = asset && isProtected(asset);
-      return prot
-        ? `🔒 **${c.name}** — <@${owner}> · protected`
-        : `🔓 **${c.name}** — <@${owner}> · **buyable ${money(c.price)}**`;
+      const prot = om && om.clubAsset && isProtected(om.clubAsset);
+      return prot ? `🔒 **${c.name}** — <@${owner}> · protected`
+                  : `🔓 **${c.name}** — <@${owner}> · **buyable ${money(c.price)}**`;
     }
-    return `⚪ **${c.name}** — ${money(c.price)} · cap. ${c.cap.name} (${c.cap.rating})`;
+    return `⚪ **${c.name}** — ${money(c.price)} · 👑 ${c.cap.name} (${c.cap.rating})`;
   });
-  const e = new EmbedBuilder().setColor(0x16a34a).setTitle('🏟️ Clubs')
-    .setDescription(lines.join('\n'))
-    .addFields({ name: 'Your Dinar', value: money(bal), inline: true },
-               { name: 'Rule', value: 'One club each. The captain stays with the club forever.', inline: true });
-  const opts = CLUBS.filter(c => f.clubOwner[c.id] !== uid).slice(0, 25).map(c => ({
-    label: `${c.name} — ${c.price} Dinar`, value: c.id,
-    description: `${c.city} · captain ${c.cap.name} (${c.cap.rating})`.slice(0, 100),
-  }));
-  const rows = [];
-  if (opts.length) rows.push(new ActionRowBuilder().addComponents(
-    new StringSelectMenuBuilder().setCustomId('fm:buyclub').setPlaceholder('Buy a club…').addOptions(opts)));
+
+  const e = new EmbedBuilder().setColor(0x16a34a)
+    .setTitle(`🏟️ ${LEAGUES[lg].name}`)
+    .setDescription(lines.join('\n').slice(0, 4000))
+    .addFields(
+      { name: 'Your Dinar', value: money(getDinar(db, gid, uid)), inline: true },
+      { name: 'Rule', value: 'One club each. The captain comes with the club and stays forever.', inline: true });
+
+  const buyable = list.filter(c => f.clubOwner[c.id] !== uid).slice(0, 25);
+  const rows = [
+    new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('fm:clubs:lg')
+      .setPlaceholder('Choose a league…').addOptions(leagueOptions(lg))),
+  ];
+  if (buyable.length) rows.push(new ActionRowBuilder().addComponents(
+    new StringSelectMenuBuilder().setCustomId('fm:buyclub').setPlaceholder('Buy a club…')
+      .addOptions(buyable.map(c => ({
+        label: `${c.name} — ${c.price.toLocaleString('en-US')} Dinar`.slice(0, 100), value: c.id,
+        description: `${c.city} · captain ${c.cap.name} (${c.cap.rating})`.slice(0, 100),
+      })))));
   rows.push(new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('fm:home').setLabel('Back').setStyle(ButtonStyle.Secondary)));
   return { embeds: [e], components: rows, files: [], attachments: [] };
 }
 
-function marketView(db, gid, uid, getDinar, pos = 'FWD') {
+/* ── market: league → club → player ─────────────────────────────────────── */
+function marketView(db, gid, uid, getDinar) {
   const f = fState(db, gid);
-  const bal = getDinar(db, gid, uid);
-  const avail = REAL_PLAYERS.filter(p => p.pos === pos).map(p => {
-    const owner = f.playerOwner[p.id];
-    let state = 'free';
-    if (owner === uid) state = 'mine';
-    else if (owner) {
-      const om = f.managers[owner];
-      const held = om && (om.squad || []).find(q => q.playerId === p.id);
-      state = held && isProtected(held) ? 'locked' : 'buyable';
-    }
-    return { ...p, price: playerPrice(p.rating), owner, state };
-  }).sort((a, b) => b.rating - a.rating);
+  const mgr = getManager(db, gid, uid);
+  const st = getUI(uid);
+  const myClub = mgr.clubId ? clubById(mgr.clubId) : null;
+  const lg = LEAGUES[st.mlg] ? st.mlg : (myClub ? myClub.league : 'epl');
+  st.mlg = lg; st.route = 'club';
+  let club = st.clubId ? clubById(st.clubId) : null;
+  if (club && club.league !== lg) { club = null; st.clubId = null; }
 
-  const show = avail.slice(0, 20).map(p => {
-    const icon = p.state === 'mine' ? '🟢' : p.state === 'locked' ? '🔒' : p.state === 'buyable' ? '🔓' : '⚪';
-    const who = p.owner ? ` · <@${p.owner}>` : '';
-    return `${icon} **${p.name}** \`${p.rating}\` — ${money(p.price)}${who}`;
-  });
-  const e = new EmbedBuilder().setColor(0x0ea5e9).setTitle(`💸 Transfer Market — ${POS_EMOJI[pos]} ${pos}`)
-    .setDescription(show.join('\n') || '_None._')
-    .addFields({ name: 'Your Dinar', value: money(bal), inline: true },
+  const e = new EmbedBuilder().setColor(0x0ea5e9)
+    .addFields({ name: 'Your Dinar', value: money(getDinar(db, gid, uid)), inline: true },
                { name: 'Key', value: '⚪ free · 🔒 protected · 🔓 buyable now · 🟢 yours', inline: true })
     .setFooter({ text: 'A player with no retainer left can be bought instantly by anyone.' });
+
+  let squad = [];
+  if (!club) {
+    e.setTitle(`💸 Transfer Market — ${LEAGUES[lg].name}`)
+     .setDescription('Pick a club below to see its players.\n\n' +
+       clubsInLeague(lg).slice().sort((a,b)=>b.price-a.price)
+         .map(c => `• **${c.name}** — ${c.squad.length} players`).join('\n').slice(0, 3500));
+  } else {
+    squad = squadOf(club.id).map(p => {
+      const os = ownerState(f, uid, p.id);
+      return { ...p, price: playerPrice(p.rating), ...os };
+    });
+    e.setTitle(`💸 ${club.name}`)
+     .setDescription(
+       `👑 Captain **${club.cap.name}** (${club.cap.rating}) — only available by buying the club (${money(club.price)}).\n\n` +
+       squad.map(p => `${STATE_ICON[p.state]} ${POS_EMOJI[p.pos]} **${p.name}** \`${p.rating}\` — ${money(p.price)}${p.owner ? ` · <@${p.owner}>` : ''}`)
+         .join('\n').slice(0, 3500));
+  }
+
+  const rows = [
+    new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('fm:mkt:lg')
+      .setPlaceholder('1️⃣ League…').addOptions(leagueOptions(lg))),
+    new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('fm:mkt:club')
+      .setPlaceholder('2️⃣ Club…').addOptions(clubsInLeague(lg).slice(0, 25).map(c => ({
+        label: c.name.slice(0, 100), value: c.id,
+        description: `${c.squad.length} players · captain ${c.cap.name}`.slice(0, 100),
+        default: club ? c.id === club.id : false,
+      })))),
+  ];
+  const buyable = squad.filter(p => p.state === 'free' || p.state === 'buyable').slice(0, 25);
+  if (buyable.length) rows.push(new ActionRowBuilder().addComponents(
+    new StringSelectMenuBuilder().setCustomId('fm:buy').setPlaceholder('3️⃣ Sign a player…')
+      .addOptions(buyable.map(p => ({
+        label: `${p.name} — ${p.price.toLocaleString('en-US')} Dinar`.slice(0, 100), value: p.id,
+        description: `${p.pos} · rating ${p.rating}${p.owner ? ' · buying from another manager' : ''}`.slice(0, 100),
+      })))));
+  rows.push(new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('fm:mktpos').setLabel('Browse by position').setEmoji('🔎').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('fm:home').setLabel('Back').setStyle(ButtonStyle.Secondary)));
+  return { embeds: [e], components: rows, files: [], attachments: [] };
+}
+
+/* ── market: the old position-filtered browse, kept as a second route ───── */
+function posMarketView(db, gid, uid, getDinar, pos) {
+  const f = fState(db, gid);
+  const st = getUI(uid);
+  pos = pos || st.pos || 'FWD';
+  st.pos = pos; st.route = 'pos';
+  const avail = PLAYERS.filter(p => p.pos === pos && !p.captain)
+    .map(p => ({ ...p, price: playerPrice(p.rating), ...ownerState(f, uid, p.id) }))
+    .sort((a, b) => b.rating - a.rating);
+
+  const show = avail.slice(0, 20).map(p => {
+    const c = clubById(p.clubId);
+    return `${STATE_ICON[p.state]} **${p.name}** \`${p.rating}\` — ${money(p.price)} · _${c ? c.short : ''}_${p.owner ? ` · <@${p.owner}>` : ''}`;
+  });
+  const e = new EmbedBuilder().setColor(0x0ea5e9).setTitle(`🔎 Best available — ${POS_EMOJI[pos]} ${pos}`)
+    .setDescription(show.join('\n') || '_None._')
+    .addFields({ name: 'Your Dinar', value: money(getDinar(db, gid, uid)), inline: true },
+               { name: 'Key', value: '⚪ free · 🔒 protected · 🔓 buyable now · 🟢 yours', inline: true });
 
   const buyable = avail.filter(p => p.state === 'free' || p.state === 'buyable').slice(0, 25);
   const rows = [
@@ -671,54 +1032,86 @@ function marketView(db, gid, uid, getDinar, pos = 'FWD') {
       .addOptions(['GK','DEF','MID','FWD'].map(p => ({ label: p, value: p, emoji: POS_EMOJI[p], default: p === pos })))),
   ];
   if (buyable.length) rows.push(new ActionRowBuilder().addComponents(
-    new StringSelectMenuBuilder().setCustomId(`fm:buy:${pos}`).setPlaceholder('Sign a player…')
-      .addOptions(buyable.map(p => ({ label: `${p.name} — ${p.price} Dinar`, value: p.id,
-        description: `Rating ${p.rating}${p.owner ? ' · buying from another manager' : ''}`.slice(0,100) })))));
+    new StringSelectMenuBuilder().setCustomId('fm:buy').setPlaceholder('Sign a player…')
+      .addOptions(buyable.map(p => ({
+        label: `${p.name} — ${p.price.toLocaleString('en-US')} Dinar`.slice(0, 100), value: p.id,
+        description: `${clubById(p.clubId) ? clubById(p.clubId).short : ''} · rating ${p.rating}`.slice(0, 100),
+      })))));
   rows.push(new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('fm:market').setLabel('Browse by club').setEmoji('🏟️').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('fm:home').setLabel('Back').setStyle(ButtonStyle.Secondary)));
   return { embeds: [e], components: rows, files: [], attachments: [] };
 }
 
+/* ── tactics ───────────────────────────────────────────────────────────────
+   NOTE: a Discord select with max_values = 1 accepts exactly ONE option
+   flagged `default`. The old single "instructions" menu flagged four, which
+   is what threw COMPONENT_TOO_MANY_DEFAULT_VALUES and made this button look
+   dead. Each dial now gets its own menu on its own screen.                 */
 function tacticsView(db, gid, uid) {
   const mgr = getManager(db, gid, uid);
-  const men = MENTALITIES[mgr.mentality];
+  ensureSquad(mgr);
+  const men = MENTALITIES[mgr.mentality] || MENTALITIES.balanced;
   const e = new EmbedBuilder().setColor(0x8b5cf6).setTitle('🧠 Tactics')
+    .setDescription(`${men.emoji} **${men.name}** · ${mgr.formation}\n\`${styleLine(mgr)}\``)
     .addFields(
-      { name: 'Formation', value: `**${mgr.formation}**`, inline: true },
-      { name: 'Mentality', value: `${men.emoji} **${men.name}**`, inline: true },
       { name: 'Shape', value: `${lineRating(mgr.squad, mgr.formation,'DEF').toFixed(0)} DEF · ${lineRating(mgr.squad, mgr.formation,'MID').toFixed(0)} MID · ${lineRating(mgr.squad, mgr.formation,'FWD').toFixed(0)} FWD`, inline: true },
-      { name: 'Instructions', value: Object.entries(INSTRUCTIONS)
-          .map(([k, v]) => `**${v.name}:** ${v.opts[mgr.instr[k]]}`).join('\n'), inline: false },
+      { name: 'Defensive line', value: `${Math.round(planOf(mgr).line)}%`, inline: true },
+      { name: 'What mentality does', value:
+          'Defensive → Cautious → Balanced → Positive → Attacking raises your line, your press, your tempo and how far you commit forward. Everything else sits on top of it.', inline: false },
     )
-    .setFooter({ text: 'Mentality shifts your whole shape up or down the pitch during a match.' });
+    .setFooter({ text: 'You can change all of this again mid-match, and free at half time.' });
   return {
     embeds: [e],
     components: [
       new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('fm:form')
-        .setPlaceholder('Formation…').addOptions(FORMATION_KEYS.map(k => ({ label: k, value: k, default: k === mgr.formation })))),
+        .setPlaceholder('Formation…')
+        .addOptions(FORMATION_KEYS.map(k => ({ label: k, value: k, default: k === mgr.formation })))),
       new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('fm:ment')
-        .setPlaceholder('Mentality…').addOptions(Object.entries(MENTALITIES).map(([k, v]) =>
-          ({ label: v.name, value: k, emoji: v.emoji, default: k === mgr.mentality })))),
-      new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('fm:instr')
-        .setPlaceholder('Team instruction…').addOptions(
-          Object.entries(INSTRUCTIONS).flatMap(([k, v]) => Object.entries(v.opts).map(([ok, ol]) =>
-            ({ label: `${v.name}: ${ol}`, value: `${k}|${ok}`, default: mgr.instr[k] === ok }))).slice(0, 25))),
+        .setPlaceholder('Mentality…')
+        .addOptions(MENTALITY_KEYS.map(k => ({
+          label: MENTALITIES[k].name, value: k, emoji: MENTALITIES[k].emoji,
+          default: k === mgr.mentality })))),
       new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('fm:instrview').setLabel('Team Instructions').setEmoji('⚙️').setStyle(ButtonStyle.Primary),
         new ButtonBuilder().setCustomId('fm:home').setLabel('Back').setStyle(ButtonStyle.Secondary)),
     ], files: [], attachments: [],
   };
 }
 
+function instructionsView(db, gid, uid) {
+  const mgr = getManager(db, gid, uid);
+  const I = mgr.instr;
+  const e = new EmbedBuilder().setColor(0x8b5cf6).setTitle('⚙️ Team Instructions')
+    .setDescription(`\`${styleLine(mgr)}\``)
+    .addFields(Object.entries(INSTRUCTIONS).map(([k, v]) => ({
+      name: `${v.emoji} ${v.name}: ${v.opts[I[k]]}`, value: v.help, inline: false })))
+    .addFields({ name: `${TOGGLES.offside.emoji} Offside Trap: ${I.offside ? 'ON' : 'OFF'} · ${TOGGLES.timeWaste.emoji} Time-Wasting: ${I.timeWaste ? 'ON' : 'OFF'}`,
+      value: `${TOGGLES.offside.help}\n${TOGGLES.timeWaste.help}`, inline: false });
+
+  const rows = Object.entries(INSTRUCTIONS).map(([k, v]) =>
+    new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId(`fm:instr:${k}`)
+      .setPlaceholder(`${v.name}…`)
+      .addOptions(Object.entries(v.opts).map(([ok, ol]) => ({
+        label: `${v.name}: ${ol}`, value: ok, default: I[k] === ok })))));
+  rows.push(new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('fm:tog:offside').setLabel(`Offside Trap: ${I.offside ? 'ON' : 'OFF'}`)
+      .setEmoji('🚩').setStyle(I.offside ? ButtonStyle.Success : ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('fm:tog:timeWaste').setLabel(`Time-Wasting: ${I.timeWaste ? 'ON' : 'OFF'}`)
+      .setEmoji('🐢').setStyle(I.timeWaste ? ButtonStyle.Success : ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('fm:tactics').setLabel('Back').setStyle(ButtonStyle.Secondary)));
+  return { embeds: [e], components: rows, files: [], attachments: [] };
+}
+
 function retainersView(db, gid, uid, getDinar) {
   const mgr = getManager(db, gid, uid);
   const club = mgr.clubId ? clubById(mgr.clubId) : null;
-  const rows = [];
-  const lines = [];
+  const rows = [], lines = [];
   if (club && mgr.clubAsset) {
     const d = daysLeft(mgr.clubAsset);
     lines.push(`🏟️ **${club.name}** — ${retainerNow(mgr.clubAsset).toFixed(0)} left · ${d > 0 ? `**${d.toFixed(1)} days**` : '**EXPOSED**'}`);
   }
-  for (const p of mgr.squad.filter(x => x.real)) {
+  for (const p of (mgr.squad || []).filter(x => x.real && !x.captain)) {
     const d = daysLeft(p);
     lines.push(`${POS_EMOJI[p.pos]} **${p.name}** — ${retainerNow(p).toFixed(0)} left · ${d > 0 ? `${d.toFixed(1)}d` : '**EXPOSED**'}`);
   }
@@ -728,8 +1121,9 @@ function retainersView(db, gid, uid, getDinar) {
       'A funded retainer makes an asset **unbuyable**. At zero you keep it — but anyone can buy it from you instantly, with no warning. Top up before a break.' })
     .setFooter({ text: `Your Dinar: ${Math.round(getDinar(db, gid, uid))}` });
   const opts = [];
-  if (club && mgr.clubAsset) opts.push({ label: `${club.name} (club)`, value: 'club' });
-  mgr.squad.filter(x => x.real).slice(0, 24).forEach(p => opts.push({ label: p.name, value: `p|${p.uid}` }));
+  if (club && mgr.clubAsset) opts.push({ label: `${club.name} (club)`.slice(0, 100), value: 'club' });
+  (mgr.squad || []).filter(x => x.real && !x.captain).slice(0, 24)
+    .forEach(p => opts.push({ label: p.name.slice(0, 100), value: `p|${p.uid}` }));
   if (opts.length) rows.push(new ActionRowBuilder().addComponents(
     new StringSelectMenuBuilder().setCustomId('fm:topup').setPlaceholder('Top up an asset (+50 Dinar)…').addOptions(opts)));
   rows.push(new ActionRowBuilder().addComponents(
@@ -748,9 +1142,11 @@ function tableView(db, gid) {
     const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `\`${String(i + 1).padStart(2)}\``;
     return `${medal} **${c ? c.short : '???'}** <@${r.uid}> — **${r.pts}** pts · ${r.m.w}-${r.m.d}-${r.m.l} · GD ${r.gd >= 0 ? '+' : ''}${r.gd}`;
   });
+  const recent = (f.results || []).slice(0, 5).map(r => `${r.h} ${r.hg}–${r.ag} ${r.a}`).join(' · ');
   const e = new EmbedBuilder().setColor(0xfbbf24).setTitle('🏆 League Table')
     .setDescription(lines.join('\n') || '_No managers with clubs yet._')
     .setFooter({ text: 'Win 3 pts · Draw 1 pt' });
+  if (recent) e.addFields({ name: 'Recent results', value: recent });
   return { embeds: [e], components: [new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('fm:home').setLabel('Back').setStyle(ButtonStyle.Secondary))], files: [], attachments: [] };
 }
@@ -768,13 +1164,27 @@ function slotFor(mgr, pos) {
     mgr.squad.forEach((p, i) => { if (!p.captain && p.rating < wr) { wr = p.rating; worst = i; } });
     idx = worst;
   }
-  return idx;
+  return idx < 0 ? 0 : idx;
+}
+
+/* Take a player off whoever currently holds him, leaving a placeholder. */
+function stripPlayerFrom(f, ownerUid, playerId) {
+  const om = f.managers[ownerUid];
+  if (!om || !Array.isArray(om.squad)) return;
+  const i = om.squad.findIndex(q => q.playerId === playerId);
+  if (i === -1) return;
+  const form = FORMATIONS[om.formation] || FORMATIONS['4-3-3'];
+  om.squad[i] = makePlaceholder(form.slots[i] || { p: om.squad[i].pos || 'MID' }, om.squad[i].num);
 }
 
 function doBuyPlayer(db, gid, uid, playerId, api) {
   const f = fState(db, gid);
-  const rp = realById(playerId);
+  const rp = playerById(playerId);
   if (!rp) return { ok: false, msg: 'That player does not exist.' };
+  if (rp.captain) {
+    const c = clubById(rp.clubId);
+    return { ok: false, msg: `**${rp.name}** is ${c ? c.name : 'his club'}'s captain — he only moves if you buy the club itself (${money(c ? c.price : 0)}).` };
+  }
   const mgr = getManager(db, gid, uid); ensureSquad(mgr);
   if (mgr.squad.some(p => p.playerId === playerId)) return { ok: false, msg: 'You already have him.' };
 
@@ -786,17 +1196,12 @@ function doBuyPlayer(db, gid, uid, playerId, api) {
     const held = om && (om.squad || []).find(q => q.playerId === playerId);
     if (held && isProtected(held)) return { ok: false, msg: `**${rp.name}** is protected by a retainer — you cannot buy him right now.` };
   }
-  if (api.getDinar(db, gid, uid) < price) return { ok: false, msg: `You need ${money(price)} — you have ${money(api.getDinar(db, gid, uid))}.` };
+  if (api.getDinar(db, gid, uid) < price)
+    return { ok: false, msg: `You need ${money(price)} — you have ${money(api.getDinar(db, gid, uid))}.` };
   if (!api.spendDinar(db, gid, uid, price, api.saveData)) return { ok: false, msg: 'Payment failed.' };
 
-  // strip from the old owner and pay them
   if (owner && f.managers[owner]) {
-    const om = f.managers[owner];
-    const i = (om.squad || []).findIndex(q => q.playerId === playerId);
-    if (i !== -1) {
-      const form = FORMATIONS[om.formation] || FORMATIONS['4-3-3'];
-      om.squad[i] = makePlaceholder(form.slots[i] || { p: rp.pos }, om.squad[i].num);
-    }
+    stripPlayerFrom(f, owner, playerId);
     api.awardDinar(db, gid, owner, price, api.saveData, 'football-sale');
   }
 
@@ -811,7 +1216,10 @@ function doBuyPlayer(db, gid, uid, playerId, api) {
   f.playerOwner[playerId] = uid;
   mgr.cohesion = clamp(mgr.cohesion - 4, 0, 100);   // a new face unsettles the side
   api.saveData(gid);
-  return { ok: true, msg: `✅ Signed **${rp.name}** (${rp.rating}) for ${money(price)}.${owner ? ` Bought out from <@${owner}>.` : ''}\n🛡️ Retainer started: **${startRetainer(price)}** (~${(startRetainer(price)/dailyDrain(price)).toFixed(0)} days).`, price };
+  const club = clubById(rp.clubId);
+  return { ok: true, price, msg:
+    `✅ Signed **${rp.name}** (${rp.pos} ${rp.rating})${club ? ` from **${club.name}**` : ''} for ${money(price)}.` +
+    `${owner ? ` Bought out from <@${owner}>.` : ''}\n🛡️ Retainer started: **${startRetainer(price)}** (~${(startRetainer(price)/dailyDrain(price)).toFixed(0)} days).` };
 }
 
 function doBuyClub(db, gid, uid, clubId, api) {
@@ -832,10 +1240,10 @@ function doBuyClub(db, gid, uid, clubId, api) {
     return { ok: false, msg: `You need ${money(club.price)} — you have ${money(api.getDinar(db, gid, uid))}.` };
   if (!api.spendDinar(db, gid, uid, club.price, api.saveData)) return { ok: false, msg: 'Payment failed.' };
 
+  const capId = club.captainId;
   if (owner && f.managers[owner]) {
     const om = f.managers[owner];
     om.clubId = null; om.clubAsset = null;
-    // the captain goes with the club, so strip him from the old squad
     const ci = (om.squad || []).findIndex(p => p.captain);
     if (ci !== -1) {
       const form = FORMATIONS[om.formation] || FORMATIONS['4-3-3'];
@@ -843,43 +1251,70 @@ function doBuyClub(db, gid, uid, clubId, api) {
     }
     api.awardDinar(db, gid, owner, club.price, api.saveData, 'football-clubsale');
   }
+  // if anyone somehow holds the captain as a normal signing, he goes with the club
+  if (capId && f.playerOwner[capId] && f.playerOwner[capId] !== uid) {
+    stripPlayerFrom(f, f.playerOwner[capId], capId);
+  }
 
   mgr.clubId = clubId;
   f.clubOwner[clubId] = uid;
   mgr.clubAsset = {};
   setRetainer(mgr.clubAsset, startRetainer(club.price), club.price);
 
-  // the captain arrives with the club and can never be sold
   const cap = {
     uid: `cap-${clubId}`, name: club.cap.name, pos: club.cap.pos, rating: club.cap.rating,
-    real: true, captain: true, num: 10, price: 0,
+    real: true, captain: true, playerId: capId, num: 10, price: 0,
   };
   const idx = slotFor(mgr, cap.pos);
   cap.num = mgr.squad[idx] ? mgr.squad[idx].num : idx + 1;
   mgr.squad[idx] = cap;
+  if (capId) f.playerOwner[capId] = uid;
   api.saveData(gid);
-  return { ok: true, msg: `🏟️ You are now the manager of **${club.name}**!\n👑 Club captain **${cap.name}** (${cap.rating}) joins permanently — he can never be sold.\n🛡️ Retainer started: **${startRetainer(club.price)}**.` };
+  return { ok: true, msg:
+    `🏟️ You are now the manager of **${club.name}** (${LEAGUES[club.league].name})!\n` +
+    `👑 Club captain **${cap.name}** (${cap.rating}) joins permanently — he can never be sold.\n` +
+    `🛡️ Retainer started: **${startRetainer(club.price)}** (~${(startRetainer(club.price)/dailyDrain(club.price)).toFixed(0)} days).` };
 }
 
-/* AI opponent built from a club's tier so a solo match still feels fair */
+/* ── contexts ──────────────────────────────────────────────────────────── */
+function bestXI(club, formation) {
+  const form = FORMATIONS[formation] || FORMATIONS['4-3-3'];
+  const pool = club.squad.slice().sort((a, b) => b.rating - a.rating);
+  const used = new Set();
+  return form.slots.map((s, i) => {
+    let p = pool.find(q => !used.has(q.id) && q.pos === s.p) || pool.find(q => !used.has(q.id));
+    if (p) used.add(p.id);
+    return p
+      ? { uid: `ai-${p.id}`, name: p.name, pos: p.pos, rating: p.rating, real: true, num: i + 1, captain: !!p.captain }
+      : { uid: `ai${i}`, name: genName(), pos: s.p, rating: 58, real: false, num: i + 1 };
+  });
+}
+
+/* AI opponent — a real club with its real squad, roughly matched on value. */
+function pickAIOpponent(f, myClub) {
+  const free = CLUBS.filter(c => !f.clubOwner[c.id] && (!myClub || c.id !== myClub.id));
+  const pool = free.length ? free : CLUBS.filter(c => !myClub || c.id !== myClub.id);
+  if (!myClub) return pick(pool);
+  const near = pool.filter(c => c.price >= myClub.price * 0.55 && c.price <= myClub.price * 1.7);
+  return pick(near.length ? near : pool);
+}
 function makeAIContext(club) {
-  const base = [88, 80, 72, 65][club.tier - 1] || 70;
-  const form = FORMATIONS['4-3-3'];
-  const squad = form.slots.map((s, i) => ({
-    uid: `ai${i}`, name: genName(), pos: s.p,
-    rating: clamp(Math.round(base + (Math.random() * 10 - 5)), 45, 92),
-    real: false, num: i + 1,
-  }));
-  const ci = squad.findIndex(p => p.pos === club.cap.pos);
-  if (ci !== -1) squad[ci] = { ...squad[ci], name: club.cap.name, rating: club.cap.rating, captain: true };
-  return { club, squad, formation: '4-3-3', mentality: 'balanced',
-    instr: { press:'mid', tempo:'normal', width:'normal', pass:'mixed' },
-    morale: 65, cohesion: 60, ai: true };
+  const formation = pick(FORMATION_KEYS);
+  return {
+    club, squad: bestXI(club, formation), formation,
+    mentality: 'balanced', instr: DEFAULT_INSTR(),
+    morale: 65, cohesion: 60, ai: true, changes: 0, settle: 0,
+  };
 }
 function ctxFor(db, gid, uid) {
   const mgr = getManager(db, gid, uid); ensureSquad(mgr);
-  return { club: clubById(mgr.clubId), squad: mgr.squad, formation: mgr.formation,
-    mentality: mgr.mentality, instr: mgr.instr, morale: mgr.morale, cohesion: mgr.cohesion, uid };
+  // instructions are COPIED: mid-match tinkering does not rewrite the plan
+  // the manager saved on the Tactics screen.
+  return {
+    club: clubById(mgr.clubId), squad: mgr.squad, formation: mgr.formation,
+    mentality: mgr.mentality, instr: Object.assign({}, mgr.instr),
+    morale: mgr.morale, cohesion: mgr.cohesion, uid, changes: 0, settle: 0,
+  };
 }
 function recordResult(db, gid, m, api) {
   const f = fState(db, gid);
@@ -912,18 +1347,31 @@ function getFootballCommands() {
   ];
 }
 
+const CHALLENGE_MS = 120000;
+const openChallenges = new Map();    // challenge message id -> { from, to, gid, at }
+
 function initFootball({ client, db, saveData, getDinar, spendDinar, awardDinar }) {
   const api = { getDinar, spendDinar, awardDinar, saveData };
   const liveMatches = new Set();      // guild ids with a match running
-  const posState = new Map();         // uid -> market position filter
 
   const wrongChannel = (interaction) => {
     const f = fState(db, interaction.guildId);
-    if (f.channelId && interaction.channelId !== f.channelId) {
+    if (f.channelId && interaction.channelId !== f.channelId)
       return `⚽ Football Manager lives in <#${f.channelId}> — head over there.`;
-    }
     return null;
   };
+
+  async function startMatch(channel, gid, home, away, seat) {
+    liveMatches.add(gid);
+    const m = newMatch(home, away);
+    try {
+      await runLiveMatch(channel, m, seat, db, gid, saveData);
+      recordResult(db, gid, m, api);
+      await channel.send({ content: `🏁 **${m.home.club.name} ${m.hg} – ${m.ag} ${m.away.club.name}**` }).catch(()=>{});
+    } catch (e) {
+      console.error('[fm] match failed:', e.message, (e.stack || '').split('\n')[1]);
+    } finally { liveMatches.delete(gid); }
+  }
 
   client.on('interactionCreate', async (interaction) => {
     try {
@@ -945,39 +1393,59 @@ function initFootball({ client, db, saveData, getDinar, spendDinar, awardDinar }
 
       const id = interaction.customId || '';
       if (!id.startsWith('fm:')) return;
-      if (id.startsWith('fm:shout:')) return;           // handled by the match collector
+      if (id.startsWith('fm:live:')) return;           // owned by the match collector
 
       const w = wrongChannel(interaction);
       if (w) return interaction.reply({ content: w, flags: 64 });
+      const st = getUI(uid);
 
       // ── navigation ──
       const nav = {
         'fm:home':      () => homeView(db, gid, uid, getDinar),
         'fm:squad':     () => squadView(db, gid, uid),
         'fm:clubs':     () => clubsView(db, gid, uid, getDinar),
-        'fm:market':    () => marketView(db, gid, uid, getDinar, posState.get(uid) || 'FWD'),
+        'fm:market':    () => marketView(db, gid, uid, getDinar),
+        'fm:mktpos':    () => posMarketView(db, gid, uid, getDinar, st.pos),
         'fm:tactics':   () => tacticsView(db, gid, uid),
+        'fm:instrview': () => instructionsView(db, gid, uid),
         'fm:retainers': () => retainersView(db, gid, uid, getDinar),
         'fm:table':     () => tableView(db, gid),
       };
       if (interaction.isButton() && nav[id]) return interaction.update(nav[id]());
 
-      // ── buy a club ──
+      // ── clubs ──
+      if (interaction.isStringSelectMenu() && id === 'fm:clubs:lg') {
+        st.lg = interaction.values[0];
+        return interaction.update(clubsView(db, gid, uid, getDinar));
+      }
       if (interaction.isStringSelectMenu() && id === 'fm:buyclub') {
         const r = doBuyClub(db, gid, uid, interaction.values[0], api);
         await interaction.update(clubsView(db, gid, uid, getDinar));
         return interaction.followUp({ content: r.msg, flags: 64 });
       }
-      // ── market ──
-      if (interaction.isStringSelectMenu() && id === 'fm:pos') {
-        posState.set(uid, interaction.values[0]);
-        return interaction.update(marketView(db, gid, uid, getDinar, interaction.values[0]));
+
+      // ── market: league → club → player ──
+      if (interaction.isStringSelectMenu() && id === 'fm:mkt:lg') {
+        st.mlg = interaction.values[0]; st.clubId = null;
+        return interaction.update(marketView(db, gid, uid, getDinar));
       }
-      if (interaction.isStringSelectMenu() && id.startsWith('fm:buy:')) {
+      if (interaction.isStringSelectMenu() && id === 'fm:mkt:club') {
+        st.clubId = interaction.values[0];
+        return interaction.update(marketView(db, gid, uid, getDinar));
+      }
+      if (interaction.isStringSelectMenu() && id === 'fm:pos') {
+        st.pos = interaction.values[0]; st.route = 'pos';
+        return interaction.update(posMarketView(db, gid, uid, getDinar, st.pos));
+      }
+      if (interaction.isStringSelectMenu() && id === 'fm:buy') {
         const r = doBuyPlayer(db, gid, uid, interaction.values[0], api);
-        await interaction.update(marketView(db, gid, uid, getDinar, posState.get(uid) || id.split(':')[2]));
+        const back = st.route === 'pos'
+          ? posMarketView(db, gid, uid, getDinar, st.pos)
+          : marketView(db, gid, uid, getDinar);
+        await interaction.update(back);
         return interaction.followUp({ content: r.msg, flags: 64 });
       }
+
       // ── tactics ──
       if (interaction.isStringSelectMenu() && id === 'fm:form') {
         const mgr = getManager(db, gid, uid); mgr.formation = interaction.values[0];
@@ -985,14 +1453,24 @@ function initFootball({ client, db, saveData, getDinar, spendDinar, awardDinar }
         return interaction.update(tacticsView(db, gid, uid));
       }
       if (interaction.isStringSelectMenu() && id === 'fm:ment') {
-        const mgr = getManager(db, gid, uid); mgr.mentality = interaction.values[0]; saveData(gid);
+        const mgr = getManager(db, gid, uid);
+        if (MENTALITIES[interaction.values[0]]) mgr.mentality = interaction.values[0];
+        saveData(gid);
         return interaction.update(tacticsView(db, gid, uid));
       }
-      if (interaction.isStringSelectMenu() && id === 'fm:instr') {
-        const [k, v] = interaction.values[0].split('|');
-        const mgr = getManager(db, gid, uid); mgr.instr[k] = v; saveData(gid);
-        return interaction.update(tacticsView(db, gid, uid));
+      if (interaction.isStringSelectMenu() && id.startsWith('fm:instr:')) {
+        const k = id.split(':')[2], v = interaction.values[0];
+        const mgr = getManager(db, gid, uid);
+        if (INSTRUCTIONS[k] && INSTRUCTIONS[k].opts[v]) { mgr.instr[k] = v; saveData(gid); }
+        return interaction.update(instructionsView(db, gid, uid));
       }
+      if (interaction.isButton() && id.startsWith('fm:tog:')) {
+        const k = id.split(':')[2];
+        const mgr = getManager(db, gid, uid);
+        if (TOGGLES[k]) { mgr.instr[k] = !mgr.instr[k]; saveData(gid); }
+        return interaction.update(instructionsView(db, gid, uid));
+      }
+
       // ── retainer top-up ──
       if (interaction.isStringSelectMenu() && id === 'fm:topup') {
         const AMOUNT = 50;
@@ -1000,9 +1478,7 @@ function initFootball({ client, db, saveData, getDinar, spendDinar, awardDinar }
         if (getDinar(db, gid, uid) < AMOUNT)
           return interaction.reply({ content: `You need ${money(AMOUNT)}.`, flags: 64 });
         const v = interaction.values[0];
-        let target = null;
-        if (v === 'club') target = mgr.clubAsset;
-        else target = mgr.squad.find(p => p.uid === v.split('|')[1]);
+        const target = v === 'club' ? mgr.clubAsset : mgr.squad.find(p => p.uid === v.split('|')[1]);
         if (!target) return interaction.reply({ content: 'Not found.', flags: 64 });
         if (!spendDinar(db, gid, uid, AMOUNT, saveData))
           return interaction.reply({ content: 'Payment failed.', flags: 64 });
@@ -1010,6 +1486,7 @@ function initFootball({ client, db, saveData, getDinar, spendDinar, awardDinar }
         await interaction.update(retainersView(db, gid, uid, getDinar));
         return interaction.followUp({ content: `🛡️ Added **${AMOUNT}** to the retainer — now ~**${daysLeft(target).toFixed(1)} days** of cover.`, flags: 64 });
       }
+
       // ── release a player ──
       if (interaction.isButton() && id === 'fm:sell') {
         const mgr = getManager(db, gid, uid);
@@ -1018,7 +1495,7 @@ function initFootball({ client, db, saveData, getDinar, spendDinar, awardDinar }
         return interaction.reply({ content: 'Release a player for **half** his value:', flags: 64,
           components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('fm:selldo')
             .setPlaceholder('Release…').addOptions(sellable.slice(0,25).map(p =>
-              ({ label: `${p.name} — +${Math.floor((p.price||0)/2)} Dinar`, value: p.uid, description: `Rating ${p.rating}` }))))] });
+              ({ label: `${p.name} — +${Math.floor((p.price||0)/2)} Dinar`.slice(0,100), value: p.uid, description: `Rating ${p.rating}` }))))] });
       }
       if (interaction.isStringSelectMenu() && id === 'fm:selldo') {
         const f = fState(db, gid), mgr = getManager(db, gid, uid);
@@ -1033,49 +1510,106 @@ function initFootball({ client, db, saveData, getDinar, spendDinar, awardDinar }
         saveData(gid);
         return interaction.update({ content: `📤 Released **${p.name}** for ${money(back)}.`, components: [] });
       }
+
       // ── play a match ──
       if (interaction.isButton() && id === 'fm:play') {
         const mgr = getManager(db, gid, uid);
         if (!mgr.clubId) return interaction.reply({ content: 'Buy a club first.', flags: 64 });
         if (liveMatches.has(gid)) return interaction.reply({ content: '⏳ A match is already being played in this server — wait for it to finish.', flags: 64 });
-        const f = fState(db, gid);
-        const rivals = Object.entries(f.managers).filter(([id2, m2]) => id2 !== uid && m2.clubId);
-        const rows = [new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId('fm:quick').setLabel('Quick Match (vs AI club)').setEmoji('🤖').setStyle(ButtonStyle.Success))];
-        if (rivals.length) rows.push(new ActionRowBuilder().addComponents(
-          new StringSelectMenuBuilder().setCustomId('fm:challenge').setPlaceholder('Challenge a manager…')
-            .addOptions(rivals.slice(0,25).map(([id2, m2]) => {
-              const c = clubById(m2.clubId);
-              return { label: (c ? c.name : 'Club'), value: id2, description: `${m2.w}W ${m2.d}D ${m2.l}L` };
-            }))));
-        return interaction.reply({ content: '▶️ **Choose your opponent**', components: rows, flags: 64 });
+        return interaction.reply({
+          content: '▶️ **Choose your opponent**\nPlay the computer, or tag a manager to challenge them in this channel.',
+          flags: 64,
+          components: [
+            new ActionRowBuilder().addComponents(
+              new ButtonBuilder().setCustomId('fm:quick').setLabel('Quick Match (vs AI club)').setEmoji('🤖').setStyle(ButtonStyle.Success)),
+            new ActionRowBuilder().addComponents(
+              new UserSelectMenuBuilder().setCustomId('fm:chal:pick').setPlaceholder('⚔️ Tag a manager to challenge…').setMaxValues(1)),
+            new ActionRowBuilder().addComponents(
+              new ButtonBuilder().setCustomId('fm:home').setLabel('Back').setStyle(ButtonStyle.Secondary)),
+          ],
+        });
       }
-      if ((interaction.isButton() && id === 'fm:quick') || (interaction.isStringSelectMenu() && id === 'fm:challenge')) {
+
+      if (interaction.isButton() && id === 'fm:quick') {
         const mgr = getManager(db, gid, uid);
         if (!mgr.clubId) return interaction.reply({ content: 'Buy a club first.', flags: 64 });
         if (liveMatches.has(gid)) return interaction.reply({ content: '⏳ A match is already running.', flags: 64 });
         const f = fState(db, gid);
         const home = ctxFor(db, gid, uid);
-        let away, seat = { [uid]: 'H' };
-        if (interaction.isButton()) {
-          const free = CLUBS.filter(c => !f.clubOwner[c.id] && c.id !== mgr.clubId);
-          away = makeAIContext(free.length ? pick(free) : CLUBS[0]);
-        } else {
-          const oid = interaction.values[0];
-          away = ctxFor(db, gid, oid); seat[oid] = 'A';
-          if (!away.club) return interaction.reply({ content: 'That manager has no club.', flags: 64 });
-        }
-        liveMatches.add(gid);
+        const away = makeAIContext(pickAIOpponent(f, home.club));
         await interaction.update({ content: '⚽ Kicking off in the channel…', components: [] }).catch(()=>{});
-        const m = newMatch(home, away);
-        try {
-          await runLiveMatch(interaction.channel, m, seat, db, gid, saveData);
-          recordResult(db, gid, m, api);
-          const line = `**${m.home.club.name} ${m.hg} – ${m.ag} ${m.away.club.name}**`;
-          await interaction.channel.send({ content: `🏁 ${line}` }).catch(()=>{});
-        } catch (e) { console.error('[fm] match failed:', e.message); }
-        finally { liveMatches.delete(gid); }
+        return startMatch(interaction.channel, gid, home, away, { [uid]: 'H' });
+      }
+
+      // ── challenge another manager ──
+      if (interaction.isUserSelectMenu() && id === 'fm:chal:pick') {
+        const target = interaction.values[0];
+        const picked = interaction.users ? interaction.users.first() : null;
+        const mgr = getManager(db, gid, uid);
+        if (!mgr.clubId) return interaction.reply({ content: 'Buy a club first.', flags: 64 });
+        if (liveMatches.has(gid)) return interaction.reply({ content: '⏳ A match is already running.', flags: 64 });
+        if (target === uid) return interaction.reply({ content: 'You cannot challenge yourself.', flags: 64 });
+        if (picked && picked.bot) return interaction.reply({ content: 'That is a bot. Use Quick Match for a computer opponent.', flags: 64 });
+
+        const f = fState(db, gid);
+        const om = f.managers[target];
+        if (!om || !om.clubId)
+          return interaction.reply({ content: `<@${target}> does not manage a club yet — nothing to play for.`, flags: 64 });
+
+        const myClub = clubById(mgr.clubId), theirClub = clubById(om.clubId);
+        await interaction.update({ content: `📣 Challenge sent to <@${target}>.`, components: [] }).catch(()=>{});
+
+        const e = new EmbedBuilder().setColor(0xef4444)
+          .setTitle('⚔️ Match Challenge')
+          .setDescription(`<@${uid}> has challenged <@${target}> to a match.`)
+          .addFields(
+            { name: myClub.name, value: `${myClub.short} · ${mgr.w}W ${mgr.d}D ${mgr.l}L`, inline: true },
+            { name: 'vs', value: '\u200b', inline: true },
+            { name: theirClub.name, value: `${theirClub.short} · ${om.w}W ${om.d}D ${om.l}L`, inline: true })
+          .setFooter({ text: 'Expires in 2 minutes. Only the challenged manager can respond.' });
+
+        const msg = await interaction.channel.send({
+          content: `<@${target}>`,
+          embeds: [e],
+          components: [new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId('fm:chal:acc').setLabel('Accept').setEmoji('✅').setStyle(ButtonStyle.Success),
+            new ButtonBuilder().setCustomId('fm:chal:dec').setLabel('Decline').setEmoji('❌').setStyle(ButtonStyle.Secondary))],
+          allowedMentions: { users: [target] },
+        }).catch(() => null);
+        if (!msg) return;
+        openChallenges.set(msg.id, { from: uid, to: target, gid, at: Date.now() });
+        const t = setTimeout(async () => {
+          if (!openChallenges.has(msg.id)) return;
+          openChallenges.delete(msg.id);
+          await msg.edit({ embeds: [EmbedBuilder.from(e).setColor(0x64748b)
+            .setDescription(`<@${uid}>'s challenge to <@${target}> expired.`)], components: [] }).catch(()=>{});
+        }, CHALLENGE_MS);
+        if (t.unref) t.unref();
         return;
+      }
+
+      if (interaction.isButton() && (id === 'fm:chal:acc' || id === 'fm:chal:dec')) {
+        const c = openChallenges.get(interaction.message.id);
+        if (!c) return interaction.reply({ content: 'That challenge has already been answered or expired.', flags: 64 });
+        if (uid !== c.to) return interaction.reply({ content: `Only <@${c.to}> can answer this challenge.`, flags: 64 });
+        openChallenges.delete(interaction.message.id);
+
+        if (id === 'fm:chal:dec') {
+          return interaction.update({ embeds: [new EmbedBuilder().setColor(0x64748b)
+            .setDescription(`❌ <@${c.to}> declined <@${c.from}>'s challenge.`)], components: [] });
+        }
+        if (liveMatches.has(gid))
+          return interaction.update({ embeds: [new EmbedBuilder().setColor(0x64748b)
+            .setDescription('⏳ Another match started first. Try again when it finishes.')], components: [] });
+
+        const home = ctxFor(db, gid, c.from), away = ctxFor(db, gid, c.to);
+        if (!home.club || !away.club)
+          return interaction.update({ embeds: [new EmbedBuilder().setColor(0x64748b)
+            .setDescription('One of you no longer has a club.')], components: [] });
+
+        await interaction.update({ embeds: [new EmbedBuilder().setColor(0x22c55e)
+          .setDescription(`✅ <@${c.to}> accepted. **${home.club.name} vs ${away.club.name}** — kicking off now.`)], components: [] }).catch(()=>{});
+        return startMatch(interaction.channel, gid, home, away, { [c.from]: 'H', [c.to]: 'A' });
       }
     } catch (e) {
       console.error('[football] handler error:', e.message, (e.stack||'').split('\n')[1]);
@@ -1086,20 +1620,21 @@ function initFootball({ client, db, saveData, getDinar, spendDinar, awardDinar }
     }
   });
 
-  console.log('⚽ Football Manager loaded');
+  console.log(`⚽ Football Manager loaded — ${CLUBS.length} clubs, ${PLAYERS.length} players`);
   return { fState: (gid) => fState(db, gid) };
 }
 
 module.exports = {
   initFootball, getFootballCommands,
   // data
-  CLUBS, clubById, REAL_PLAYERS, realById, FORMATIONS, FORMATION_KEYS,
-  MENTALITIES, INSTRUCTIONS, SHOUTS, SQUAD_SIZE,
+  LEAGUES, CLUBS, clubById, REAL_PLAYERS, PLAYERS, realById, playerById, squadOf,
+  FORMATIONS, FORMATION_KEYS, MENTALITIES, INSTRUCTIONS, TOGGLES, SHOUTS, SQUAD_SIZE,
   // economy
   playerPrice, startRetainer, dailyDrain, retainerNow, setRetainer, topUpRetainer,
   daysLeft, isProtected,
   // state
   fState, getManager, ensureSquad, makePlaceholder, squadRating, lineRating, genName,
   // simulation (exported so behaviour can be tested without a live Discord client)
-  newMatch, advance, matchFrameState, makeAIContext,
+  newMatch, advance, matchFrameState, makeAIContext, bestXI, ctxFor, planOf, styleLine,
+  TICKS, MATCH_MS, TICK_MS, HT_TICK, CHANGES_PER_HALF,
 };

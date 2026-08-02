@@ -10,9 +10,10 @@ const FONT_FILES = ['DejaVuSans.ttf', 'DejaVuSans-Bold.ttf']
     .find(p => { try { return fs.existsSync(p); } catch { return false; } }))
   .filter(Boolean);
 
-const W = 1000, H = 660;
+const W = 1000, H = 700;
 const HUD = 78;                                   // top scoreboard height
-const PX = 20, PY = HUD + 8;
+const TAC = 30;                                   // tactical strip under the scoreboard
+const PX = 20, PY = HUD + TAC + 6;
 const PW = W - PX * 2, PH = H - PY - 44;          // leave room for the ticker
 const sx = (x) => PX + (x / 100) * PW;
 const sy = (y) => PY + (y / 100) * PH;
@@ -57,6 +58,22 @@ function pitch() {
   return s;
 }
 
+/* ── defensive line markers ────────────────────────────────────────────────
+   Drawn so a manager can SEE how high each side is defending — the single
+   most important consequence of the mentality dial.                        */
+function lines(st) {
+  if (!st.showLines) return '';
+  let s = '';
+  const mark = (relX, colour, isHome) => {
+    const x = sx(isHome ? relX : 100 - relX);
+    s += `<line x1="${x}" y1="${PY+4}" x2="${x}" y2="${PY+PH-4}" stroke="${colour}"
+      stroke-width="2" stroke-dasharray="7 9" opacity="0.5"/>`;
+  };
+  if (typeof st.hLine === 'number') mark(st.hLine, st.home.c[0], true);
+  if (typeof st.aLine === 'number') mark(st.aLine, st.away.c[0], false);
+  return s;
+}
+
 /* ── shirt ─────────────────────────────────────────────────────────────── */
 function shirt(x, y, num, colors, opts = {}) {
   const s = opts.scale || 1.5;
@@ -69,10 +86,12 @@ function shirt(x, y, num, colors, opts = {}) {
     ? `<circle cx="${x}" cy="${y}" r="${19*s*0.72}" fill="none" stroke="#fde047" stroke-width="${2.6*s*0.6}" opacity="0.95"/>`
     : '';
   const shadow = `<ellipse cx="${x}" cy="${y + 15*s}" rx="${10*s}" ry="${3.2*s}" fill="#000" opacity="0.22"/>`;
+  // a tiring player gets visibly duller
+  const fade = opts.tired ? `<circle cx="${x}" cy="${y}" r="${16*s*0.72}" fill="#0b1220" opacity="0.22"/>` : '';
   return `<g>${shadow}${ring}
     <path d="${body}" fill="${fill}" stroke="${trim}" stroke-width="${1.9*s}" stroke-linejoin="round"/>
     <text x="${x}" y="${y + 7*s}" text-anchor="middle" font-family="DejaVu Sans" font-size="${12.5*s}"
-      font-weight="700" fill="${txt}">${num}</text></g>`;
+      font-weight="700" fill="${txt}">${num}</text>${fade}</g>`;
 }
 
 /* ── ball with motion trail ────────────────────────────────────────────── */
@@ -94,10 +113,10 @@ function ball(x, y, trail = []) {
 function hud(st) {
   const { home, away, hg, ag, minute, poss } = st;
   const cx = W/2;
-  let s = `<rect x="0" y="0" width="${W}" height="${HUD}" fill="#0b1220"/>`;
+  let s = `<rect x="0" y="0" width="${W}" height="${HUD + TAC}" fill="#0b1220"/>`;
   // colour flashes for each side
-  s += `<rect x="0" y="0" width="8" height="${HUD}" fill="${home.c[0]}"/>`;
-  s += `<rect x="${W-8}" y="0" width="8" height="${HUD}" fill="${away.c[0]}"/>`;
+  s += `<rect x="0" y="0" width="8" height="${HUD + TAC}" fill="${home.c[0]}"/>`;
+  s += `<rect x="${W-8}" y="0" width="8" height="${HUD + TAC}" fill="${away.c[0]}"/>`;
   // names + score
   s += `<text x="${cx-118}" y="40" text-anchor="end" font-family="DejaVu Sans" font-size="23" font-weight="700" fill="#f8fafc">${esc(home.short)}</text>`;
   s += `<text x="${cx+118}" y="40" text-anchor="start" font-family="DejaVu Sans" font-size="23" font-weight="700" fill="#f8fafc">${esc(away.short)}</text>`;
@@ -115,6 +134,50 @@ function hud(st) {
   // full club names, small
   s += `<text x="${cx-150}" y="66" text-anchor="end" font-family="DejaVu Sans" font-size="12" fill="#64748b">${esc(home.name)}</text>`;
   s += `<text x="${cx+150}" y="66" text-anchor="start" font-family="DejaVu Sans" font-size="12" fill="#64748b">${esc(away.name)}</text>`;
+  return s + tactics(st);
+}
+
+/* ── tactical strip: what each manager is actually doing right now ──────── */
+function tactics(st) {
+  const y = HUD + 20;
+  let s = `<line x1="0" y1="${HUD}" x2="${W}" y2="${HUD}" stroke="#1e293b" stroke-width="1"/>`;
+
+  const stamBar = (x, val, colour, alignRight) => {
+    const bw = 74, bx = alignRight ? x - bw : x;
+    const v = clamp(val, 0, 100);
+    const tint = v > 66 ? '#34d399' : v > 38 ? '#fbbf24' : '#f87171';
+    let o = `<rect x="${bx}" y="${y-9}" width="${bw}" height="6" rx="3" fill="#1e293b"/>`;
+    o += `<rect x="${bx}" y="${y-9}" width="${bw*v/100}" height="6" rx="3" fill="${tint}"/>`;
+    o += `<text x="${alignRight ? bx - 7 : bx + bw + 7}" y="${y-3}" text-anchor="${alignRight ? 'end' : 'start'}"
+      font-family="DejaVu Sans" font-size="11" fill="#64748b">STA</text>`;
+    return o;
+  };
+
+  const side = (label, sub, cards, men, x, alignRight) => {
+    const anchor = alignRight ? 'end' : 'start';
+    let o = `<text x="${x}" y="${y-1}" text-anchor="${anchor}" font-family="DejaVu Sans"
+      font-size="14" font-weight="700" fill="#e2e8f0">${esc(label)}</text>`;
+    o += `<text x="${x + (alignRight ? -1 : 1) * 0}" y="${y+15}" text-anchor="${anchor}"
+      font-family="DejaVu Sans" font-size="11.5" fill="#94a3b8">${esc(sub)}</text>`;
+    // discipline pips
+    let cx2 = x + (alignRight ? -1 : 1) * (men === 10 ? 0 : 0);
+    let out = '';
+    const total = (cards && cards.y || 0);
+    for (let i = 0; i < Math.min(total, 3); i++) {
+      const px = alignRight ? x - 150 - i*13 : x + 150 + i*13;
+      out += `<rect x="${px}" y="${y-11}" width="9" height="12" rx="1.5" fill="#facc15"/>`;
+    }
+    if (cards && cards.r) {
+      const px = alignRight ? x - 150 - 3*13 : x + 150 + 3*13;
+      out += `<rect x="${px}" y="${y-11}" width="9" height="12" rx="1.5" fill="#ef4444"/>`;
+    }
+    return o + out;
+  };
+
+  s += side(st.hMent || 'Balanced', st.hStyle || '', st.hCards, st.hMen, 108, false);
+  s += side(st.aMent || 'Balanced', st.aStyle || '', st.aCards, st.aMen, W - 108, true);
+  s += stamBar(96, st.hStam == null ? 100 : st.hStam, null, true);
+  s += stamBar(W - 96, st.aStam == null ? 100 : st.aStam, null, false);
   return s;
 }
 
@@ -129,19 +192,25 @@ function ticker(text) {
 function banner(ev) {
   if (!ev) return '';
   const map = {
-    GOAL:  { t:'G O A L !', c:'#fbbf24', sub:null },
-    SAVE:  { t:'SAVED!',    c:'#38bdf8', sub:null },
-    MISS:  { t:'OFF TARGET',c:'#94a3b8', sub:null },
-    POST:  { t:'OFF THE POST!', c:'#f472b6', sub:null },
-    CHANCE:{ t:'BIG CHANCE', c:'#34d399', sub:null },
-    HT:    { t:'HALF TIME',  c:'#e2e8f0', sub:null },
-    FT:    { t:'FULL TIME',  c:'#e2e8f0', sub:null },
-    KICK:  { t:'KICK OFF',   c:'#e2e8f0', sub:null },
+    GOAL:    { t:'G O A L !',      c:'#fbbf24' },
+    SAVE:    { t:'SAVED!',         c:'#38bdf8' },
+    MISS:    { t:'OFF TARGET',     c:'#94a3b8' },
+    POST:    { t:'OFF THE POST!',  c:'#f472b6' },
+    CHANCE:  { t:'BIG CHANCE',     c:'#34d399' },
+    OFFSIDE: { t:'OFFSIDE!',       c:'#fb923c' },
+    COUNTER: { t:'COUNTER-ATTACK', c:'#22d3ee' },
+    YELLOW:  { t:'YELLOW CARD',    c:'#facc15' },
+    RED:     { t:'RED CARD',       c:'#ef4444' },
+    HT:      { t:'HALF TIME',      c:'#e2e8f0' },
+    TALK:    { t:'TEAM TALK',      c:'#a78bfa' },
+    FT:      { t:'FULL TIME',      c:'#e2e8f0' },
+    KICK:    { t:'KICK OFF',       c:'#e2e8f0' },
   };
   const m = map[ev.type]; if (!m) return '';
   const cy = PY + PH/2;
+  const size = m.t.length > 13 ? 44 : 54;
   return `<rect x="${PX}" y="${cy-52}" width="${PW}" height="104" fill="#000" opacity="0.42"/>
-    <text x="${W/2}" y="${cy+4}" text-anchor="middle" font-family="DejaVu Sans" font-size="54" font-weight="700"
+    <text x="${W/2}" y="${cy+4}" text-anchor="middle" font-family="DejaVu Sans" font-size="${size}" font-weight="700"
       fill="${m.c}" stroke="#0b1220" stroke-width="2.5">${esc(m.t)}</text>
     ${ev.sub ? `<text x="${W/2}" y="${cy+38}" text-anchor="middle" font-family="DejaVu Sans" font-size="19" fill="#e2e8f0">${esc(ev.sub)}</text>` : ''}`;
 }
@@ -153,12 +222,14 @@ function frame(st) {
       <stop offset="55%" stop-color="#000" stop-opacity="0"/>
       <stop offset="100%" stop-color="#000" stop-opacity="0.28"/>
     </radialGradient></defs>`;
+  const hTired = (st.hStam != null && st.hStam < 45);
+  const aTired = (st.aStam != null && st.aStam < 45);
   let players = '';
-  st.homePos.forEach((p, i) => players += shirt(sx(p.x), sy(p.y), p.num, st.home.c, { onBall: st.ballOwner === `H${i}` }));
-  st.awayPos.forEach((p, i) => players += shirt(sx(p.x), sy(p.y), p.num, st.away.c, { onBall: st.ballOwner === `A${i}` }));
+  st.homePos.forEach((p, i) => players += shirt(sx(p.x), sy(p.y), p.num, st.home.c, { onBall: st.ballOwner === `H${i}`, tired: hTired }));
+  st.awayPos.forEach((p, i) => players += shirt(sx(p.x), sy(p.y), p.num, st.away.c, { onBall: st.ballOwner === `A${i}`, tired: aTired }));
 
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
-    ${defs}${pitch()}${players}${ball(sx(st.ball.x), sy(st.ball.y), st.trail)}
+    ${defs}${pitch()}${lines(st)}${players}${ball(sx(st.ball.x), sy(st.ball.y), st.trail)}
     ${hud(st)}${ticker(st.commentary || '')}${banner(st.event)}</svg>`;
 
   return new Resvg(svg, {
