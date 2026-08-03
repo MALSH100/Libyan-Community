@@ -240,12 +240,39 @@ function lineRating(squad, formation, line) {
      time-wasting    only works if you are ahead
    ══════════════════════════════════════════════════════════════════════════ */
 
-const TICKS = 41;                 // engine steps in a match
-const MATCH_MS = 90000;           // 90 seconds of wall clock, as requested
-const HT_PAUSE_MS = 8000;         // team-talk window, counted inside MATCH_MS
-const HT_TICK = 20;               // half time lands after this tick
-const TICK_MS = Math.round((MATCH_MS - HT_PAUSE_MS) / TICKS);
-const CHANGES_PER_HALF = 3;       // tactical changes allowed while play is live
+/* ── PACE ──────────────────────────────────────────────────────────────────
+   A tick is a PASSAGE OF PLAY, not a single kick. Fewer, longer beats means
+   you can actually read what is happening and get a change in before the
+   picture moves on. Each beat resolves 1-3 sequences under the hood, so the
+   match still produces a realistic number of shots and goals.
+   Want it faster or slower? TICK_MS is the only line you need to touch.     */
+const TICKS       = 24;                       // beats in a match
+const TICK_MS     = 4500;                     // wall clock per beat
+const HT_PAUSE_MS = 14000;                    // team-talk window
+const MATCH_MS    = TICKS * TICK_MS + HT_PAUSE_MS;
+const HT_TICK     = 12;
+const MIN_PER_TICK = 90 / TICKS;
+const CHANGES_PER_HALF = 4;
+const MAX_SUBS    = 3;
+const BENCH_SIZE  = 5;
+
+const UNITS = ['DEF', 'MID', 'FWD'];
+const unitOf = (pos) => (pos === 'GK' ? 'DEF' : pos);
+const overallStam = (s) => (s.DEF + s.MID + s.FWD) / 3;
+const fatOf = (v) => 1 - Math.max(0, 75 - v) * 0.0092;
+
+/* Stamina is tracked PER UNIT, which is what makes substitutions matter:
+   a high press burns your midfield, not some abstract team number, and
+   bringing on a fresh midfielder measurably fixes that unit.               */
+function drainFor(plan, unit) {
+  let d = 0.95;
+  if (unit === 'MID') d += Math.max(0, plan.press) * 0.55 + Math.max(0, plan.tempo) * 0.45;
+  if (unit === 'FWD') d += Math.max(0, plan.press) * 0.45 + Math.max(0, plan.tempo) * 0.30 + (plan.men.push > 0 ? 0.25 : 0);
+  if (unit === 'DEF') d += Math.max(0, plan.press) * 0.28 + Math.max(0, plan.line - 45) * 0.032;
+  if (plan.waste) d -= 0.25;
+  if (plan.men.push < -6) d -= 0.15;
+  return Math.max(0.3, d);
+}
 
 function sideStrength(ctx, m, side) {
   const sq = ctx.squad, f = ctx.formation;
@@ -254,34 +281,26 @@ function sideStrength(ctx, m, side) {
   const mid = lineRating(sq, f, 'MID');
   const fwd = lineRating(sq, f, 'FWD');
   const p   = planOf(ctx);
+  const S   = m.stam[side];
+  const fD = fatOf(S.DEF), fM = fatOf(S.MID), fF = fatOf(S.FWD);
   const mor = 0.86 + (clamp(ctx.morale, 0, 100) / 100) * 0.28;
   const coh = 0.93 + (clamp(ctx.cohesion, 0, 100) / 100) * 0.14;
-  const stam = m.stam[side];
-  const fat  = 1 - Math.max(0, 72 - stam) * 0.0070;   // legs go after ~72
-  const settle = (ctx.settle > 0) ? 0.94 : 1;          // just changed shape
-  const short  = m.men[side] < 11;                     // down to ten
+  const settle = ctx.settle > 0 ? 0.94 : 1;      // just changed shape
+  const short  = m.men[side] < 11;
+  const under  = m.pressure[side === 'H' ? 'A' : 'H'] / 100;   // pressure against me
   return {
     p, gk,
-    att: (fwd * 0.62 + mid * 0.38) * (1 + p.men.attack) * mor * coh * fat * settle * (short ? 0.86 : 1),
-    mid: mid * (1 + p.men.tempo * 0.4 + p.press * 0.03) * mor * coh * fat * settle * (short ? 0.84 : 1),
-    def: (def * 0.72 + gk * 0.28) * (1 + p.men.defend) * mor * coh * fat * (short ? 0.91 : 1),
+    att: (fwd * 0.62 * fF + mid * 0.38 * fM) * (1 + p.men.attack) * mor * coh * settle * (short ? 0.86 : 1),
+    mid: mid * fM * (1 + p.men.tempo * 0.4 + p.press * 0.03) * mor * coh * settle * (short ? 0.84 : 1),
+    def: (def * 0.72 * fD + gk * 0.28) * (1 + p.men.defend) * mor * coh * (short ? 0.91 : 1) * (1 - under * 0.07),
   };
-}
-
-function stamDrain(plan) {
-  return 0.55
-    + Math.max(0, plan.press) * 0.34
-    + Math.max(0, plan.tempo) * 0.26
-    + (plan.men.push > 0 ? 0.12 : 0)
-    - (plan.waste ? 0.15 : 0)
-    - (plan.men.push < -6 ? 0.10 : 0);
 }
 
 // pick a named player from a side for commentary flavour
 function whoFrom(ctx, prefer) {
   const form = FORMATIONS[ctx.formation] || FORMATIONS['4-3-3'];
   const pool = ctx.squad.filter((p, i) => form.slots[i] && form.slots[i].p === prefer);
-  const list = pool.length ? pool : ctx.squad.filter((p,i)=>form.slots[i] && form.slots[i].p !== 'GK');
+  const list = pool.length ? pool : ctx.squad.filter((p, i) => form.slots[i] && form.slots[i].p !== 'GK');
   return (list.length ? pick(list) : ctx.squad[0] || { name: 'the striker' }).name;
 }
 
@@ -292,8 +311,10 @@ const C = {
   turn:   ['Misplaced pass — {T} take over.', '{T} lose it cheaply in midfield.', 'Cleared away, {T} regain possession.',
            'Heavy touch from {P} and it runs away.'],
   long:   ['{T} go long over the press.', '{P} clips it over the top for the runner.', '{T} skip midfield entirely.'],
-  wide:   ['{P} takes it down the flank.', '{T} stretch it wide looking for the cross.', '{P} beats his man on the outside!'],
-  final:  ['{T} into the final third now.', '{P} threads it into a dangerous area.', '{T} are camped in the opposition half.'],
+  wideL:  ['{P} works it down the left.', '{T} overload the left flank.', '{P} gets to the byline on the left!'],
+  wideR:  ['{P} takes it down the right.', '{T} switch it right and go again.', '{P} beats his man on the right!'],
+  centre: ['{T} come straight through the middle.', '{P} threads it between the lines.'],
+  final:  ['{T} into the final third now.', '{P} finds a pocket between the lines.', '{T} are camped in the opposition half.'],
   chance: ['A big chance opens up for {T}!', '{P} finds space in the box!', 'It falls to {P} eight yards out!'],
   goal:   ['GOAL! {P} buries it!', 'GOAL! {P} finishes coolly for {T}!', 'GOAL! A brilliant strike from {P}!',
            'GOAL! {P} makes no mistake!', 'GOAL! {T} break through — {P} with the finish!'],
@@ -306,64 +327,104 @@ const C = {
   counter:['{T} break at speed!', 'Three on two — {T} are away!', '{T} catch them square at the back!'],
   offs:   ['Flag up — {P} is caught offside.', 'The trap works! {P} strays beyond the line.'],
   foul:   ['Cynical from {T}. Free kick.', '{P} clatters through the back of him.'],
-  tired:  ['{T} are running on empty here.', 'Legs going for {T} — they can not get out.'],
+  tired:  ['{T} are running on empty here.', 'Legs going for {T} — they cannot get out.'],
+  siege:  ['{T} have them pinned in.', 'Wave after wave from {T} now.', '{T} smell blood.'],
 };
 const say = (arr, T, Pn) => pick(arr).replace(/\{T\}/g, T).replace(/\{P\}/g, Pn || 'the forward');
 
+/* ── bench ─────────────────────────────────────────────────────────────── */
+function benchForSquad(squad) {
+  const avg = squadRating(squad);
+  return ['DEF', 'MID', 'MID', 'FWD', 'FWD'].map(pos => ({
+    name: genName(), pos, real: false, used: false,
+    rating: clamp(Math.round(avg - 2 - Math.random() * 5), 45, 92),
+  }));
+}
+function benchForClub(club, xi) {
+  const inXI = new Set(xi.map(p => p.name));
+  const spare = club.squad.filter(p => !inXI.has(p.name))
+    .sort((a, b) => b.rating - a.rating).slice(0, BENCH_SIZE)
+    .map(p => ({ name: p.name, pos: p.pos, rating: p.rating, real: true, used: false }));
+  while (spare.length < BENCH_SIZE) {
+    const avg = squadRating(xi);
+    spare.push({ name: genName(), pos: pick(['DEF','MID','FWD']), real: false, used: false,
+      rating: clamp(Math.round(avg - 4 - Math.random() * 4), 45, 92) });
+  }
+  return spare;
+}
+
+/* A substitution replaces the weakest player in the incoming man's line and
+   refreshes that unit's stamina by his share of it. Both effects are real
+   and immediately visible in the next tick's numbers.                       */
+function makeSub(ctx, m, side, benchIdx) {
+  const inP = ctx.bench && ctx.bench[benchIdx];
+  if (!inP || inP.used) return { ok: false, msg: 'That player has already come on.' };
+  if (ctx.subsUsed >= MAX_SUBS) return { ok: false, msg: `You have used all ${MAX_SUBS} substitutions.` };
+  const form = FORMATIONS[ctx.formation] || FORMATIONS['4-3-3'];
+
+  let idx = -1, worst = 1e9;
+  ctx.squad.forEach((p, i) => {
+    const s = form.slots[i];
+    if (!s || s.p !== inP.pos || p.captain) return;
+    if (p.rating < worst) { worst = p.rating; idx = i; }
+  });
+  if (idx === -1) ctx.squad.forEach((p, i) => {
+    const s = form.slots[i];
+    if (!s || s.p === 'GK' || p.captain) return;
+    if (p.rating < worst) { worst = p.rating; idx = i; }
+  });
+  if (idx === -1) return { ok: false, msg: 'No one available to come off.' };
+
+  const out = ctx.squad[idx];
+  const unit = unitOf(form.slots[idx].p);
+  const count = form.slots.filter(s => unitOf(s.p) === unit).length || 1;
+  const before = m.stam[side][unit];
+  m.stam[side][unit] = clamp(before + (100 - before) / count, 5, 100);
+
+  ctx.squad[idx] = {
+    uid: `sub-${Date.now().toString(36)}`, name: inP.name, pos: out.pos,
+    rating: inP.rating, real: !!inP.real, num: out.num,
+  };
+  inP.used = true; ctx.subsUsed++;
+  ctx.cohesion = clamp(ctx.cohesion - 2, 0, 100);
+  ctx.settle = 1;
+  m.feed.push(`🔄 **${m.minute}'** ${ctx.club.short}: ${inP.name} on for ${out.name}`);
+  return {
+    ok: true, out, inP, unit,
+    gain: Math.round(m.stam[side][unit] - before),
+    ratingDelta: inP.rating - out.rating,
+    msg: `🔄 **${inP.name}** (${inP.rating}) on for **${out.name}** (${out.rating}).\n` +
+         `${unit} stamina **${Math.round(before)}% → ${Math.round(m.stam[side][unit])}%**` +
+         ` · line rating ${inP.rating - out.rating >= 0 ? '+' : ''}${inP.rating - out.rating}` +
+         ` · ${MAX_SUBS - ctx.subsUsed} sub${MAX_SUBS - ctx.subsUsed === 1 ? '' : 's'} left`,
+  };
+}
+
 function newMatch(home, away) {
-  for (const c of [home, away]) { c.changes = 0; c.settle = 0; }
+  for (const c of [home, away]) {
+    c.changes = 0; c.settle = 0; c.subsUsed = 0;
+    if (!Array.isArray(c.bench)) c.bench = benchForSquad(c.squad);
+    c.bench.forEach(b => { b.used = false; });
+  }
   return {
     home, away, hg: 0, ag: 0, minute: 0, tick: 0, ticks: TICKS,
     poss: Math.random() < 0.5 ? 'H' : 'A',
     ballX: 50, ballY: 50, trail: [],
     possTicks: { H: 1, A: 1 },
-    stam:  { H: 100, A: 100 },
+    stam:  { H: { DEF:100, MID:100, FWD:100 }, A: { DEF:100, MID:100, FWD:100 } },
     cards: { H: { y:0, r:0 }, A: { y:0, r:0 } },
     men:   { H: 11, A: 11 },
+    pressure: { H: 0, A: 0 },                       // sustained territorial pressure
+    flank: { H: { L:0, C:0, R:0 }, A: { L:0, C:0, R:0 } },
     counter: null,
-    stats: { H: { shots:0, sot:0, chances:0, fouls:0, offside:0 }, A: { shots:0, sot:0, chances:0, fouls:0, offside:0 } },
-    scorers: [], feed: [], ended: false, ballOwner: null, read: '',
+    stats: { H: { shots:0, sot:0, chances:0, fouls:0, offside:0, final:0 },
+             A: { shots:0, sot:0, chances:0, fouls:0, offside:0, final:0 } },
+    scorers: [], feed: [], ended: false, ballOwner: null, read: '', beat: [],
   };
 }
 
-/* The tactical read — a plain-English line explaining WHY the game looks the
-   way it does, generated from the same modifiers the engine just used. */
-function readOut(m, atkT, dfnT, pa, pd, sa, sd, side) {
-  const obs = [];
-  if (pd.press > 0.6 && pa.direct > 0)
-    obs.push([0.9, `${atkT} are going long to beat the ${dfnT} press.`]);
-  if (pd.press > 0.6 && pa.direct < 0)
-    obs.push([0.85, `${dfnT}'s press is suffocating ${atkT}'s short passing.`]);
-  if (pd.line > 52 && pa.direct > 0)
-    obs.push([0.8, `${dfnT}'s high line is leaving space in behind.`]);
-  if (pd.offside)
-    obs.push([0.5, `${dfnT} are playing the offside trap.`]);
-  if (pa.width > 0 && pd.width < 0)
-    obs.push([0.6, `${atkT} are stretching a narrow ${dfnT} back four.`]);
-  if (pa.width < 0 && pd.width > 0)
-    obs.push([0.55, `${atkT} are outnumbering ${dfnT} through the middle.`]);
-  if (m.stam[side === 'H' ? 'A' : 'H'] < 45)
-    obs.push([1.0, `${dfnT} are visibly tiring.`]);
-  if (m.stam[side] < 45)
-    obs.push([0.95, `${atkT} have nothing left in the legs.`]);
-  if (pa.waste && (side === 'H' ? m.hg <= m.ag : m.ag <= m.hg))
-    obs.push([0.7, `${atkT} are wasting time without a lead — it is only helping ${dfnT}.`]);
-  if (!obs.length) return m.read;
-  obs.sort((a, b) => b[0] - a[0]);
-  return obs[0][1];
-}
-
-function advance(m) {
-  m.tick++;
-  m.minute = Math.min(90, Math.round(m.tick * (90 / m.ticks)));
-
-  // ── stamina + settling, for both sides, every tick ──
-  for (const s of ['H', 'A']) {
-    const ctx = s === 'H' ? m.home : m.away;
-    m.stam[s] = clamp(m.stam[s] - stamDrain(planOf(ctx)), 5, 100);
-    if (ctx.settle > 0) ctx.settle--;
-  }
-
+/* ── one sequence of play ───────────────────────────────────────────────── */
+function sequence(m) {
   const isH = m.poss === 'H';
   const A = isH ? 'H' : 'A', D = isH ? 'A' : 'H';
   const atk = isH ? m.home : m.away;
@@ -372,31 +433,22 @@ function advance(m) {
   const pa = sa.p, pd = sd.p;
   const T = atk.club.short, dT = dfn.club.short;
   m.possTicks[m.poss]++;
-  let event = null, commentary = '';
   const wasCounter = m.counter === m.poss;
   m.counter = null;
 
-  if (m.tick % 5 === 0) m.read = readOut(m, T, dT, pa, pd, sa, sd, A);
-
-  // ── fouls from the defending side (pressing high costs you) ──────────────
+  // ── fouls from the defending side (pressing high costs you) ──
   const deepForDef = isH ? m.ballX > 66 : m.ballX < 34;
-  const foulChance = 0.055 + Math.max(0, pd.press) * 0.035 + (pd.waste ? 0.02 : 0);
-  if (Math.random() < foulChance) {
+  if (Math.random() < 0.055 + Math.max(0, pd.press) * 0.035 + (pd.waste ? 0.02 : 0)) {
     m.stats[D].fouls++;
-    const yellowChance = 0.20 + Math.max(0, pd.press) * 0.10 + (pd.waste ? 0.06 : 0);
-    if (Math.random() < yellowChance) {
+    if (Math.random() < 0.20 + Math.max(0, pd.press) * 0.10 + (pd.waste ? 0.06 : 0)) {
       m.cards[D].y++;
-      // a third booking stands in for a second yellow on one player
       if (m.cards[D].y >= 3 && !m.cards[D].r && Math.random() < 0.5) {
         m.cards[D].r++; m.men[D] = 10;
         m.feed.push(`🟥 **${m.minute}'** Red card — ${dT} down to ten`);
-        m.lastEvent = null;
-        return { event: { type:'RED', sub:`${dfn.club.name} · ${m.minute}'` },
-                 commentary: `${dT} are down to ten men!` };
+        return { event: { type:'RED', sub:`${dfn.club.name} · ${m.minute}'` }, commentary: `${dT} are down to ten men!` };
       }
       m.feed.push(`🟨 **${m.minute}'** Booking — ${dT}`);
       if (deepForDef && Math.random() < 0.16) {
-        // a foul in the box
         const taker = whoFrom(atk, 'FWD');
         m.stats[A].shots++;
         if (Math.random() < 0.76) {
@@ -405,6 +457,7 @@ function advance(m) {
           m.scorers.push({ side: A, name: taker, minute: m.minute, pen: true });
           m.feed.push(`⚽ **${m.minute}'** ${taker} (${T}) pen. — ${m.hg}-${m.ag}`);
           m.ballX = 50; m.ballY = 50; m.trail = []; m.poss = D; m.ballOwner = null;
+          m.pressure[A] = 35; m.pressure[D] = 15;
           return { event: { type:'GOAL', sub:`${taker} · pen · ${m.minute}'` }, commentary: `PENALTY — and ${taker} scores!` };
         }
         m.poss = D;
@@ -414,39 +467,37 @@ function advance(m) {
     }
   }
 
-  // ── contest the ball ─────────────────────────────────────────────────────
-  // Base is the midfield battle. Then every instruction matchup shifts it.
+  // ── contest the ball ──
   let keep = 0.70 + (sa.mid - sd.mid) / 240;
-  keep -= Math.max(0, pd.press) * 0.045;                         // being pressed
-  if (pa.direct > 0) keep += Math.max(0, pd.press) * 0.062;      // long balls beat the press
-  if (pa.direct < 0) keep -= Math.max(0, pd.press) * 0.040;      // short play dies against it
-  keep += (pd.width - pa.width) * 0.020;                         // narrow wins the middle
-  if (pa.width < 0) keep += Math.max(0, pd.press) * 0.030;       // narrow resists a press
-  keep += (pa.direct < 0 ? 0.030 : 0) - (pa.direct > 0 ? 0.025 : 0);  // short holds it, direct gives it away
-  keep += (pa.waste ? 0.05 : 0);                                 // killing the game
-  keep -= Math.max(0, pa.tempo) * 0.015;                         // fast tempo turns it over more
+  keep -= Math.max(0, pd.press) * 0.045;
+  if (pa.direct > 0) keep += Math.max(0, pd.press) * 0.062;
+  if (pa.direct < 0) keep -= Math.max(0, pd.press) * 0.040;
+  keep += (pd.width - pa.width) * 0.014;
+  if (pa.width < 0) keep += Math.max(0, pd.press) * 0.030;
+  keep += (pa.direct < 0 ? 0.030 : 0) - (pa.direct > 0 ? 0.025 : 0);
+  keep += (pa.waste ? 0.05 : 0);
+  keep -= Math.max(0, pa.tempo) * 0.015;
   keep = clamp(keep, 0.42, 0.90);
 
   if (Math.random() > keep) {
     m.poss = D;
-    // losing it against a high line + attacking opponent = counter for them
     if (pa.line > 48 && pa.men.push > 0) m.counter = D;
     const highPress = Math.max(0, pd.press) > 0.6;
-    commentary = highPress && Math.random() < 0.6
-      ? say(C.press, dT, whoFrom(dfn, 'MID'))
-      : say(C.turn, dT, whoFrom(atk, 'MID'));
     m.ballY = clamp(m.ballY + rnd(-18, 18), 8, 92);
     m.ballOwner = null;
-    return { event: m.counter ? { type:'COUNTER' } : null, commentary };
+    return {
+      event: m.counter ? { type:'COUNTER' } : null,
+      commentary: highPress && Math.random() < 0.6 ? say(C.press, dT, whoFrom(dfn, 'MID')) : say(C.turn, dT, whoFrom(atk, 'MID')),
+    };
   }
 
-  // ── carry the ball forward ───────────────────────────────────────────────
+  // ── carry it forward ──
   let drive = 9 + (sa.att - sd.def) / 6.5 + rnd(-4, 12);
-  drive += pa.direct * 5;                                        // direct covers ground
-  drive += Math.max(0, pd.line - 40) * 0.16;                     // space behind a high line
+  drive += pa.direct * 5;
+  drive += Math.max(0, pd.line - 40) * 0.16;
   drive += pa.tempo * 2;
   drive -= pa.waste ? 5 : 0;
-  if (wasCounter) drive += 18;                                   // breaking at speed
+  if (wasCounter) drive += 18;
   m.ballX = clamp(m.ballX + (isH ? drive : -drive), 4, 96);
   m.ballY = clamp(m.ballY + rnd(-14, 14), 8, 92);
   m.trail.push({ x: m.ballX, y: m.ballY });
@@ -454,9 +505,19 @@ function advance(m) {
 
   const deep = isH ? m.ballX > 72 : m.ballX < 28;
   const mid3 = isH ? m.ballX > 58 : m.ballX < 42;
-  let through = false;               // trap beaten on THIS attack only
+  let through = false;
 
-  // ── the offside trap ─────────────────────────────────────────────────────
+  // which channel is this attack coming down?
+  const flankBias = pa.width > 0 ? 0.68 : pa.width < 0 ? 0.30 : 0.48;
+  const channel = Math.random() < flankBias ? (m.ballY < 50 ? 'L' : 'R') : 'C';
+
+  if (deep) {
+    m.stats[A].final++;
+    m.flank[A][channel]++;
+    m.pressure[A] = clamp(m.pressure[A] + 8, 0, 100);
+  }
+
+  // ── the offside trap ──
   if (deep && pd.offside && Math.random() < 0.40) {
     const beaten = 0.45 + pa.direct * 0.24 + (atk.cohesion - 50) / 320;
     if (Math.random() > beaten) {
@@ -467,78 +528,76 @@ function advance(m) {
       m.poss = D; m.ballOwner = null;
       return { event: { type:'OFFSIDE' }, commentary: say(C.offs, T, who) };
     }
-    through = true;                                              // trap beaten
+    through = true;
   }
 
-  // ── chance creation in the final third ───────────────────────────────────
   if (deep) {
     let q = 0.52 + (sa.att - sd.def) / 150;
-    if (pa.width > 0 && pd.width < 0) q += 0.11;                 // wide vs narrow
+    if (channel !== 'C' && pd.width < 0) q += 0.11;              // flank play vs a narrow back four
+    if (channel === 'C' && pd.width > 0) q += 0.05;              // through the middle of a stretched side
+    if (pa.direct < 0 && pd.line < 30) q += 0.09;                // patience unpicks a low block
+    if (pa.width > 0 && pd.line < 30) q += 0.08;
     if (wasCounter) q += 0.10;
-    if (pd.line < 28) q -= 0.06;                                 // bodies behind the ball
-    if (pa.direct < 0 && pd.line < 30) q += 0.09;                // patient build-up unpicks a low block
-    if (pa.width > 0 && pd.line < 30) q += 0.08;                 // width stretches a packed defence
-    q = clamp(q, 0.20, 0.82);
+    q += (m.pressure[A] / 100) * 0.07;                           // sustained pressure tells
+    if (pd.line < 28) q -= 0.06;
+    q = clamp(q, 0.20, 0.85);
 
     if (Math.random() < q) {
       m.stats[A].chances++;
+      m.pressure[A] = clamp(m.pressure[A] + 10, 0, 100);
       const shooter = whoFrom(atk, Math.random() < 0.7 ? 'FWD' : 'MID');
       m.stats[A].shots++;
       let xg = 0.24 + (sa.att - sd.gk) / 190 + rnd(-0.10, 0.14);
-      if (pa.width > 0 && pd.width < 0) xg += 0.08;
-      if (pa.direct > 0 && pd.line > 50) xg += 0.06;             // through balls in behind
-      if (wasCounter) xg += 0.10;
-      if (through) xg += 0.16;                                   // clean through on goal
+      if (channel !== 'C' && pd.width < 0) xg += 0.08;
+      if (pa.direct > 0 && pd.line > 50) xg += 0.06;
       if (pa.direct < 0 && pd.line < 30) xg += 0.05;
       if (pa.width > 0 && pd.line < 30) xg += 0.04;
+      if (wasCounter) xg += 0.10;
+      if (through) xg += 0.16;
+      xg += (m.pressure[A] / 100) * 0.04;
       if (pd.line < 28) xg -= 0.05;
-      xg = clamp(xg, 0.06, 0.68);
+      xg = clamp(xg, 0.06, 0.70);
 
       const roll = Math.random();
       if (roll < xg) {
         if (isH) m.hg++; else m.ag++;
         m.stats[A].sot++;
         m.scorers.push({ side: A, name: shooter, minute: m.minute });
-        event = { type: 'GOAL', sub: `${shooter} · ${m.minute}'` };
-        commentary = say(C.goal, T, shooter);
         m.feed.push(`⚽ **${m.minute}'** ${shooter} (${T}) — ${m.hg}-${m.ag}`);
         m.ballX = 50; m.ballY = 50; m.trail = [];
         m.poss = D; m.ballOwner = null;
-        return { event, commentary };
+        m.pressure[A] = 35; m.pressure[D] = 15;
+        dfn.morale = clamp(dfn.morale - 4, 0, 100);
+        atk.morale = clamp(atk.morale + 4, 0, 100);
+        return { event: { type:'GOAL', sub:`${shooter} · ${m.minute}'` }, commentary: say(C.goal, T, shooter) };
       }
-      if (roll < xg + 0.30) {
-        m.stats[A].sot++;
-        event = { type: 'SAVE' }; commentary = say(C.save, T, shooter);
-        m.feed.push(`🧤 **${m.minute}'** Save — ${shooter} (${T})`);
-      } else if (roll < xg + 0.38) {
-        event = { type: 'POST' }; commentary = say(C.post, T, shooter);
-        m.feed.push(`🪵 **${m.minute}'** Woodwork — ${shooter} (${T})`);
-      } else if (roll < xg + 0.52) {
-        commentary = say(C.block, T, shooter);
-      } else {
-        event = { type: 'MISS' }; commentary = say(C.miss, T, shooter);
-      }
+      let event = null, commentary;
+      if (roll < xg + 0.30)      { m.stats[A].sot++; event = { type:'SAVE' }; commentary = say(C.save, T, shooter); m.feed.push(`🧤 **${m.minute}'** Save — ${shooter} (${T})`); }
+      else if (roll < xg + 0.38) { event = { type:'POST' }; commentary = say(C.post, T, shooter); m.feed.push(`🪵 **${m.minute}'** Woodwork — ${shooter} (${T})`); }
+      else if (roll < xg + 0.52) { commentary = say(C.block, T, shooter); }
+      else                       { event = { type:'MISS' }; commentary = say(C.miss, T, shooter); }
       m.ballX = isH ? 26 : 74; m.ballY = rnd(30, 70); m.trail = [];
       m.poss = D; m.ballOwner = null;
       return { event, commentary };
     }
-    commentary = say(C.chance, T, whoFrom(atk, 'FWD'));
-    event = { type: 'CHANCE' };
-  } else if (wasCounter) {
-    commentary = say(C.counter, T, whoFrom(atk, 'FWD'));
-    event = { type: 'COUNTER' };
-  } else if (mid3) {
-    commentary = pa.direct > 0 && Math.random() < 0.45 ? say(C.long, T, whoFrom(atk, 'DEF'))
-      : Math.random() < 0.5 ? say(C.final, T, whoFrom(atk, 'MID')) : say(C.wide, T, whoFrom(atk, 'MID'));
-  } else if (pa.waste && Math.random() < 0.5) {
-    commentary = say(C.waste, T, whoFrom(atk, 'DEF'));
-  } else if (m.stam[A] < 42 && Math.random() < 0.3) {
-    commentary = say(C.tired, T, whoFrom(atk, 'MID'));
-  } else {
-    commentary = Math.random() < 0.75 ? say(C.build, T, whoFrom(atk, 'MID')) : say(C.keep, T, whoFrom(atk, 'DEF'));
+    return {
+      event: { type:'CHANCE' },
+      commentary: m.pressure[A] > 55 ? say(C.siege, T, whoFrom(atk,'FWD')) : say(C.chance, T, whoFrom(atk, 'FWD')),
+    };
   }
 
-  // who is on the ball (for the highlight ring) — nearest slot to the ball
+  let commentary;
+  if (wasCounter) commentary = say(C.counter, T, whoFrom(atk, 'FWD'));
+  else if (mid3) {
+    commentary = pa.direct > 0 && Math.random() < 0.45 ? say(C.long, T, whoFrom(atk, 'DEF'))
+      : channel === 'L' ? say(C.wideL, T, whoFrom(atk, 'MID'))
+      : channel === 'R' ? say(C.wideR, T, whoFrom(atk, 'MID'))
+      : say(C.centre, T, whoFrom(atk, 'MID'));
+  }
+  else if (pa.waste && Math.random() < 0.5) commentary = say(C.waste, T, whoFrom(atk, 'DEF'));
+  else if (overallStam(m.stam[A]) < 45 && Math.random() < 0.35) commentary = say(C.tired, T, whoFrom(atk, 'MID'));
+  else commentary = Math.random() < 0.75 ? say(C.build, T, whoFrom(atk, 'MID')) : say(C.keep, T, whoFrom(atk, 'DEF'));
+
   const form = FORMATIONS[atk.formation] || FORMATIONS['4-3-3'];
   let best = 0, bestD = 1e9;
   form.slots.forEach((s, i) => {
@@ -547,7 +606,133 @@ function advance(m) {
     if (d < bestD) { bestD = d; best = i; }
   });
   m.ballOwner = `${A}${best}`;
-  return { event, commentary };
+  return { event: wasCounter ? { type:'COUNTER' } : null, commentary };
+}
+
+/* ── one beat = several sequences, reported as the most significant one ── */
+const EVENT_RANK = { GOAL:7, RED:6, SAVE:4, POST:4, OFFSIDE:3, YELLOW:3, CHANCE:2, COUNTER:2 };
+function advance(m) {
+  m.tick++;
+  m.minute = Math.min(90, Math.round(m.tick * MIN_PER_TICK));
+
+  for (const s of ['H', 'A']) {
+    const ctx = s === 'H' ? m.home : m.away;
+    const p = planOf(ctx);
+    for (const u of UNITS) m.stam[s][u] = clamp(m.stam[s][u] - drainFor(p, u), 5, 100);
+    if (ctx.settle > 0) ctx.settle--;
+    m.pressure[s] = Math.max(0, m.pressure[s] * 0.80);
+  }
+
+  const hp = planOf(m.home), ap = planOf(m.away);
+  let seq = 2;
+  if (Math.max(hp.tempo, ap.tempo) > 0.8 && Math.random() < 0.35) seq++;   // end-to-end spells
+  if ((hp.waste || ap.waste) && Math.random() < 0.45) seq--;               // the game gets killed
+  seq = Math.max(1, seq);
+
+  let best = null; let goal = false;
+  m.beat = [];
+  for (let i = 0; i < seq && !goal; i++) {
+    const r = sequence(m);
+    m.beat.push(r.commentary);
+    const score = (r.event && EVENT_RANK[r.event.type]) || 0;
+    if (!best || score >= best.score) best = { score, event: r.event, commentary: r.commentary };
+    if (r.event && r.event.type === 'GOAL') goal = true;
+  }
+  m.read = readOut(m);
+  return { event: best.event, commentary: best.commentary };
+}
+
+/* ── what the manager should be looking at ─────────────────────────────────
+   Everything below is diagnosis, generated from the SAME numbers the engine
+   just used. If a line appears here, it is because it is actually happening
+   in the maths — and the "fix" named is the lever that actually counters it. */
+function possPct(m, side) {
+  const t = m.possTicks.H + m.possTicks.A;
+  return Math.round((m.possTicks[side] / t) * 100);
+}
+
+function readOut(m) {
+  const hp = planOf(m.home), ap = planOf(m.away);
+  const H = m.home.club.short, A = m.away.club.short;
+  const obs = [];
+  const push = (sev, txt) => obs.push([sev, txt]);
+  const pair = (att, def, pAtt, pDef, aT, dT) => {
+    if (pDef.press > 0.6 && pAtt.direct > 0) push(0.9, `${aT} are going long to beat the ${dT} press.`);
+    if (pDef.press > 0.6 && pAtt.direct < 0) push(0.85, `${dT}'s press is suffocating ${aT}'s short passing.`);
+    if (pDef.line > 52 && pAtt.direct > 0)   push(0.8, `${dT}'s high line is leaving space in behind.`);
+    if (pAtt.width > 0 && pDef.width < 0)    push(0.6, `${aT} are stretching a narrow ${dT} back four.`);
+    if (pAtt.width < 0 && pDef.width > 0)    push(0.55, `${aT} are outnumbering ${dT} through the middle.`);
+    if (pDef.offside)                        push(0.45, `${dT} are holding a high line and playing offside.`);
+  };
+  pair(m.home, m.away, hp, ap, H, A);
+  pair(m.away, m.home, ap, hp, A, H);
+  if (m.pressure.H > 55) push(1.1, `${H} have ${A} pinned in — sustained pressure building.`);
+  if (m.pressure.A > 55) push(1.1, `${A} have ${H} pinned in — sustained pressure building.`);
+  if (overallStam(m.stam.H) < 45) push(1.0, `${H} are visibly tiring.`);
+  if (overallStam(m.stam.A) < 45) push(1.0, `${A} are visibly tiring.`);
+  const hf = m.flank.H, af = m.flank.A;
+  const dom = (f, aT, dT) => {
+    const tot = f.L + f.C + f.R;
+    if (tot < 4) return;
+    if (f.L / tot > 0.55) push(0.7, `${aT} are working almost everything down their left.`);
+    else if (f.R / tot > 0.55) push(0.7, `${aT} are working almost everything down their right.`);
+  };
+  dom(hf, H, A); dom(af, A, H);
+  if (!obs.length) return m.read;
+  obs.sort((a, b) => b[0] - a[0]);
+  return obs[0][1];
+}
+
+/* Concrete, actionable problems for ONE side, with the counter named. */
+function analyse(m, side) {
+  const me  = side === 'H' ? m.home : m.away;
+  const opp = side === 'H' ? m.away : m.home;
+  const pm = planOf(me), po = planOf(opp);
+  const S = m.stam[side];
+  const gf = side === 'H' ? m.hg : m.ag, ga = side === 'H' ? m.ag : m.hg;
+  const poss = possPct(m, side);
+  const oppSide = side === 'H' ? 'A' : 'H';
+  const late = m.tick > TICKS * 0.6;
+  const out = [];
+  const add = (sev, text, fix) => out.push({ sev, text, fix });
+
+  if (m.men[side] < 11) add(9, 'You are down to ten men.', 'Go Defensive and Sit Deep — protect what you have.');
+  if (S.MID < 45) add(8, `Your midfield is gone (${Math.round(S.MID)}% stamina).`, 'Substitute a midfielder, or drop Pressing and Tempo.');
+  else if (S.MID < 60 && pm.press > 0.6) add(6, `Your press is running on ${Math.round(S.MID)}% legs.`, 'Drop Pressing to Balanced before it breaks.');
+  if (S.FWD < 45) add(6, `Your forwards are spent (${Math.round(S.FWD)}%).`, 'Bring on a fresh striker.');
+  if (m.pressure[oppSide] > 55) add(8, `${opp.club.short} have you pinned in — pressure is building.`, 'Go Cautious, Sit Deep, and take the tempo out of it.');
+  if (poss < 38) add(6, `You are losing the midfield battle (${poss}% possession).`, 'Go Narrow to outnumber them centrally, or slow the Tempo.');
+  if (po.press > 0.6 && pm.direct < 0) add(7, 'Their press is turning over your short passing.', 'Switch Passing to Direct and go over the top of it.');
+  if (pm.line > 52 && po.direct > 0) add(7, 'They are playing balls over your high line.', 'Drop to Cautious, or set Pressing to Sit Deep.');
+  if (pm.offside && po.direct > 0) add(6, 'Your offside trap is being beaten by direct balls.', 'Turn the trap off against a direct side.');
+  const of = m.flank[oppSide], tot = of.L + of.C + of.R;
+  if (tot >= 4 && pm.width < 0) {
+    const side2 = of.L / tot > 0.55 ? 'their left' : of.R / tot > 0.55 ? 'their right' : null;
+    if (side2) add(5, `${Math.round(Math.max(of.L, of.R) / tot * 100)}% of their attacks are coming down ${side2} — you are too narrow.`, 'Set Width to Wide to cover the flanks.');
+  }
+  if (late && gf < ga) add(7, `You are ${ga - gf} down with ${90 - m.minute} minutes left.`, 'Go Attacking, High Tempo, and use your substitutions.');
+  if (late && gf > ga && !pm.waste) add(4, `You are protecting a ${gf - ga}-goal lead.`, 'Cautious + Time-Wasting kills the game.');
+  if (pm.waste && gf <= ga) add(6, 'You are wasting time without a lead — it only helps them.', 'Turn Time-Wasting off.');
+  if (me.morale < 40) add(5, `Morale has dropped to ${Math.round(me.morale)}%.`, 'Use Encourage on the touchline.');
+  if (!out.length) add(1, 'Nothing is badly wrong — the shape is holding.', 'Look for a weakness you can attack.');
+  return out.sort((a, b) => b.sev - a.sev);
+}
+
+/* Numeric read-out of what a manager's current settings are actually doing. */
+function effectLines(ctx, m, side) {
+  const p = planOf(ctx);
+  const S = m.stam[side];
+  const sg = (n, d = 0) => `${n >= 0 ? '+' : ''}${n.toFixed(d)}`;
+  const drain = UNITS.map(u => `${u[0]}${drainFor(p, u).toFixed(1)}`).join(' ');
+  return [
+    `**Defensive line** ${Math.round(p.line)}%  _(space behind you: ${p.line > 52 ? 'high risk' : p.line < 30 ? 'minimal' : 'moderate'})_`,
+    `**Ball recovery** ${sg(p.press * 4.5, 1)}%  ·  **Foul risk** ${sg(Math.max(0, p.press) * 3.5, 1)}%`,
+    `**Territory per attack** ${sg(p.direct * 5, 1)}  ·  **Possession** ${sg((p.direct < 0 ? 3 : p.direct > 0 ? -2.5 : 0) - Math.max(0, p.tempo) * 1.5, 1)}%`,
+    `**Chance quality vs narrow** ${sg(p.width > 0 ? 11 : 0)}%  ·  **vs wide** ${sg(p.width < 0 ? 8 : 0)}%`,
+    `**Stamina burn / beat** ${drain}  _(now D${Math.round(S.DEF)} M${Math.round(S.MID)} F${Math.round(S.FWD)})_`,
+    p.offside ? '**Offside trap ON** — line +9%, kills through balls, beaten by direct passing' : '',
+    p.waste ? '**Time-wasting ON** — +5% possession, −5 territory, extra card risk' : '',
+  ].filter(Boolean);
 }
 
 /* team shape for rendering — the unit shifts with the ball and mentality */
@@ -586,89 +771,142 @@ function matchFrameState(m) {
     awayPos: shapeFor(m.away, false, m),
     commentary: m.lastCommentary || 'Kick off.',
     event: m.lastEvent || null,
-    // tactical HUD
     hMent: (MENTALITIES[m.home.mentality] || MENTALITIES.balanced).name,
     aMent: (MENTALITIES[m.away.mentality] || MENTALITIES.balanced).name,
     hStyle: styleLine(m.home), aStyle: styleLine(m.away),
-    hStam: m.stam.H, aStam: m.stam.A,
+    hUnits: m.stam.H, aUnits: m.stam.A,
+    hStam: overallStam(m.stam.H), aStam: overallStam(m.stam.A),
+    hPressure: m.pressure.H, aPressure: m.pressure.A,
     hCards: m.cards.H, aCards: m.cards.A,
     hMen: m.men.H, aMen: m.men.A,
+    hSubs: m.home.subsUsed || 0, aSubs: m.away.subsUsed || 0,
     showLines: true, hLine: hp.line, aLine: ap.line,
   };
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
    LIVE MATCH RUNNER
-   One message, edited ~41 times over 90 seconds, with both managers able to
-   change their setup while it runs.
+   Two messages, on purpose:
+     1. the PITCH  — the big image, edited every beat
+     2. the DUGOUT — a compact panel posted underneath it holding the score,
+        what is going wrong, and every control
+   The dugout is the newest message in the channel, so it stays where your
+   eyes already are. You never have to scroll up to the picture and back
+   down to the buttons.
    ══════════════════════════════════════════════════════════════════════════ */
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
+// gid -> { m, seat, done } so interactions (including ephemeral follow-ups,
+// which a message collector would never see) can find the running match.
+const LIVE = new Map();
+
 function liveRows(disabled = false) {
-  const ment = new ActionRowBuilder().addComponents(
-    new StringSelectMenuBuilder().setCustomId('fm:live:ment').setPlaceholder('🧠 Change mentality…')
-      .setDisabled(disabled)
-      .addOptions(MENTALITY_KEYS.map(k => ({ label: MENTALITIES[k].name, value: k, emoji: MENTALITIES[k].emoji }))));
-  const instr = new ActionRowBuilder().addComponents(
-    new StringSelectMenuBuilder().setCustomId('fm:live:instr').setPlaceholder('⚙️ Team instruction…')
-      .setDisabled(disabled)
-      .addOptions(Object.entries(INSTRUCTIONS).flatMap(([k, v]) =>
-        Object.entries(v.opts).map(([ok, ol]) => ({ label: `${v.name}: ${ol}`, value: `${k}|${ok}`, emoji: v.emoji })))));
-  const tog = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('fm:live:tog:offside').setLabel('Offside Trap').setEmoji('🚩')
-      .setStyle(ButtonStyle.Secondary).setDisabled(disabled),
-    new ButtonBuilder().setCustomId('fm:live:tog:timeWaste').setLabel('Time-Wasting').setEmoji('🐢')
-      .setStyle(ButtonStyle.Secondary).setDisabled(disabled),
-    new ButtonBuilder().setCustomId('fm:live:mine').setLabel('My Setup').setEmoji('📋')
-      .setStyle(ButtonStyle.Primary).setDisabled(disabled));
-  const shout = new ActionRowBuilder();
-  for (const [k, s] of Object.entries(SHOUTS))
-    shout.addComponents(new ButtonBuilder().setCustomId(`fm:live:shout:${k}`).setLabel(s.name).setEmoji(s.emoji)
-      .setStyle(k === 'berate' ? ButtonStyle.Danger : ButtonStyle.Secondary).setDisabled(disabled));
-  return [ment, instr, tog, shout];
+  return [
+    new ActionRowBuilder().addComponents(
+      new StringSelectMenuBuilder().setCustomId('fm:live:ment').setPlaceholder('🧠 Mentality…')
+        .setDisabled(disabled)
+        .addOptions(MENTALITY_KEYS.map(k => ({ label: MENTALITIES[k].name, value: k, emoji: MENTALITIES[k].emoji })))),
+    new ActionRowBuilder().addComponents(
+      new StringSelectMenuBuilder().setCustomId('fm:live:instr').setPlaceholder('⚙️ Team instruction…')
+        .setDisabled(disabled)
+        .addOptions(Object.entries(INSTRUCTIONS).flatMap(([k, v]) =>
+          Object.entries(v.opts).map(([ok, ol]) => ({ label: `${v.name}: ${ol}`, value: `${k}|${ok}`, emoji: v.emoji }))))),
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('fm:live:sub').setLabel('Substitution').setEmoji('🔄')
+        .setStyle(ButtonStyle.Primary).setDisabled(disabled),
+      new ButtonBuilder().setCustomId('fm:live:tog:offside').setLabel('Offside Trap').setEmoji('🚩')
+        .setStyle(ButtonStyle.Secondary).setDisabled(disabled),
+      new ButtonBuilder().setCustomId('fm:live:tog:timeWaste').setLabel('Time-Waste').setEmoji('🐢')
+        .setStyle(ButtonStyle.Secondary).setDisabled(disabled),
+      new ButtonBuilder().setCustomId('fm:live:mine').setLabel('My Numbers').setEmoji('📊')
+        .setStyle(ButtonStyle.Secondary).setDisabled(disabled)),
+    new ActionRowBuilder().addComponents(
+      ...Object.entries(SHOUTS).map(([k, s]) =>
+        new ButtonBuilder().setCustomId(`fm:live:shout:${k}`).setLabel(s.name).setEmoji(s.emoji)
+          .setStyle(k === 'berate' ? ButtonStyle.Danger : ButtonStyle.Secondary).setDisabled(disabled))),
+  ];
 }
 
 function applyShout(ctx, key, m, side) {
   const s = SHOUTS[key]; if (!s) return 0;
   const diff = side === 'H' ? m.hg - m.ag : m.ag - m.hg;
   let d = s.morale;
-  if (key === 'praise' && diff < 0) d = -4;          // praising a losing side rings hollow
-  if (key === 'calm'   && diff <= 0) d = 1;          // nothing to protect yet
-  if (key === 'berate' && diff > 0) d = -6;          // needless when ahead
-  if (key === 'berate' && diff < 0) d = 7;           // fires up a losing side
+  if (key === 'praise' && diff < 0) d = -4;
+  if (key === 'calm'   && diff <= 0) d = 1;
+  if (key === 'berate' && diff > 0) d = -6;
+  if (key === 'berate' && diff < 0) d = 7;
   if (key === 'demand' && diff > 1) d = 1;
-  if (key === 'encourage' && diff < 0) d = 8;        // exactly when it helps most
+  if (key === 'encourage' && diff < 0) d = 8;
   ctx.morale = clamp(ctx.morale + d, 10, 100);
   return d;
 }
 
-/* The AI reads the game the same way a manager would. */
+/* The AI manages against you: it reads the same analyse() output you do. */
 function aiThink(ctx, m, side) {
   if (!ctx.ai) return;
   const diff = side === 'H' ? m.hg - m.ag : m.ag - m.hg;
-  const late = m.tick > TICKS * 0.66;
-  const tired = m.stam[side] < 50;
+  const late = m.tick > TICKS * 0.6;
+  const S = m.stam[side];
   const opp = side === 'H' ? m.away : m.home;
-  const oppPlan = planOf(opp);
-  if (diff <= -2)      { ctx.mentality = 'attacking'; ctx.instr.press = 'high'; ctx.instr.tempo = 'fast'; }
-  else if (diff === -1){ ctx.mentality = late ? 'attacking' : 'positive'; ctx.instr.tempo = 'fast'; }
+  const po = planOf(opp);
+
+  if (diff <= -2)       { ctx.mentality = 'attacking'; ctx.instr.press = 'high'; ctx.instr.tempo = 'fast'; }
+  else if (diff === -1) { ctx.mentality = late ? 'attacking' : 'positive'; ctx.instr.tempo = 'fast'; }
   else if (diff >= 2 && late) { ctx.mentality = 'cautious'; ctx.instr.press = 'low'; ctx.instr.timeWaste = true; }
   else if (diff === 1 && late){ ctx.mentality = 'cautious'; ctx.instr.timeWaste = true; }
-  else                 { ctx.mentality = 'balanced'; ctx.instr.timeWaste = false; }
-  // counter the opponent: long balls against a press, sit deeper against pace
-  ctx.instr.pass  = oppPlan.press > 0.6 ? 'direct' : oppPlan.line < 30 ? 'short' : 'mixed';
-  ctx.instr.width = oppPlan.press > 0.6 ? 'narrow' : oppPlan.line < 30 ? 'wide' : 'normal';
-  if (tired) { ctx.instr.press = 'low'; ctx.instr.tempo = 'slow'; }
+  else                  { ctx.mentality = 'balanced'; ctx.instr.timeWaste = false; }
+
+  // counter what it is being shown
+  ctx.instr.pass  = po.press > 0.6 ? 'direct' : po.line < 30 ? 'short' : 'mixed';
+  ctx.instr.width = po.press > 0.6 ? 'narrow' : po.line < 30 ? 'wide' : 'normal';
+  ctx.instr.offside = po.direct <= 0 && po.men.push > 0;
+  if (S.MID < 50) { ctx.instr.press = 'low'; ctx.instr.tempo = 'slow'; }
+
+  // and it makes substitutions when a unit is dead
+  if (ctx.subsUsed < MAX_SUBS) {
+    const worst = UNITS.slice().sort((a, b) => S[a] - S[b])[0];
+    if (S[worst] < 52) {
+      const idx = (ctx.bench || []).findIndex(b => !b.used && unitOf(b.pos) === worst);
+      if (idx !== -1) makeSub(ctx, m, side, idx);
+    }
+  }
   ctx.settle = 1;
 }
 
-function setupField(ctx, m, side) {
+const unitBar = (v) => {
+  const n = Math.round(clamp(v, 0, 100) / 20);
+  return `${'█'.repeat(n)}${'░'.repeat(5 - n)}`;
+};
+
+function sidePanel(ctx, m, side) {
   const men = MENTALITIES[ctx.mentality] || MENTALITIES.balanced;
-  const c = m.cards[side];
-  const bits = [`${men.emoji} **${men.name}**`, styleLine(ctx),
-    `💪 Stamina **${Math.round(m.stam[side])}%**`];
-  if (c.y || c.r) bits.push(`${'🟨'.repeat(Math.min(c.y, 3))}${c.r ? ' 🟥 **10 men**' : ''}`);
-  return bits.join('\n');
+  const S = m.stam[side], c = m.cards[side];
+  const top = analyse(m, side)[0];
+  const bits = [
+    `${men.emoji} **${men.name}** · ${styleLine(ctx)}`,
+    `\`D ${unitBar(S.DEF)} M ${unitBar(S.MID)} F ${unitBar(S.FWD)}\``,
+    `Poss **${possPct(m, side)}%** · Shots **${m.stats[side].shots}** · Subs **${ctx.subsUsed || 0}/${MAX_SUBS}**` +
+      (c.y ? ` · ${'🟨'.repeat(Math.min(c.y, 3))}` : '') + (c.r ? ' 🟥' : ''),
+  ];
+  if (m.pressure[side] > 45) bits.push(`🔥 Momentum **${Math.round(m.pressure[side])}%**`);
+  if (top) bits.push(`⚠️ ${top.text}\n➜ _${top.fix}_`);
+  return bits.join('\n').slice(0, 1020);
+}
+
+function dugoutEmbed(m, live = true) {
+  const e = new EmbedBuilder()
+    .setColor(m.htWindow ? 0xa78bfa : live ? 0x22c55e : 0x64748b)
+    .setTitle(`${m.htWindow ? '🗣️ HALF TIME — ' : ''}${m.home.club.short} ${m.hg} – ${m.ag} ${m.away.club.short}  ·  ${m.minute}'`)
+    .setDescription(live
+      ? (m.htWindow
+          ? '**Free changes for the next few seconds.** Read the problems below and fix them.'
+          : `${m.lastCommentary || 'Kick off.'}${m.read ? `\n🔍 _${m.read}_` : ''}`)
+      : '**Full time.**')
+    .addFields(
+      { name: `🏠 ${m.home.club.name}`, value: sidePanel(m.home, m, 'H'), inline: false },
+      { name: `🛫 ${m.away.club.name}`, value: sidePanel(m.away, m, 'A'), inline: false });
+  if (live) e.setFooter({ text: `${CHANGES_PER_HALF} tactical changes per half (free at half time) · ${MAX_SUBS} substitutions · controls below` });
+  return e;
 }
 
 function matchEmbed(m, live = true) {
@@ -677,24 +915,101 @@ function matchEmbed(m, live = true) {
     .setColor(parseInt((m.hg > m.ag ? m.home.club.c[0] : m.ag > m.hg ? m.away.club.c[0] : '#fbbf24').slice(1), 16))
     .setTitle(`${m.home.club.name}  ${m.hg} – ${m.ag}  ${m.away.club.name}`)
     .setDescription(live ? `⏱️ **${m.minute}'** · ${m.lastCommentary || 'Kick off.'}` : '**Full time.**')
-    .setImage('attachment://pitch.png');
-  if (live && m.read) e.addFields({ name: '🔍 Tactical read', value: m.read, inline: false });
-  e.addFields(
-    { name: `🏠 ${m.home.club.short}`, value: setupField(m.home, m, 'H'), inline: true },
-    { name: `🛫 ${m.away.club.short}`, value: setupField(m.away, m, 'A'), inline: true },
-    { name: 'Match feed', value: feed, inline: false },
-  );
+    .setImage('attachment://pitch.png')
+    .addFields({ name: 'Match feed', value: feed, inline: false });
   if (!live) {
     const hs = m.stats.H, as = m.stats.A;
+    const fl = (f) => `L${f.L}/C${f.C}/R${f.R}`;
     e.addFields(
-      { name: `${m.home.club.short} stats`, value: `Shots **${hs.shots}** · On target **${hs.sot}** · Offside ${hs.offside} · Fouls ${hs.fouls}`, inline: true },
-      { name: `${m.away.club.short} stats`, value: `Shots **${as.shots}** · On target **${as.sot}** · Offside ${as.offside} · Fouls ${as.fouls}`, inline: true },
-    );
-  } else {
-    e.setFooter({ text: 'Both managers can change mentality and instructions live. ' +
-      `${CHANGES_PER_HALF} changes per half — free at half time.` });
+      { name: `${m.home.club.short}`, value: `Shots **${hs.shots}** (${hs.sot} on target)\nFinal third ${hs.final} · Offside ${hs.offside}\nFouls ${hs.fouls} · Attacks ${fl(m.flank.H)}`, inline: true },
+      { name: `${m.away.club.short}`, value: `Shots **${as.shots}** (${as.sot} on target)\nFinal third ${as.final} · Offside ${as.offside}\nFouls ${as.fouls} · Attacks ${fl(m.flank.A)}`, inline: true });
   }
   return e;
+}
+
+/* ── the touchline handler, driven from the global router ──────────────── */
+async function handleLive(interaction, gid, uid) {
+  const live = LIVE.get(gid);
+  if (!live) return interaction.reply({ content: 'That match has finished.', flags: 64 }).catch(()=>{});
+  const { m, seat } = live;
+  const side = seat[uid];
+  if (!side) return interaction.reply({ content: 'Only the two managers can work the touchline.', flags: 64 }).catch(()=>{});
+  const ctx = side === 'H' ? m.home : m.away;
+  const id = interaction.customId;
+
+  if (id === 'fm:live:mine') {
+    const e = new EmbedBuilder().setColor(0x38bdf8)
+      .setTitle('📊 What your settings are doing right now')
+      .setDescription(effectLines(ctx, m, side).join('\n'))
+      .addFields({ name: 'Problems', value: analyse(m, side).slice(0, 3)
+        .map(p => `⚠️ ${p.text}\n➜ _${p.fix}_`).join('\n').slice(0, 1020) })
+      .setFooter({ text: `Changes used this half: ${ctx.changes}/${CHANGES_PER_HALF} · Subs ${ctx.subsUsed}/${MAX_SUBS}` });
+    return interaction.reply({ embeds: [e], flags: 64 }).catch(()=>{});
+  }
+
+  if (id.startsWith('fm:live:shout:')) {
+    const key = id.split(':')[3];
+    const d = applyShout(ctx, key, m, side);
+    const s = SHOUTS[key];
+    return interaction.reply({ content: `${s.emoji} **${s.name}** — morale ${d >= 0 ? '+' : ''}${d} (now ${Math.round(ctx.morale)}).${d < 0 ? ' That did not land well.' : ''}`, flags: 64 }).catch(()=>{});
+  }
+
+  if (id === 'fm:live:sub') {
+    const avail = (ctx.bench || []).map((b, i) => ({ b, i })).filter(x => !x.b.used);
+    if (ctx.subsUsed >= MAX_SUBS)
+      return interaction.reply({ content: `You have used all ${MAX_SUBS} substitutions.`, flags: 64 }).catch(()=>{});
+    if (!avail.length) return interaction.reply({ content: 'Your bench is empty.', flags: 64 }).catch(()=>{});
+    const S = m.stam[side];
+    return interaction.reply({
+      content: `🔄 **Bench** — a sub refreshes that unit's legs.\nCurrent stamina: **DEF ${Math.round(S.DEF)}% · MID ${Math.round(S.MID)}% · FWD ${Math.round(S.FWD)}%**`,
+      flags: 64,
+      components: [new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder().setCustomId('fm:live:subdo').setPlaceholder('Bring on…')
+          .addOptions(avail.slice(0, 25).map(x => ({
+            label: `${x.b.name} (${x.b.pos} ${x.b.rating})`.slice(0, 100),
+            value: String(x.i),
+            description: `Refreshes the ${unitOf(x.b.pos)} unit`.slice(0, 100),
+          }))))],
+    }).catch(()=>{});
+  }
+
+  if (id === 'fm:live:subdo') {
+    const r = makeSub(ctx, m, side, parseInt(interaction.values[0], 10));
+    return interaction.update({ content: r.ok ? r.msg : `🚫 ${r.msg}`, components: [] }).catch(()=>{});
+  }
+
+  // ── rationed tactical changes ──
+  const free = !!m.htWindow;
+  if (!free && ctx.changes >= CHANGES_PER_HALF)
+    return interaction.reply({ content: `🚫 You have used all **${CHANGES_PER_HALF}** changes this half. Half time is free.`, flags: 64 }).catch(()=>{});
+
+  let note = '';
+  if (id === 'fm:live:ment') {
+    const v = interaction.values[0];
+    if (!MENTALITIES[v]) return interaction.deferUpdate().catch(()=>{});
+    const before = planOf(ctx).line;
+    ctx.mentality = v;
+    const after = planOf(ctx).line;
+    note = `${MENTALITIES[v].emoji} Mentality → **${MENTALITIES[v].name}**\nDefensive line **${Math.round(before)}% → ${Math.round(after)}%**`;
+  } else if (id === 'fm:live:instr') {
+    const [k, v] = String(interaction.values[0]).split('|');
+    if (!INSTRUCTIONS[k] || !INSTRUCTIONS[k].opts[v]) return interaction.deferUpdate().catch(()=>{});
+    ctx.instr[k] = v;
+    note = `${INSTRUCTIONS[k].emoji} ${INSTRUCTIONS[k].name} → **${INSTRUCTIONS[k].opts[v]}**\n_${INSTRUCTIONS[k].help}_`;
+  } else if (id.startsWith('fm:live:tog:')) {
+    const k = id.split(':')[3];
+    if (!TOGGLES[k]) return interaction.deferUpdate().catch(()=>{});
+    ctx.instr[k] = !ctx.instr[k];
+    note = `${TOGGLES[k].emoji} ${TOGGLES[k].name} → **${ctx.instr[k] ? 'ON' : 'OFF'}**\n_${TOGGLES[k].help}_`;
+  } else {
+    return interaction.deferUpdate().catch(()=>{});
+  }
+
+  if (!free) { ctx.changes++; ctx.settle = 2; }
+  const tail = free
+    ? '\n_Free at half time._'
+    : `\nThe side takes a beat to settle. Changes left this half: **${CHANGES_PER_HALF - ctx.changes}**`;
+  return interaction.reply({ content: note + tail, flags: 64 }).catch(()=>{});
 }
 
 async function runLiveMatch(channel, m, seatMap, db, gid, saveData) {
@@ -703,112 +1018,66 @@ async function runLiveMatch(channel, m, seatMap, db, gid, saveData) {
   try { png = frame(matchFrameState(m)); }
   catch (e) { console.error('[fm] render failed:', e.message); return null; }
 
-  let msg;
+  let pitchMsg, dugMsg;
   try {
-    msg = await channel.send({
+    pitchMsg = await channel.send({
       embeds: [matchEmbed(m)],
       files: [new AttachmentBuilder(png, { name: 'pitch.png' })],
-      components: liveRows(),
     });
+    dugMsg = await channel.send({ embeds: [dugoutEmbed(m)], components: liveRows() });
   } catch (e) { console.error('[fm] could not post match:', e.message); return null; }
 
-  const sideOf = (uid) => seatMap[uid] || null;
-  const ctxOf  = (side) => side === 'H' ? m.home : m.away;
+  LIVE.set(gid, { m, seat: seatMap });
 
-  const collector = msg.createMessageComponentCollector({ time: MATCH_MS + 20000 });
-  collector.on('collect', async (i) => {
-    try {
-      const side = sideOf(i.user.id);
-      if (!side) return i.reply({ content: 'Only the two managers can work the touchline.', flags: 64 }).catch(()=>{});
-      const ctx = ctxOf(side);
-      const id = i.customId;
-
-      if (id === 'fm:live:mine') {
-        return i.reply({ content: `📋 **Your setup**\n${setupField(ctx, m, side)}\n\nChanges used this half: **${ctx.changes}/${CHANGES_PER_HALF}**`, flags: 64 }).catch(()=>{});
-      }
-      if (id.startsWith('fm:live:shout:')) {
-        const key = id.split(':')[3];
-        const d = applyShout(ctx, key, m, side);
-        const s = SHOUTS[key];
-        return i.reply({ content: `${s.emoji} **${s.name}** — morale ${d >= 0 ? '+' : ''}${d} (now ${Math.round(ctx.morale)}).${d < 0 ? ' That did not land well.' : ''}`, flags: 64 }).catch(()=>{});
-      }
-
-      // ── tactical changes are rationed while the ball is in play ──
-      const free = !!m.htWindow;
-      if (!free && ctx.changes >= CHANGES_PER_HALF)
-        return i.reply({ content: `🚫 You have used all **${CHANGES_PER_HALF}** changes this half. Half time is free.`, flags: 64 }).catch(()=>{});
-
-      let note = '';
-      if (id === 'fm:live:ment') {
-        const v = i.values[0];
-        if (!MENTALITIES[v]) return i.deferUpdate().catch(()=>{});
-        ctx.mentality = v;
-        note = `${MENTALITIES[v].emoji} Mentality → **${MENTALITIES[v].name}**`;
-      } else if (id === 'fm:live:instr') {
-        const [k, v] = String(i.values[0]).split('|');
-        if (!INSTRUCTIONS[k] || !INSTRUCTIONS[k].opts[v]) return i.deferUpdate().catch(()=>{});
-        ctx.instr[k] = v;
-        note = `${INSTRUCTIONS[k].emoji} ${INSTRUCTIONS[k].name} → **${INSTRUCTIONS[k].opts[v]}**\n_${INSTRUCTIONS[k].help}_`;
-      } else if (id.startsWith('fm:live:tog:')) {
-        const k = id.split(':')[3];
-        if (!TOGGLES[k]) return i.deferUpdate().catch(()=>{});
-        ctx.instr[k] = !ctx.instr[k];
-        note = `${TOGGLES[k].emoji} ${TOGGLES[k].name} → **${ctx.instr[k] ? 'ON' : 'OFF'}**\n_${TOGGLES[k].help}_`;
-      } else {
-        return i.deferUpdate().catch(()=>{});
-      }
-
-      if (!free) { ctx.changes++; ctx.settle = 2; }
-      const tail = free ? ' _(free at half time)_' : `\nThe side needs a moment to settle. Changes left this half: **${CHANGES_PER_HALF - ctx.changes}**`;
-      return i.reply({ content: note + tail, flags: 64 }).catch(()=>{});
-    } catch (e) { console.error('[fm] live control error:', e.message); }
-  });
-
-  const paint = async (live = true) => {
+  const paintPitch = async (live = true) => {
     try {
       const buf = frame(matchFrameState(m));
-      await msg.edit({
+      await pitchMsg.edit({
         embeds: [matchEmbed(m, live)],
         files: [new AttachmentBuilder(buf, { name: 'pitch.png' })],
         attachments: [],
-        components: liveRows(!live),
       });
-    } catch (e) { /* a dropped frame is not worth killing the match over */ }
+    } catch { /* a dropped frame is not worth killing the match over */ }
+  };
+  const paintDug = async (live = true) => {
+    try { await dugMsg.edit({ embeds: [dugoutEmbed(m, live)], components: liveRows(!live) }); }
+    catch { /* */ }
   };
 
-  for (let t = 0; t < TICKS && !m.ended; t++) {
-    const started = Date.now();
-    const { event, commentary } = advance(m);
-    m.lastEvent = event; m.lastCommentary = commentary;
+  try {
+    for (let t = 0; t < TICKS && !m.ended; t++) {
+      const started = Date.now();
+      const { event, commentary } = advance(m);
+      m.lastEvent = event; m.lastCommentary = commentary;
 
-    if (m.tick === HT_TICK) {
-      m.lastEvent = { type: 'HT' };
-      m.lastCommentary = 'Half time. Both managers can change everything now — no limit for the next few seconds.';
-      m.htWindow = true;
-      m.home.changes = 0; m.away.changes = 0;
-      m.stam.H = clamp(m.stam.H + 8, 5, 100);
-      m.stam.A = clamp(m.stam.A + 8, 5, 100);
-      aiThink(m.home, m, 'H'); aiThink(m.away, m, 'A');
-      await paint();
-      await sleep(HT_PAUSE_MS);
-      m.htWindow = false;
-      m.lastEvent = { type: 'TALK' };
-      m.lastCommentary = 'Back under way.';
-      await paint();
-      continue;
+      if (m.tick === HT_TICK) {
+        m.lastEvent = { type: 'HT' };
+        m.lastCommentary = 'Half time.';
+        m.htWindow = true;
+        m.home.changes = 0; m.away.changes = 0;
+        for (const s of ['H', 'A']) for (const u of UNITS) m.stam[s][u] = clamp(m.stam[s][u] + 9, 5, 100);
+        aiThink(m.home, m, 'H'); aiThink(m.away, m, 'A');
+        await Promise.all([paintPitch(), paintDug()]);
+        await sleep(HT_PAUSE_MS);
+        m.htWindow = false;
+        m.lastEvent = { type: 'TALK' };
+        m.lastCommentary = 'Back under way.';
+        await Promise.all([paintPitch(), paintDug()]);
+        continue;
+      }
+      if (m.tick % 4 === 0) { aiThink(m.home, m, 'H'); aiThink(m.away, m, 'A'); }
+
+      await Promise.all([paintPitch(), paintDug()]);
+      await sleep(Math.max(0, TICK_MS - (Date.now() - started)));
     }
-    if (m.tick % 8 === 0) { aiThink(m.home, m, 'H'); aiThink(m.away, m, 'A'); }
-
-    await paint();
-    await sleep(Math.max(0, TICK_MS - (Date.now() - started)));
+  } finally {
+    LIVE.delete(gid);
   }
 
-  // full time
   m.ended = true; m.minute = 90;
   m.lastEvent = { type: 'FT' };
   m.lastCommentary = m.hg === m.ag ? 'It ends level.' : `${(m.hg > m.ag ? m.home : m.away).club.name} take it.`;
-  await paint(false);
-  collector.stop();
+  await Promise.all([paintPitch(false), paintDug(false)]);
   return m;
 }
 
@@ -1300,10 +1569,12 @@ function pickAIOpponent(f, myClub) {
 }
 function makeAIContext(club) {
   const formation = pick(FORMATION_KEYS);
+  const squad = bestXI(club, formation);
   return {
-    club, squad: bestXI(club, formation), formation,
+    club, squad, formation,
     mentality: 'balanced', instr: DEFAULT_INSTR(),
     morale: 65, cohesion: 60, ai: true, changes: 0, settle: 0,
+    subsUsed: 0, bench: benchForClub(club, squad),
   };
 }
 function ctxFor(db, gid, uid) {
@@ -1314,6 +1585,7 @@ function ctxFor(db, gid, uid) {
     club: clubById(mgr.clubId), squad: mgr.squad, formation: mgr.formation,
     mentality: mgr.mentality, instr: Object.assign({}, mgr.instr),
     morale: mgr.morale, cohesion: mgr.cohesion, uid, changes: 0, settle: 0,
+    subsUsed: 0, bench: benchForSquad(mgr.squad),
   };
 }
 function recordResult(db, gid, m, api) {
@@ -1393,7 +1665,7 @@ function initFootball({ client, db, saveData, getDinar, spendDinar, awardDinar }
 
       const id = interaction.customId || '';
       if (!id.startsWith('fm:')) return;
-      if (id.startsWith('fm:live:')) return;           // owned by the match collector
+      if (id.startsWith('fm:live:')) return handleLive(interaction, gid, uid);
 
       const w = wrongChannel(interaction);
       if (w) return interaction.reply({ content: w, flags: 64 });
@@ -1636,5 +1908,6 @@ module.exports = {
   fState, getManager, ensureSquad, makePlaceholder, squadRating, lineRating, genName,
   // simulation (exported so behaviour can be tested without a live Discord client)
   newMatch, advance, matchFrameState, makeAIContext, bestXI, ctxFor, planOf, styleLine,
-  TICKS, MATCH_MS, TICK_MS, HT_TICK, CHANGES_PER_HALF,
+  analyse, effectLines, makeSub, benchForSquad, benchForClub, possPct, overallStam,
+  TICKS, MATCH_MS, TICK_MS, HT_TICK, CHANGES_PER_HALF, MAX_SUBS, BENCH_SIZE, UNITS,
 };

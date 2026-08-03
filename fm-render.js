@@ -10,9 +10,12 @@ const FONT_FILES = ['DejaVuSans.ttf', 'DejaVuSans-Bold.ttf']
     .find(p => { try { return fs.existsSync(p); } catch { return false; } }))
   .filter(Boolean);
 
-const W = 1000, H = 700;
+// Wider and shorter than a square-ish frame on purpose: Discord scales the
+// image to the column width, so a lower height:width ratio means less of the
+// screen is eaten by the picture and less scrolling to reach the controls.
+const W = 1080, H = 660;
 const HUD = 78;                                   // top scoreboard height
-const TAC = 30;                                   // tactical strip under the scoreboard
+const TAC = 44;                                   // tactical strip under the scoreboard
 const PX = 20, PY = HUD + TAC + 6;
 const PW = W - PX * 2, PH = H - PY - 44;          // leave room for the ticker
 const sx = (x) => PX + (x / 100) * PW;
@@ -137,47 +140,56 @@ function hud(st) {
   return s + tactics(st);
 }
 
-/* ── tactical strip: what each manager is actually doing right now ──────── */
+/* ── tactical strip: what each manager is doing, and who has the momentum ── */
 function tactics(st) {
-  const y = HUD + 20;
+  const y0 = HUD;
   let s = `<line x1="0" y1="${HUD}" x2="${W}" y2="${HUD}" stroke="#1e293b" stroke-width="1"/>`;
 
-  const stamBar = (x, val, colour, alignRight) => {
-    const bw = 74, bx = alignRight ? x - bw : x;
-    const v = clamp(val, 0, 100);
-    const tint = v > 66 ? '#34d399' : v > 38 ? '#fbbf24' : '#f87171';
-    let o = `<rect x="${bx}" y="${y-9}" width="${bw}" height="6" rx="3" fill="#1e293b"/>`;
-    o += `<rect x="${bx}" y="${y-9}" width="${bw*v/100}" height="6" rx="3" fill="${tint}"/>`;
-    o += `<text x="${alignRight ? bx - 7 : bx + bw + 7}" y="${y-3}" text-anchor="${alignRight ? 'end' : 'start'}"
-      font-family="DejaVu Sans" font-size="11" fill="#64748b">STA</text>`;
+  // per-unit stamina — this is what substitutions actually move
+  const BARW = 52, GAP = 8;
+  const units = (u, x0) => {
+    let o = '';
+    ['DEF', 'MID', 'FWD'].forEach((k, i) => {
+      const bx = x0 + i * (BARW + GAP);
+      const v = clamp(u ? u[k] : 100, 0, 100);
+      const tint = v > 66 ? '#34d399' : v > 40 ? '#fbbf24' : '#f87171';
+      o += `<text x="${bx}" y="${y0 + 16}" font-family="DejaVu Sans" font-size="10" fill="#64748b">${k[0]}</text>`;
+      o += `<rect x="${bx + 10}" y="${y0 + 10}" width="${BARW - 10}" height="6" rx="3" fill="#1e293b"/>`;
+      o += `<rect x="${bx + 10}" y="${y0 + 10}" width="${(BARW - 10) * v / 100}" height="6" rx="3" fill="${tint}"/>`;
+    });
     return o;
   };
 
-  const side = (label, sub, cards, men, x, alignRight) => {
+  const side = (ment, style, cards, x, alignRight) => {
     const anchor = alignRight ? 'end' : 'start';
-    let o = `<text x="${x}" y="${y-1}" text-anchor="${anchor}" font-family="DejaVu Sans"
-      font-size="14" font-weight="700" fill="#e2e8f0">${esc(label)}</text>`;
-    o += `<text x="${x + (alignRight ? -1 : 1) * 0}" y="${y+15}" text-anchor="${anchor}"
-      font-family="DejaVu Sans" font-size="11.5" fill="#94a3b8">${esc(sub)}</text>`;
-    // discipline pips
-    let cx2 = x + (alignRight ? -1 : 1) * (men === 10 ? 0 : 0);
-    let out = '';
-    const total = (cards && cards.y || 0);
-    for (let i = 0; i < Math.min(total, 3); i++) {
-      const px = alignRight ? x - 150 - i*13 : x + 150 + i*13;
-      out += `<rect x="${px}" y="${y-11}" width="9" height="12" rx="1.5" fill="#facc15"/>`;
+    let o = `<text x="${x}" y="${y0 + 17}" text-anchor="${anchor}" font-family="DejaVu Sans"
+      font-size="14" font-weight="700" fill="#e2e8f0">${esc(ment || 'Balanced')}</text>`;
+    o += `<text x="${x}" y="${y0 + 33}" text-anchor="${anchor}" font-family="DejaVu Sans"
+      font-size="11" fill="#94a3b8">${esc((style || '').slice(0, 58))}</text>`;
+    for (let i = 0; i < Math.min(cards && cards.y || 0, 3); i++) {
+      const px = alignRight ? x - 186 - i * 13 : x + 186 + i * 13;
+      o += `<rect x="${px}" y="${y0 + 8}" width="9" height="12" rx="1.5" fill="#facc15"/>`;
     }
     if (cards && cards.r) {
-      const px = alignRight ? x - 150 - 3*13 : x + 150 + 3*13;
-      out += `<rect x="${px}" y="${y-11}" width="9" height="12" rx="1.5" fill="#ef4444"/>`;
+      const px = alignRight ? x - 186 - 3 * 13 : x + 186 + 3 * 13;
+      o += `<rect x="${px}" y="${y0 + 8}" width="9" height="12" rx="1.5" fill="#ef4444"/>`;
     }
-    return o + out;
+    return o;
   };
 
-  s += side(st.hMent || 'Balanced', st.hStyle || '', st.hCards, st.hMen, 108, false);
-  s += side(st.aMent || 'Balanced', st.aStyle || '', st.aCards, st.aMen, W - 108, true);
-  s += stamBar(96, st.hStam == null ? 100 : st.hStam, null, true);
-  s += stamBar(W - 96, st.aStam == null ? 100 : st.aStam, null, false);
+  s += side(st.hMent, st.hStyle, st.hCards, 16, false);
+  s += side(st.aMent, st.aStyle, st.aCards, W - 16, true);
+  s += units(st.hUnits, 286);
+  s += units(st.aUnits, W - 286 - (3 * BARW + 2 * GAP));
+
+  // momentum: who has been camped in the other half lately
+  const cx = W / 2, half = 80;
+  const hp = clamp(st.hPressure || 0, 0, 100) / 100, ap = clamp(st.aPressure || 0, 0, 100) / 100;
+  s += `<text x="${cx}" y="${y0 + 14}" text-anchor="middle" font-family="DejaVu Sans" font-size="9" fill="#64748b">MOMENTUM</text>`;
+  s += `<rect x="${cx - half}" y="${y0 + 19}" width="${half * 2}" height="7" rx="3.5" fill="#1e293b"/>`;
+  s += `<rect x="${cx - half * hp}" y="${y0 + 19}" width="${half * hp}" height="7" rx="3.5" fill="${st.home.c[0]}"/>`;
+  s += `<rect x="${cx}" y="${y0 + 19}" width="${half * ap}" height="7" rx="3.5" fill="${st.away.c[0]}"/>`;
+  s += `<line x1="${cx}" y1="${y0 + 17}" x2="${cx}" y2="${y0 + 28}" stroke="#475569" stroke-width="1.5"/>`;
   return s;
 }
 

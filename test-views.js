@@ -7,9 +7,9 @@ const src = fs.readFileSync(path.join(__dirname, 'football.js'), 'utf8');
 const tmp = path.join(__dirname, '_test_views.js');
 fs.writeFileSync(tmp, src.replace(/\nmodule\.exports = \{[\s\S]*$/, '') + `
 module.exports = { homeView, squadView, clubsView, marketView, posMarketView, tacticsView,
-  instructionsView, retainersView, tableView, liveRows, matchEmbed, getManager, ensureSquad,
-  doBuyClub, doBuyPlayer, getUI, newMatch, advance, matchFrameState, ctxFor, makeAIContext,
-  pickAIOpponent, fState, TICKS, matchFrameState };
+  instructionsView, retainersView, tableView, liveRows, matchEmbed, dugoutEmbed, getManager,
+  ensureSquad, doBuyClub, doBuyPlayer, getUI, newMatch, advance, matchFrameState, ctxFor,
+  makeAIContext, pickAIOpponent, fState, TICKS, analyse, effectLines, makeSub, MAX_SUBS };
 `);
 const FM = require(tmp);
 const DATA = require('./fm-data');
@@ -142,7 +142,7 @@ const r4 = FM.doBuyClub(db, GID, U1, 'arsenal', api);
 console.log(`  second club:        ${r4.ok ? 'WRONGLY ALLOWED' : 'correctly blocked'}`);
 if (r2.ok || r3.ok || r4.ok) problems++;
 
-console.log('\n── live match: 41 frames, embed + PNG each tick ────────');
+console.log('\n── live match: full run, embed + PNG each beat ────────');
 const m = FM.newMatch(FM.ctxFor(db, GID, U1), FM.ctxFor(db, GID, U2));
 let bytes = 0, slowest = 0;
 for (let t = 0; t < FM.TICKS; t++) {
@@ -152,11 +152,18 @@ for (let t = 0; t < FM.TICKS; t++) {
   const png = require('./fm-render').frame(FM.matchFrameState(m));
   slowest = Math.max(slowest, Date.now() - t0);
   bytes += png.length;
-  checkEmbeds(`match t${t}`, [FM.matchEmbed(m, true)]);
-  checkComponents(`match t${t}`, FM.liveRows());
+  checkEmbeds(`pitch t${t}`, [FM.matchEmbed(m, true)]);
+  checkEmbeds(`dugout t${t}`, [FM.dugoutEmbed(m, true)]);
+  checkComponents(`dugout t${t}`, FM.liveRows());
+  if (t === 14) { FM.makeSub(m.home, m, 'H', 0); FM.makeSub(m.away, m, 'A', 1); }
+  if (t === 6) { m.htWindow = true; checkEmbeds('dugout half-time', [FM.dugoutEmbed(m, true)]); m.htWindow = false; }
 }
-checkEmbeds('match FT', [FM.matchEmbed(m, false)]);
-checkComponents('match FT', FM.liveRows(true));
+checkEmbeds('pitch FT', [FM.matchEmbed(m, false)]);
+checkEmbeds('dugout FT', [FM.dugoutEmbed(m, false)]);
+checkComponents('dugout FT', FM.liveRows(true));
+console.log(`  subs used: home ${m.home.subsUsed}, away ${m.away.subsUsed}`);
+console.log(`  unit stamina at FT: H D${Math.round(m.stam.H.DEF)} M${Math.round(m.stam.H.MID)} F${Math.round(m.stam.H.FWD)}`);
+console.log(`  top problem for home: ${FM.analyse(m,'H')[0].text}`);
 console.log(`  final score ${m.hg}-${m.ag}, ${m.stats.H.shots + m.stats.A.shots} shots`);
 console.log(`  render: slowest frame ${slowest}ms, avg PNG ${(bytes/FM.TICKS/1024).toFixed(0)} KB, ${(bytes/1024/1024).toFixed(1)} MB per match`);
 
