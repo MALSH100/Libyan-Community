@@ -277,6 +277,20 @@ function shopState(db, guildId) {
 // the-bot only if no such role exists.
 //
 // `db[gid].__shop.modRoleId` (set via /hub-mod-role) overrides auto-detection if present.
+// `guild.members.me` is only populated from cache and comes back NULL if the bot's own
+// member object hasn't been cached yet (common right after a restart, or in a guild the
+// bot hasn't interacted with). Dereferencing it then throws
+// "Cannot read properties of null (reading 'permissions')" — which, once an interaction
+// has been deferred, leaves the user staring at "thinking..." until Discord times out.
+// Always resolve through this instead, which fetches the member when the cache is empty.
+async function resolveMe(guild) {
+  try {
+    return guild.members.me || await guild.members.fetchMe();
+  } catch {
+    try { return await guild.members.fetch(guild.client.user.id); } catch { return null; }
+  }
+}
+
 function customRoleTargetPosition(guild, db) {
   const me = guild.members.me;
   const botTop = me ? me.roles.highest.position : 1;
@@ -1726,7 +1740,10 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
 
         await interaction.deferReply({ flags: 64 });
         const guild = interaction.guild;
-        if (!guild.members.me.permissions.has('ManageRoles'))
+        const me = await resolveMe(guild);
+        if (!me)
+          return interaction.editReply({ content: '⚠️ I couldn\'t read my own permissions in this server. Try again in a moment, or ask an admin to re-invite me.' });
+        if (!me.permissions.has('ManageRoles'))
           return interaction.editReply({ content: '⚠️ I need the **Manage Roles** permission to do this. Ask an admin to grant it.' });
         const member = await guild.members.fetch(uid);
         let res;
@@ -2456,7 +2473,9 @@ if (interaction.isButton() && interaction.customId === 'prof:upload') {
 
         await interaction.deferReply({ flags: 64 });
         const guild = interaction.guild;
-        const me = guild.members.me;
+        const me = await resolveMe(guild);
+        if (!me)
+          return interaction.editReply({ content: '⚠️ I couldn\'t read my own permissions in this server. Try again in a moment, or ask an admin to re-invite me.' });
         if (!me.permissions.has('ManageRoles'))
           return interaction.editReply({ content: '⚠️ I need the **Manage Roles** permission to do this. Ask an admin to grant it.' });
 
@@ -2479,7 +2498,18 @@ if (interaction.isButton() && interaction.customId === 'prof:upload') {
         return interaction.editReply({
           content: `✅ **${esc(rname)}** is yours! <@&${res.role.id}> has been added to you.\n💰 Paid **${fmt(price)} Dinar** — new balance **${fmt(newBal)}**.\n⏳ **This role expires <t:${Math.round(res.expiresAt / 1000)}:R>** (in 1 month). Open \`/hub\` anytime to refresh or change it.${styleLine}` });
       }
-    } catch (e) { console.error('[hub interaction]', e.message); }
+    } catch (e) {
+      console.error('[hub interaction]', e.message, (e.stack || '').split('\n')[1] || '');
+      // Without this the interaction is simply abandoned: if it was already deferred the
+      // user sits on "thinking..." until Discord gives up minutes later. Always close the
+      // loop, using whichever reply method is still valid for this interaction's state.
+      const msg = '⚠️ Something went wrong there. Please try again — if it keeps happening, let an admin know.';
+      try {
+        if (interaction.deferred && !interaction.replied) await interaction.editReply({ content: msg });
+        else if (!interaction.replied) await interaction.reply({ content: msg, flags: 64 });
+        else await interaction.followUp({ content: msg, flags: 64 });
+      } catch { /* interaction expired or already resolved — nothing more we can do */ }
+    }
   });
 
   return { _test: {
