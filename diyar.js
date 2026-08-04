@@ -1435,28 +1435,32 @@ function reinforceAmount(state, userId, cityId) {
 
 // ─── Wanted UI ──────────────────────────────────────────────────────────────
 const TIER_TINT = { Common: 0x95A5A6, Rare: 0x3498DB, Epic: 0x9B59B6, Legendary: 0xF1C40F, Mythic: 0xE74C3C };
+const TIER_MARK = { Common: '⚪', Rare: '🔵', Epic: '🟣', Legendary: '🟡', Mythic: '🔴' };
 
 function wantedPosterEmbed(state, avatarUrl, displayName) {
   const w = state.wanted; if (!w) return null;
-  const clues = w.clues.map((c, i) => `**${i + 1}.** ${c}`).join('\n');
   const left = WANTED_MAX_CLUES - w.clues.length;
+  const clues = w.clues.map((c, i) => `**${i + 1}.**  ${c}`).join('\n');
   const e = new EmbedBuilder().setColor(TIER_TINT[w.rarity] || COLOR.grey)
-    .setTitle('🪧 WANTED — DEAD LINE OR ALIVE')
+    .setTitle('🪧  WANTED')
     .setDescription(
-      `**${esc(displayName)}** *(${w.rarity})* has gone to ground somewhere in Libya.\n` +
-      `Wanted for: *${w.crime}*.\n\n` +
-      `💰 **Bounty: ${fmt(w.bounty)} Dinar**\n\n` +
-      `**What the informants say**\n${clues}\n\n` +
-      `🔍 Searching a city costs **${fmt(WANTED_SEARCH_FEE)} Dinar**. ` +
-      `**One search each** — then wait for the next clue.\n` +
-      (left > 0 ? `⏳ Next clue in **${msLeft(w.nextClueAt)}**  •  **${left}** clue${left === 1 ? '' : 's'} left before they slip away.`
-                : '⏳ **Final clue.** After this they\'re gone for good.'))
-    .setFooter({ text: 'The hunted keeps a cut of their own bounty — opt in with /gacha-optin' });
-  if (/^https?:\/\//.test(avatarUrl || '')) e.setThumbnail(avatarUrl);   // a bad URL would throw and kill the whole poster
+      `### ${esc(displayName)}\n` +
+      `${TIER_MARK[w.rarity] || ''} ${w.rarity}  •  wanted for *${w.crime}*\n\n` +
+      `They're hiding in one of the 25 cities. Follow the informants and go door to door.`)
+    .addFields(
+      { name: '💰 Bounty', value: `**${fmt(w.bounty)}** Dinar`, inline: true },
+      { name: '🔍 Cost to search', value: `**${fmt(WANTED_SEARCH_FEE)}** Dinar`, inline: true },
+      { name: '🕵 Searches left', value: '**1** until next clue', inline: true },
+      { name: `📜 Informant reports  (${w.clues.length}/${WANTED_MAX_CLUES})`, value: clues },
+    )
+    .setFooter({ text: left > 0
+      ? `Next clue in ${msLeft(w.nextClueAt)} · ${left} clue${left === 1 ? '' : 's'} left before they vanish`
+      : 'Final clue — after this they are gone for good' });
+  if (/^https?:\/\//.test(avatarUrl || '')) e.setThumbnail(avatarUrl);
   return e;
 }
 
-// all 25 cities fit one Discord dropdown exactly
+// all 25 cities fit exactly one Discord dropdown
 function wantedRow(disabled) {
   const menu = new StringSelectMenuBuilder().setCustomId('dy:wt_guess')
     .setPlaceholder(disabled ? 'The hunt is over' : `🔍 Search a city  (${fmt(WANTED_SEARCH_FEE)} Dinar)`)
@@ -1467,11 +1471,12 @@ function wantedRow(disabled) {
 
 function wantedCaughtEmbed(w, finderName, avatarUrl, displayName) {
   const e = new EmbedBuilder().setColor(COLOR.green)
-    .setTitle('⛓ Caught!')
+    .setTitle('⛓  Caught!')
     .setDescription(
-      `**${esc(finderName)}** kicked in a door in **${esc(CITY_BY_ID[w.cityId].name)}** and found **${esc(displayName)}** hiding there.\n\n` +
-      `💰 Bounty **${fmt(w.payout.bounty)} Dinar** to ${esc(finderName)}\n` +
-      `🪙 **${fmt(w.payout.cut)} Dinar** to ${esc(displayName)} — they talked their way to a cut`)
+      `**${esc(finderName)}** kicked in a door in **${esc(CITY_BY_ID[w.cityId].name)}** and found **${esc(displayName)}** hiding there.`)
+    .addFields(
+      { name: '💰 Bounty', value: `**${fmt(w.payout.bounty)}** Dinar to ${esc(finderName)}`, inline: true },
+      { name: '🪙 The cut', value: `**${fmt(w.payout.cut)}** Dinar to ${esc(displayName)}`, inline: true })
     .setFooter({ text: 'A new face goes on the run each day.' });
   if (/^https?:\/\//.test(avatarUrl || '')) e.setThumbnail(avatarUrl);   // a bad URL would throw and kill the whole poster
   return e;
@@ -1689,7 +1694,7 @@ function initDiyar({ client, db, saveData, awardLP }) {
     try {
       const ch = await client.channels.fetch(state.channelId);
       const msg = await ch.send({ embeds: [caravanOfferEmbed(state)], components: [caravanRow(false)] });
-      c.messageId = msg.id; c.channelId = ch.id; saveData(guildId);
+      c.messageId = msg.id; c.channelId = ch.id || state.channelId; saveData(guildId);
     } catch (e) { console.error('[diyar caravan post]', e.message); }
   }
   // replay the already-committed result frame by frame, then swap in the final card
@@ -1748,15 +1753,39 @@ function initDiyar({ client, db, saveData, awardLP }) {
 
   // ----- the Hunt -----
   // resolve the hunted member's face/name at display time, so avatar changes keep up
+  // Resolving the hunted member is the one thing that can silently degrade: this bot runs
+  // WITHOUT the GuildMembers intent, so nothing is pre-cached and every lookup is a live
+  // API call. Try cache -> guild fetch -> global user fetch, remember the first success on
+  // the hunt object, and log loudly rather than quietly printing "a stranger".
   async function wantedFace(guildId) {
     const state = stateOf(guildId); const w = state.wanted;
     if (!w) return { url: null, name: 'Unknown' };
+    const remember = (name, url) => {
+      if (name) w.faceName = name;
+      if (url) w.faceUrl = url;
+      saveData(guildId);
+      return { name: w.faceName, url: w.faceUrl || null };
+    };
+    // 1. guild member — gives the server nickname, which is what people actually know
     try {
-      const g = await client.guilds.fetch(guildId);
-      const m = await g.members.fetch(w.userId);
-      return { url: m.displayAvatarURL({ extension: 'png', size: 256 }), name: m.displayName };
-    } catch { return { url: null, name: 'a stranger' }; }
+      const g = client.guilds.cache.get(guildId) || await client.guilds.fetch(guildId);
+      const m = g.members.cache.get(w.userId) || await g.members.fetch(w.userId);
+      if (m) return remember(m.displayName || m.user?.globalName || m.user?.username,
+                             m.displayAvatarURL({ extension: 'png', size: 256 }));
+    } catch (e) {
+      console.warn(`[diyar wanted] guild member lookup failed for ${w.userId}: ${e.message}`);
+    }
+    // 2. global user — still works if they've left the server or the member route failed
+    try {
+      const u = await client.users.fetch(w.userId);
+      if (u) return remember(u.globalName || u.username, u.displayAvatarURL({ extension: 'png', size: 256 }));
+    } catch (e) {
+      console.warn(`[diyar wanted] user lookup failed for ${w.userId}: ${e.message}`);
+    }
+    // 3. whatever we resolved earlier in this same hunt
+    return { url: w.faceUrl || null, name: w.faceName || 'a stranger' };
   }
+
   async function postWanted(guildId) {
     const state = stateOf(guildId); const w = state.wanted;
     if (!w || !state.channelId) return;
@@ -1764,19 +1793,41 @@ function initDiyar({ client, db, saveData, awardLP }) {
       const ch = await client.channels.fetch(state.channelId);
       const face = await wantedFace(guildId);
       const msg = await ch.send({ embeds: [wantedPosterEmbed(state, face.url, face.name)], components: [wantedRow(false)] });
-      w.messageId = msg.id; w.channelId = ch.id; saveData(guildId);
+      w.messageId = msg.id; w.channelId = ch.id || state.channelId; saveData(guildId);   // never blank out the channel we already knew
     } catch (e) { console.error('[diyar wanted post]', e.message); }
   }
-  async function refreshWanted(guildId) {
+  // Every new clue REPOSTS the board at the bottom of the channel instead of editing in
+  // place, so nobody has to scroll up to search. The old poster is deleted; if that fails
+  // (missing Manage Messages), it's greyed out and disabled so it can't be used twice.
+  async function repostWanted(guildId) {
     const state = stateOf(guildId); const w = state.wanted;
-    if (!w || !w.channelId || !w.messageId) return;
+    if (!w || !w.channelId) return;
+    let ch;
+    try { ch = await client.channels.fetch(w.channelId); }
+    catch (e) { return console.error('[diyar wanted repost]', e.message); }
+    const oldId = w.messageId;
+    const face = await wantedFace(guildId);
     try {
-      const ch = await client.channels.fetch(w.channelId);
-      const msg = await ch.messages.fetch(w.messageId);
-      const face = await wantedFace(guildId);
-      await msg.edit({ embeds: [wantedPosterEmbed(state, face.url, face.name)], components: [wantedRow(false)] });
-    } catch { /* poster gone — the hunt carries on regardless */ }
+      const msg = await ch.send({ embeds: [wantedPosterEmbed(state, face.url, face.name)], components: [wantedRow(false)] });
+      w.messageId = msg.id; saveData(guildId);
+    } catch (e) { return console.error('[diyar wanted repost send]', e.message); }
+    if (!oldId) return;
+    try {
+      const prev = await ch.messages.fetch(oldId);
+      await prev.delete();
+    } catch {
+      // couldn't delete — neutralise it instead so there aren't two live dropdowns
+      try {
+        const prev = await ch.messages.fetch(oldId);
+        await prev.edit({
+          embeds: [new EmbedBuilder().setColor(COLOR.grey)
+            .setDescription('🪧 *An older wanted poster. A newer one with the latest clue is further down the channel.*')],
+          components: [wantedRow(true)],
+        });
+      } catch { /* message is gone entirely, which is fine */ }
+    }
   }
+
   async function finishWanted(guildId, how) {
     const state = stateOf(guildId); const w = state.wanted;
     if (!w) return;
@@ -1925,7 +1976,7 @@ function initDiyar({ client, db, saveData, awardLP }) {
               w.clues.push(wantedClue(w.cityId, w.clueIdx));
               w.nextClueAt = now + WANTED_CLUE_MS;
               saveData(guild.id);
-              await refreshWanted(guild.id);
+              await repostWanted(guild.id);
             }
           }
         }
@@ -2089,7 +2140,17 @@ function initDiyar({ client, db, saveData, awardLP }) {
           return;
         }
         const w = state.wanted;
-        await interaction.reply(eph({ content: `🔍 You turn over **${r.city.name}** and find nothing but tea glasses and a cold trail. **−${fmt(WANTED_SEARCH_FEE)} Dinar**.\n\nNext clue in **${msLeft(w.nextClueAt)}** — you get another search then.` }));
+        const searched = Object.values(w.guesses).filter(i => i === w.clueIdx).length;
+        const remaining = WANTED_MAX_CLUES - w.clues.length;
+        // public, so the room can see the net closing — but never WHICH city was cleared,
+        // or one player's failure would hand everyone else a free elimination
+        await interaction.reply({ content:
+          `🔍 **${esc(state.players[uid].name)}** turned over a city and came up empty. ` +
+          `*(${searched} searched since the last clue${remaining > 0 ? ` · next clue in ${msLeft(w.nextClueAt)}` : ' · final clue'})*` });
+        // only the searcher learns where they actually looked
+        await interaction.followUp(eph({ content:
+          `You searched **${r.city.name}** — nothing but cold tea glasses. **−${fmt(WANTED_SEARCH_FEE)} Dinar**.\n` +
+          `You get another search when the next clue drops in **${msLeft(w.nextClueAt)}**.` })).catch(() => {});
         return;
       }
 
@@ -2246,6 +2307,7 @@ function initDiyar({ client, db, saveData, awardLP }) {
       getState: () => stateOf, ensurePlayer, resolveAttack, recruit, upgrade, reinforce, collectIncome, tick,
       spawnBoss, strikeBoss, resolveBossDefeat, resolveBossExpire, playerStrength, ensureBossSched,
       pendingIncome, renderMap, renderBoss, renderBattle, pickTimes, reseedIfLanded, rankPlayers, threatEmbed, threatSiegeLines, threatBar,
+      postWanted, repostWanted, wantedFace, finishWanted,
       spawnWanted, guessWanted, escapeWanted, ensureWantedSched, wantedClue, wantedPosterEmbed, wantedRow, cityRegion,
       spawnCaravan, claimCaravan, ensureCaravanSched, caravanOfferEmbed, caravanFrameEmbed, caravanFinalEmbed, caravanExpireEmbed, caravanRow,
       claimTribute, buyWeapon, armouryView, profileView, leaderboard, resetSeason, targetSelect, reinforceSelect, effectiveDefence, effectiveAttack, startRaid, resolveRaid, troopCost, raidLiveEmbed, raidResultEmbed, threatTick, finishThreat, inviteLine, postNudge, threatDefeatEmbed, threatWithdrawEmbed, strikeBoss,
