@@ -54,7 +54,7 @@ const THREAT_GARRISON_FLOOR = 20;                  // never grinds a garrison be
 const BOSS_HP_MIN         = 3000;                  // threat HP rolls randomly between these
 const BOSS_HP_MAX         = 8000;
 const BOSS_HP_PER_PLAYER  = 0;                     // flat HP (raise this to scale with player count)
-const BOSS_SPAWNS_PER_DAY = 2;
+const BOSS_SPAWNS_PER_DAY = 1;
 const BOSS_WIN_START      = 11;                    // Libya-time window for spawns
 const BOSS_WIN_END        = 23;
 const LIBYA_OFFSET_MS     = 2 * 3600 * 1000;       // UTC+2, no DST
@@ -65,6 +65,63 @@ const BOSS_DEFS = [
   { name: 'The Fezzan Brigands',   tag: 'Desert bandits seize the south' },
   { name: 'The Iron Caravan',      tag: 'A mercenary host marches north' },
 ];
+
+// ─── Caravans ───────────────────────────────────────────────────────────────
+// Once a day a caravan crosses between two real Libyan cities and posts in the war
+// room with two buttons. FIRST CLICK WINS — the claim is taken synchronously before
+// any await, so two people tapping at the same instant can never both be served.
+const CARAVAN_SPAWNS_PER_DAY = 1;
+const CARAVAN_WIN_START   = 12;                  // Libya-time window for the daily caravan
+const CARAVAN_WIN_END     = 22;
+const CARAVAN_EXPIRE_MS   = 60 * 60 * 1000;      // unclaimed, it moves on after an hour
+const CARAVAN_FRAME_MS    = 1500;                // message-edit cadence for the result animation
+const CARAVAN_FRAMES      = 6;                   // number of animation frames before the final card
+const CARAVAN_REPEL_PAYOUT = 0.25;               // share of the purse you still grab if the escort drives you off
+const randInt = (a, b) => a + Math.floor(Math.random() * (b - a + 1));
+
+// Every caravan is a different trade-off, and the offer message hints at which.
+//   purse  — Dinar seized on a successful raid
+//   guard  — soldiers you lose raiding (paid win OR lose)
+//   folk   — recruits gained by inviting
+//   risk   — chance the escort beats you back (you still pay `guard`, but only
+//            keep CARAVAN_REPEL_PAYOUT of the purse)
+//   minArmy— troops you must have in reserve to even attempt the raid
+// Balanced around troop cost: at 1.5 Dinar/troop the two buttons are near-identical
+// in value, so the real decision is your own position — landless rulers want the
+// coin, sprawling empires (3 Dinar/troop) want the men.
+const CARAVAN_DEFS = [
+  // Tuned against  purse x (1 - 0.75*risk)  ==  1.5 x (guard + folk), which is the point
+  // where both buttons pay the same. Most caravans sit near that line (a real coin-flip);
+  // a few are deliberately skewed so not every day feels the same.
+  { name: 'The Salt Caravan',     tag: 'camels bowed under slabs of Fezzan salt',
+    purse: [700, 980], guard: [150, 260], folk: [200, 300], risk: 0.25, minArmy: 150 },
+  { name: 'The Ghadames Traders', tag: 'silk, spice and rumours off the oasis road',
+    purse: [740, 1010], guard: [190, 300], folk: [180, 280], risk: 0.25, minArmy: 190 },
+  { name: 'The Tuareg Outriders', tag: 'blue-veiled riders who fight as well as they trade',
+    purse: [1200, 1700], guard: [300, 480], folk: [260, 380], risk: 0.40, minArmy: 300 },
+  { name: 'The Arms Dealers',     tag: 'crates nobody is meant to open',
+    purse: [1150, 1600], guard: [350, 550], folk: [150, 250], risk: 0.35, minArmy: 350, weapon: true },
+  { name: 'The Gold Convoy',      tag: 'sealed coin chests behind a wall of hired spears',
+    purse: [1220, 1580], guard: [400, 650], folk: [90, 170], risk: 0.35, minArmy: 400 },
+  { name: 'The Fuel Runners',     tag: 'a smuggler convoy running the desert highway',
+    purse: [600, 900], guard: [120, 220], folk: [80, 160], risk: 0.45, minArmy: 120 },
+  { name: 'The Wandering Column', tag: 'families walking north, looking for a home',
+    purse: [150, 350], guard: [40, 110], folk: [380, 620], risk: 0.10, minArmy: 40 },
+  { name: 'The Pilgrim Train',    tag: 'travellers on the long road east, lightly kept',
+    purse: [200, 400], guard: [30, 90], folk: [300, 450], risk: 0.10, minArmy: 30 },
+];
+// A raid's purse scales with what troops actually cost you, because otherwise the choice
+// is structurally unbalanced: soldiers are worth 1, 1.5 or 3 Dinar depending on how much
+// land you hold, so a fixed purse makes raiding a no-brainer when troops are cheap and
+// suicidal when they're dear. Scaling by the same factor makes the verdict depend on the
+// CARAVAN, not on your rank — which is the whole point of the two buttons.
+const cvPurseMult = (unitCost) => unitCost / 1.5;
+// qualitative hints for the offer card — players see the shape of the trade, never the roll
+const band = (v, lo, hi) => v <= lo ? 0 : v >= hi ? 2 : 1;
+const PURSE_WORDS = ['light', 'worth taking', 'heavy'];
+const FOLK_WORDS  = ['a handful', 'a fair number', 'a great many'];
+const GUARD_WORDS = ['barely escorted', 'well escorted', 'heavily escorted'];
+const RISK_WORDS  = ['unlikely to hold', 'may hold', 'likely to hold'];
 
 // ─── Cities (real Libyan locations; lon/lat drive the map projection) ──────────
 const CITY_DEFS = [
@@ -310,7 +367,7 @@ function getState(db, guildId, saveData) {
   const data = db[guildId] || (db[guildId] = {});
   let dirty = false;
   if (!data.__diyar) {
-    data.__diyar = { players: {}, cities: {}, boss: null, bossSched: null, channelId: null };
+    data.__diyar = { players: {}, cities: {}, boss: null, bossSched: null, caravan: null, caravanSched: null, channelId: null };
     dirty = true;
   }
   // seed (first run) or backfill (new cities added later) any CITY_DEFS not yet in state
@@ -846,6 +903,175 @@ function ensureBossSched(state, saveData, guildId, nowMs) {
   return state.bossSched;
 }
 
+// ─── Caravans ───────────────────────────────────────────────────────────────
+// Roll the whole outcome up front so the animation is just a replay of a result
+// that already landed in the player's balance — a crash mid-animation can't rob them.
+function spawnCaravan(state, saveData, guildId) {
+  if (state.caravan) return null;
+  const def = CARAVAN_DEFS[Math.floor(Math.random() * CARAVAN_DEFS.length)];
+  const a = CITY_DEFS[Math.floor(Math.random() * CITY_DEFS.length)];
+  let b = a;
+  while (b.id === a.id) b = CITY_DEFS[Math.floor(Math.random() * CITY_DEFS.length)];
+  const now = Date.now();
+  state.caravan = {
+    id: 'c' + now.toString(36),
+    name: def.name, tag: def.tag, weapon: !!def.weapon,
+    fromId: a.id, fromName: a.name, toId: b.id, toName: b.name,
+    minArmy: def.minArmy,
+    hint: {
+      purse: band((def.purse[0] + def.purse[1]) / 2, 450, 1000),
+      folk:  band((def.folk[0] + def.folk[1]) / 2, 200, 330),
+      guard: band((def.guard[0] + def.guard[1]) / 2, 150, 400),
+      risk:  band(def.risk, 0.2, 0.35),
+    },
+    roll: {
+      purse:    randInt(def.purse[0], def.purse[1]),
+      guard:    randInt(def.guard[0], def.guard[1]),
+      folk:     randInt(def.folk[0], def.folk[1]),
+      repelled: Math.random() < def.risk,          // pre-rolled, so the animation can't lie
+    },
+    spawnedAt: now, expiresAt: now + CARAVAN_EXPIRE_MS,
+    claimedBy: null, claimedName: null, choice: null, result: null,
+    channelId: state.channelId, messageId: null,
+  };
+  if (saveData) saveData(guildId);
+  return state.caravan;
+}
+
+// FIRST CLICK WINS. Everything here is synchronous — no await between the
+// claimedBy check and the claimedBy write — so the race is decided atomically.
+function claimCaravan(state, db, guildId, saveData, userId, choice) {
+  const c = state.caravan;
+  if (!c) return { error: '🐪 That caravan has already moved on.' };
+  if (c.claimedBy) return { error: `🐪 Too late — **${esc(c.claimedName)}** reached the caravan first.` };
+  const p = state.players[userId];
+  if (!p) return { error: 'Join the game first with `/diyar`.' };
+  // gate the raid on a real commitment of men — otherwise an empty-handed player
+  // could take the purse for free, and nobody would ever press Invite
+  if (choice === 'raid' && p.army < c.minArmy)
+    return { error: `🗡️ You need at least **${fmt(c.minArmy)}** troops in reserve to ride down this caravan — you have **${fmt(p.army)}**. Recruit, or welcome them in instead.` };
+
+  c.claimedBy = userId; c.claimedName = p.name; c.choice = choice; c.claimedAt = Date.now();
+  p.stats = p.stats || {};
+  if (choice === 'raid') {
+    const loss = Math.min(c.roll.guard, p.army);          // never below zero
+    const repelled = c.roll.repelled;
+    const purse = Math.round(c.roll.purse * cvPurseMult(troopCost(state, userId)));
+    const dinar = repelled ? Math.round(purse * CARAVAN_REPEL_PAYOUT) : purse;
+    let weapon = false;
+    if (!repelled && c.weapon && p.weaponTier < ARMOURY_MAX_TIER) { p.weaponTier++; weapon = true; }
+    p.army -= loss;
+    awardDinar(db, guildId, userId, dinar, saveData);
+    c.result = { loss, dinar, repelled, weapon, tier: p.weaponTier };
+    p.stats.caravansRaided = (p.stats.caravansRaided || 0) + 1;
+  } else {
+    p.army += c.roll.folk;
+    c.result = { recruits: c.roll.folk };
+    p.stats.caravansJoined = (p.stats.caravansJoined || 0) + 1;
+  }
+  if (saveData) saveData(guildId);
+  return { ok: true, caravan: c };
+}
+
+const cvBar = (pct, fill) => {
+  const n = clamp(Math.round(pct * 12), 0, 12);
+  return fill.repeat(n) + '⬛'.repeat(12 - n);
+};
+
+function caravanOfferEmbed(state) {
+  const c = state.caravan; if (!c) return null;
+  const h = c.hint;
+  return new EmbedBuilder().setColor(COLOR.gold)
+    .setTitle(`🐪 ${esc(c.name)} approaches!`)
+    .setDescription(
+      `*${esc(c.tag)}*\n\n` +
+      `Travelling from **${esc(c.fromName)}** to **${esc(c.toName)}**. ` +
+      `Word spreads fast — **the first ruler to act takes it.**\n\n` +
+      `**Scouts report:** a **${PURSE_WORDS[h.purse]}** purse • **${FOLK_WORDS[h.folk]}** travelling • **${GUARD_WORDS[h.guard]}**` +
+      (c.weapon ? ' • *the crates look like weapons*' : '') + '\n\n' +
+      `🗡️ **Raid the Caravan** — take the purse by force. Costs you soldiers whatever happens, and the escort is **${RISK_WORDS[h.risk]}**. Needs **${fmt(c.minArmy)}+** troops in reserve.\n` +
+      `🤝 **Invite the Caravan** — welcome them in. They settle and join your ranks as recruits. No cost, no risk.\n\n` +
+      `⏳ It passes through in **${msLeft(c.expiresAt)}**.`)
+    .setFooter({ text: 'First click wins — only one ruler gets this caravan.' });
+}
+
+function caravanRow(disabled) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('dy:cv_raid').setLabel('🗡️ Raid the Caravan').setStyle(ButtonStyle.Danger).setDisabled(!!disabled),
+    new ButtonBuilder().setCustomId('dy:cv_invite').setLabel('🤝 Invite the Caravan').setStyle(ButtonStyle.Success).setDisabled(!!disabled));
+}
+
+// one animation frame — `step` runs 0 … CARAVAN_FRAMES, ramping toward the real totals
+function caravanFrameEmbed(c, step) {
+  const pct = clamp(step / CARAVAN_FRAMES, 0, 1);
+  const ease = pct * pct * (3 - 2 * pct);          // smoothstep, so it doesn't crawl linearly
+  if (c.choice === 'raid') {
+    const loss  = Math.round(c.result.loss * ease);
+    const dinar = Math.round(c.result.dinar * ease);
+    // the escort only visibly holds in the last third, so the outcome isn't spoiled early
+    const turned = c.result.repelled && pct > 0.6;
+    return new EmbedBuilder().setColor(turned ? COLOR.grey : COLOR.red)
+      .setTitle(`🗡️ ${esc(c.claimedName)} raids ${esc(c.name)}!`)
+      .setDescription(
+        (turned ? `The escort forms up and **holds the line** — your riders break off with what they can carry.\n\n`
+                : `Riders sweep out of **${esc(c.toName)}** and fall on the convoy.\n\n`) +
+        `🪖 **Soldiers lost**\n\`${cvBar(ease, '🟥')}\`  **−${fmt(loss)}**\n\n` +
+        `💰 **Dinar seized**\n\`${cvBar(ease, '🟨')}\`  **+${fmt(dinar)}**` +
+        (pct >= 1 ? '' : '\n\n*The dust hasn\'t settled…*'));
+  }
+  const men = Math.round(c.result.recruits * ease);
+  return new EmbedBuilder().setColor(COLOR.green)
+    .setTitle(`🤝 ${esc(c.claimedName)} welcomes ${esc(c.name)}`)
+    .setDescription(
+      `The gates of **${esc(c.toName)}** open and the travellers are led in.\n\n` +
+      `🪖 **Recruits joining**\n\`${cvBar(ease, '🟩')}\`  **+${fmt(men)}**` +
+      (pct >= 1 ? '' : '\n\n*More are still coming through the gate…*'));
+}
+
+function caravanFinalEmbed(c) {
+  if (c.choice === 'raid') {
+    const r = c.result;
+    const short = r.loss < c.roll.guard
+      ? `\n\n*They had barely enough men to press the attack — only **${fmt(r.loss)}** rode out, and none came back.*` : '';
+    const prize = r.weapon ? `\n🗡 Seized weapons — **weapon tier ${r.tier}**!` : '';
+    return new EmbedBuilder().setColor(r.repelled ? COLOR.grey : COLOR.red)
+      .setTitle(r.repelled ? `🛡 ${esc(c.name)} — escort held` : `🗡️ ${esc(c.name)} — plundered`)
+      .setDescription(
+        (r.repelled
+          ? `**${esc(c.claimedName)}** hit the caravan on the road to **${esc(c.toName)}**, but the escort held and drove them off with only scraps.`
+          : `**${esc(c.claimedName)}** rode down the caravan on the road to **${esc(c.toName)}**.`) + '\n\n' +
+        `💰 Took **${fmt(r.dinar)} Dinar**\n` +
+        `🪖 Lost **${fmt(r.loss)}** soldiers${prize}${short}`)
+      .setFooter({ text: 'A new caravan crosses Libya each day.' });
+  }
+  return new EmbedBuilder().setColor(COLOR.green)
+    .setTitle(`🤝 ${esc(c.name)} — welcomed`)
+    .setDescription(
+      `**${esc(c.claimedName)}** took the travellers in at **${esc(c.toName)}**.\n\n` +
+      `🪖 Gained **${fmt(c.result.recruits)}** recruits\n` +
+      `💰 Cost **nothing**, risked **nothing**`)
+    .setFooter({ text: 'A new caravan crosses Libya each day.' });
+}
+
+function caravanExpireEmbed(c) {
+  return new EmbedBuilder().setColor(COLOR.grey)
+    .setTitle(`🐪 ${esc(c.name)} passed through`)
+    .setDescription(`No one moved on it. The caravan reached **${esc(c.toName)}** unharmed and carried on its way.`);
+}
+
+function ensureCaravanSched(state, saveData, guildId, nowMs) {
+  const { dateStr, startOfDayUTC } = libyaDay(nowMs);
+  if (!state.caravanSched || state.caravanSched.date !== dateStr) {
+    const ws = startOfDayUTC + CARAVAN_WIN_START * 3600000;
+    const we = startOfDayUTC + CARAVAN_WIN_END * 3600000;
+    const eff = Math.max(ws, nowMs);
+    const spawns = (we - eff > 5 * 60000) ? pickTimes(eff, we, CARAVAN_SPAWNS_PER_DAY, 90 * 60000).map(at => ({ at, fired: false })) : [];
+    state.caravanSched = { date: dateStr, spawns };
+    if (saveData) saveData(guildId);
+  }
+  return state.caravanSched;
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 //  UI
 // ════════════════════════════════════════════════════════════════════════════
@@ -876,13 +1102,15 @@ function dashboard(state, db, guildId, userId) {
   const dinar = getDinar(db, guildId, userId);
   const shield = p.shieldUntil > Date.now() ? `  •  🛡 Truce: ${msLeft(p.shieldUntil)}` : '';
   const boss = state.boss ? `\n\n👹 **${state.boss.name}** is loose — open **Attack → Boss** or use the strike button in the war room!` : '';
+  const cvn = (state.caravan && !state.caravan.claimedBy)
+    ? `\n\n🐪 **${state.caravan.name}** is on the road to **${state.caravan.toName}** — first ruler to act in the war room takes it!` : '';
   const embed = new EmbedBuilder().setColor(COLOR.gold)
     .setTitle(`⚔ Diyar — ${p.name}`)
     .setDescription(
       `**${cities.length}** cit${cities.length === 1 ? 'y' : 'ies'} • **${fmt(dinar)}** Dinar\n` +
       `🪖 Army: **${fmt(p.army)}**  •  🏰 Garrisons: **${fmt(garr)}**\n` +
       `🗡 Weapon tier **${p.weaponTier}**  •  Military **${p.upg.mil}** / Walls **${p.upg.for}** / Economy **${p.upg.eco}**\n` +
-      `💰 Uncollected income: **${fmt(income)}**${shield}` + boss)
+      `💰 Uncollected income: **${fmt(income)}**${shield}` + boss + cvn)
     .setFooter({ text: 'Raids steal Dinar from rivals • capture cities to grow' });
   const row2 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('dy:upgrade').setLabel('⬆ Upgrades').setStyle(ButtonStyle.Primary),
@@ -1117,7 +1345,8 @@ function profileView(state, db, guildId, userId) {
       `**🏙 Cities (${cities.length})**\n${cityLines}\n\n` +
       `**⚔ War Record**\nRaids **${s.raidsWon}W / ${s.raidsLost}L** (${winRate}% win rate)  •  🛡 **${s.defended}** defended\n` +
       `🏰 Captured **${s.captured}**  •  lost **${s.lost}**\n` +
-      `👹 Boss kills **${s.bossKills}**  •  total boss damage **${fmt(s.bossDmg)}**`)
+      `👹 Boss kills **${s.bossKills}**  •  total boss damage **${fmt(s.bossDmg)}**\n` +
+      `🐪 Caravans raided **${s.caravansRaided || 0}**  •  welcomed **${s.caravansJoined || 0}**`)
     .setFooter({ text: `Ruling since ${new Date(p.joinedAt).toISOString().slice(0, 10)}` });
   return { embeds: [embed], components: [backRow()] };
 }
@@ -1129,6 +1358,8 @@ function resetSeason(state, saveData, guildId) {
   state.players = {};
   state.boss = null;
   state.bossSched = null;
+  state.caravan = null;
+  state.caravanSched = null;
   state.channelId = keepChannel;
   for (const c of CITY_DEFS) {
     state.cities[c.id] = {
@@ -1152,6 +1383,8 @@ function getDiyarCommands() {
     new SlashCommandBuilder().setName('diyar-reset').setDescription('(Admin) Wipe all progress and start a fresh season (player Dinar is kept)')
       .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild).toJSON(),
     new SlashCommandBuilder().setName('diyar-spawn-threat').setDescription('(Admin) Unleash a threat on the realm right now')
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild).toJSON(),
+    new SlashCommandBuilder().setName('diyar-spawn-caravan').setDescription('(Admin) Send a caravan across the realm right now')
       .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild).toJSON(),
   ];
 }
@@ -1229,6 +1462,71 @@ function initDiyar({ client, db, saveData, awardLP }) {
       else await announce(guildId, { embeds: [finale] });
     } catch (e) { console.error('[diyar threat finish]', e.message); }
   }
+  // ----- caravans -----
+  const caravanTimers = {};   // in-memory animation intervals (not persisted)
+  async function postCaravan(guildId) {
+    const state = stateOf(guildId);
+    const c = state.caravan; if (!c || !state.channelId) return;
+    try {
+      const ch = await client.channels.fetch(state.channelId);
+      const msg = await ch.send({ embeds: [caravanOfferEmbed(state)], components: [caravanRow(false)] });
+      c.messageId = msg.id; c.channelId = ch.id; saveData(guildId);
+    } catch (e) { console.error('[diyar caravan post]', e.message); }
+  }
+  // replay the already-committed result frame by frame, then swap in the final card
+  async function animateCaravan(guildId) {
+    const state = stateOf(guildId);
+    const c = state.caravan;
+    if (!c || !c.choice || !c.channelId) return;
+    let msg = null;
+    try {
+      const ch = await client.channels.fetch(c.channelId);
+      msg = c.messageId ? await ch.messages.fetch(c.messageId).catch(() => null) : null;
+    } catch { /* channel gone — we still finish below */ }
+    let step = 1;
+    if (caravanTimers[guildId]) clearInterval(caravanTimers[guildId]);
+    caravanTimers[guildId] = setInterval(async () => {
+      const st = stateOf(guildId); const cv = st.caravan;
+      if (!cv || !cv.choice) { clearInterval(caravanTimers[guildId]); delete caravanTimers[guildId]; return; }
+      if (step >= CARAVAN_FRAMES) {
+        clearInterval(caravanTimers[guildId]); delete caravanTimers[guildId];
+        const final = caravanFinalEmbed(cv);
+        st.caravan = null; saveData(guildId);                 // the day's caravan is spent
+        try {
+          if (msg) await msg.edit({ embeds: [final], components: [] });
+          else await announce(guildId, { embeds: [final] });
+        } catch (e) { console.error('[diyar caravan finish]', e.message); }
+        return;
+      }
+      try { if (msg) await msg.edit({ embeds: [caravanFrameEmbed(cv, step)], components: [caravanRow(true)] }); } catch { /* ignore a dropped edit */ }
+      step++;
+    }, CARAVAN_FRAME_MS);
+  }
+  // a claimed caravan whose animation died with a redeploy — settle it immediately
+  async function settleCaravan(guildId) {
+    const state = stateOf(guildId); const c = state.caravan;
+    if (!c || !c.choice) return;
+    const final = caravanFinalEmbed(c);
+    state.caravan = null; saveData(guildId);
+    try {
+      const ch = await client.channels.fetch(c.channelId);
+      const msg = c.messageId ? await ch.messages.fetch(c.messageId).catch(() => null) : null;
+      if (msg) await msg.edit({ embeds: [final], components: [] });
+      else await ch.send({ embeds: [final] });
+    } catch (e) { console.error('[diyar caravan settle]', e.message); }
+  }
+  async function expireCaravan(guildId) {
+    const state = stateOf(guildId); const c = state.caravan;
+    if (!c || c.claimedBy) return;
+    const embed = caravanExpireEmbed(c);
+    state.caravan = null; saveData(guildId);
+    try {
+      const ch = await client.channels.fetch(c.channelId);
+      const msg = c.messageId ? await ch.messages.fetch(c.messageId).catch(() => null) : null;
+      if (msg) await msg.edit({ embeds: [embed], components: [] });
+    } catch (e) { console.error('[diyar caravan expire]', e.message); }
+  }
+
   async function announce(guildId, payload) {
     const state = stateOf(guildId); if (!state.channelId) return;
     try { const ch = await client.channels.fetch(state.channelId); await ch.send(payload); } catch (e) { console.error('[diyar announce]', e.message); }
@@ -1330,6 +1628,21 @@ function initDiyar({ client, db, saveData, awardLP }) {
           due.fired = true; saveData(guild.id);
           if (!state.boss) { spawnBoss(state, saveData, guild.id); await postBoss(guild.id); }
         }
+        // caravan recovery: settle a claimed one whose animation was lost, or retire an
+        // unclaimed one that has run its hour
+        if (state.caravan) {
+          if (state.caravan.choice && !caravanTimers[guild.id]) await settleCaravan(guild.id);
+          else if (!state.caravan.claimedBy && now > state.caravan.expiresAt) await expireCaravan(guild.id);
+        }
+        // spawn the day's caravan — held back while a boss is live so the two events
+        // never compete for the channel (it fires as soon as the siege ends)
+        const cvSched = ensureCaravanSched(state, saveData, guild.id, now);
+        const cvDue = cvSched.spawns.find(s => !s.fired && s.at <= now);
+        if (cvDue && !state.boss && !state.caravan) {
+          cvDue.fired = true; saveData(guild.id);
+          spawnCaravan(state, saveData, guild.id);
+          await postCaravan(guild.id);
+        }
         // discovery nudge: a burst of activity (≥30 messages) has since settled into a lull
         // (≥10 min quiet), and we're past the cooldown → post the bilingual invite as the last
         // message, deleting the previous nudge so only one ever sits in the channel
@@ -1419,6 +1732,17 @@ function initDiyar({ client, db, saveData, awardLP }) {
           await postBoss(gid);
           return;
         }
+        if (interaction.commandName === 'diyar-spawn-caravan') {
+          if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild))
+            return interaction.reply(eph({ content: 'You need the **Manage Server** permission to send a caravan.' }));
+          const state = stateOf(gid);
+          if (state.caravan) return interaction.reply(eph({ content: `🐪 **${state.caravan.name}** is already on the road — let that one resolve first.` }));
+          if (!state.channelId) return interaction.reply(eph({ content: 'Set a war room first with `/diyar-set-channel` so the caravan has somewhere to appear.' }));
+          spawnCaravan(state, saveData, gid);
+          await interaction.reply(eph({ content: '🐪 A caravan is crossing the realm — check the war room!' }));
+          await postCaravan(gid);
+          return;
+        }
         return;
       }
 
@@ -1450,6 +1774,18 @@ function initDiyar({ client, db, saveData, awardLP }) {
         return interaction.deferUpdate();
       }
       if (action === 'bossdmg') return interaction.reply(eph(bossView(state)));
+
+      // caravan buttons also come from the PUBLIC war-room message. The claim below is
+      // fully synchronous — there is no await between reading and writing claimedBy —
+      // so of two simultaneous taps exactly one wins and the loser gets a quiet notice.
+      if (action === 'cv_raid' || action === 'cv_invite') {
+        const res = claimCaravan(state, db, gid, saveData, uid, action === 'cv_raid' ? 'raid' : 'invite');
+        if (res.error) return interaction.reply(eph({ content: res.error }));
+        try { await interaction.update({ embeds: [caravanFrameEmbed(res.caravan, 0)], components: [caravanRow(true)] }); }
+        catch { /* someone else's edit landed first — the animation still takes over */ }
+        animateCaravan(gid).catch(e => console.error('[diyar caravan]', e.message));
+        return;
+      }
 
       if (action === 'reset_cancel') return interaction.update({ content: 'Reset cancelled — your realm is safe.', components: [] });
       if (action === 'reset_confirm') {
@@ -1590,6 +1926,7 @@ function initDiyar({ client, db, saveData, awardLP }) {
       getState: () => stateOf, ensurePlayer, resolveAttack, recruit, upgrade, reinforce, collectIncome, tick,
       spawnBoss, strikeBoss, resolveBossDefeat, resolveBossExpire, playerStrength, ensureBossSched,
       pendingIncome, renderMap, renderBoss, renderBattle, pickTimes, reseedIfLanded, rankPlayers, threatEmbed, threatSiegeLines, threatBar,
+      spawnCaravan, claimCaravan, ensureCaravanSched, caravanOfferEmbed, caravanFrameEmbed, caravanFinalEmbed, caravanExpireEmbed, caravanRow,
       claimTribute, buyWeapon, armouryView, profileView, leaderboard, resetSeason, targetSelect, reinforceSelect, effectiveDefence, effectiveAttack, startRaid, resolveRaid, troopCost, raidLiveEmbed, raidResultEmbed, threatTick, finishThreat, inviteLine, postNudge, threatDefeatEmbed, threatWithdrawEmbed, strikeBoss,
     },
   };
