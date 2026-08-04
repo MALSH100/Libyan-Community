@@ -314,7 +314,7 @@ function addUserImage(db, gid, uid, dataUri, saveData) {
   if (saveData) saveData(gid);
   return key;
 }
-const MAX_IMAGES = 20;
+const MAX_IMAGES = 8;
 function imageCount(db, gid, uid) { return Object.keys(userImages(db, gid, uid)).length; }
 function removeUserImage(db, gid, uid, imageKey, saveData) {
   const imgs = userImages(db, gid, uid);
