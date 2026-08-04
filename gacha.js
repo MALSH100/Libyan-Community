@@ -1197,4 +1197,14 @@ function initGacha({ client, db, saveData }) {
   return { runFlip, hubApi };
 }
 
-module.exports = { getGachaCommands, initGacha, awardDinar, isAtDinarCap, dinarDailyCap, getDinar, spendDinar };
+// Read-only view of the opted-in member pool, so other gamemodes (Diyar's Wanted
+// hunts) can borrow the cast without reaching into gacha's internals.
+// Returns userId -> { rarity, value }. Never mutate the result.
+function getGachaPool(db, guildId) {
+  const s = getState(db, guildId);
+  const out = {};
+  for (const [uid, e] of Object.entries(s.pool || {})) out[uid] = { rarity: e.rarity, value: e.value };
+  return out;
+}
+
+module.exports = { getGachaCommands, initGacha, awardDinar, isAtDinarCap, dinarDailyCap, getDinar, spendDinar, getGachaPool };

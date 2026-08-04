@@ -14,7 +14,7 @@ const {
   SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle,
   AttachmentBuilder, StringSelectMenuBuilder, PermissionFlagsBits,
 } = require('discord.js');
-const { getDinar, spendDinar, awardDinar } = require('./gacha');
+const { getDinar, spendDinar, awardDinar, getGachaPool } = require('./gacha');
 const path = require('path');
 
 // ─── Tuning ───────────────────────────────────────────────────────────────────
@@ -367,7 +367,7 @@ function getState(db, guildId, saveData) {
   const data = db[guildId] || (db[guildId] = {});
   let dirty = false;
   if (!data.__diyar) {
-    data.__diyar = { players: {}, cities: {}, boss: null, bossSched: null, caravan: null, caravanSched: null, channelId: null };
+    data.__diyar = { players: {}, cities: {}, boss: null, bossSched: null, caravan: null, caravanSched: null, wanted: null, wantedSched: null, channelId: null };
     dirty = true;
   }
   // seed (first run) or backfill (new cities added later) any CITY_DEFS not yet in state
@@ -1072,6 +1072,164 @@ function ensureCaravanSched(state, saveData, guildId, nowMs) {
   return state.caravanSched;
 }
 
+
+// ─── Wanted (the Hunt) ──────────────────────────────────────────────────────
+// An opted-in gacha member goes on the run and hides in one of the 25 cities.
+// Every hour a fresh clue narrows it down and everyone gets one guess. First
+// correct guess takes the bounty. Deliberately SLOW — caravans are the 30-second
+// race, this is the all-afternoon one.
+const WANTED_SPAWNS_PER_DAY = 1;
+const WANTED_WIN_START  = 13;                    // Libya-time window
+const WANTED_WIN_END    = 20;
+const WANTED_CLUE_MS    = 60 * 60 * 1000;        // a new clue (and a fresh guess) every hour
+const WANTED_MAX_CLUES  = 6;                     // hunt ends when the clues run out
+const WANTED_SEARCH_FEE = 75;                    // Dinar per search — the sink that stops brute-forcing
+const WANTED_CUT        = 0.20;                  // the hunted member's cut of their own bounty
+const WANTED_BOUNTY = { Common: 400, Rare: 700, Epic: 1100, Legendary: 1700, Mythic: 2500 };
+const WANTED_ESCAPE_CONSOLATION = 0.25;          // share of bounty split among searchers if they escape
+// deliberately daft, so nobody's avatar ends up next to a real accusation
+const WANTED_CRIMES = [
+  'smuggling counterfeit tuna through three checkpoints',
+  'ten years of unpaid Dinar, and counting',
+  'selling the same generator to four different families',
+  'running an unlicensed shawarma cart outside the palace',
+  'rigging every coin flip in the souq',
+  'impersonating a customs officer at Ras Ajdir',
+  'making off with the garrison\'s entire tea supply',
+  'forging travel papers for anyone with the coin',
+  'reselling government fuel at desert prices',
+  'losing a shipment of gold and blaming the weather',
+];
+
+// region straight off the map coordinates — no second list to keep in sync
+function cityRegion(c) {
+  if (c.lat < 29) return 'the deep south';
+  if (c.lon < 15.5) return 'the west';
+  if (c.lon > 19) return 'the east';
+  return 'the centre';
+}
+// actual coastline, not a latitude guess — a cutoff made every western city "coastal"
+const COASTAL = new Set(['zuwara','sabratha','zawiya','tripoli','khoms','zliten','misrata','sirte','benghazi','derna','tobruk']);
+const isCoastal = (c) => COASTAL.has(c.id);
+const SIZE_WORDS = ['a small settlement', 'a decent-sized town', 'one of the great cities'];
+
+// clue `i` for the city they're hiding in — each one strictly narrows the field
+function wantedClue(cityId, i) {
+  const c = CITY_BY_ID[cityId];
+  switch (i) {
+    case 0: return `Word is they fled to **${cityRegion(c)}**.`;
+    case 1: return isCoastal(c) ? 'They were seen near **the coast** — you can smell the sea from where they sleep.'
+                                : 'No sea air where they are. They\'re **inland**.';
+    case 2: return `They\'re holed up in **${SIZE_WORDS[c.level - 1]}**.`;
+    case 3: {
+      // nearest other city, as the crow flies — a strong but not decisive hint
+      let best = null, bd = Infinity;
+      for (const o of CITY_DEFS) {
+        if (o.id === c.id) continue;
+        const d = Math.hypot(o.lon - c.lon, o.lat - c.lat);
+        if (d < bd) { bd = d; best = o; }
+      }
+      return `A trader passed them on the road — the nearest city over is **${best.name}**.`;
+    }
+    case 4: return `The name of the place begins with **${c.name[0].toUpperCase()}**.`;
+    default: {
+      const others = CITY_DEFS.filter(o => o.id !== c.id);
+      const decoy = others[Math.floor(Math.random() * others.length)];
+      const pair = Math.random() < 0.5 ? [c.name, decoy.name] : [decoy.name, c.name];
+      return `Last chance — it\'s **${pair[0]}** or **${pair[1]}**. Nobody will say which.`;
+    }
+  }
+}
+
+function spawnWanted(state, db, guildId, saveData) {
+  if (state.wanted) return null;
+  // If diyar.js is deployed without the matching gacha.js, this export won't exist.
+  // Degrade to "no hunts" instead of throwing inside the minute tick every minute.
+  if (typeof getGachaPool !== 'function') {
+    if (!spawnWanted._warned) { spawnWanted._warned = true; console.warn('⚠️ Diyar: gacha.js is missing getGachaPool — the Wanted hunt is disabled. Deploy the updated gacha.js alongside diyar.js.'); }
+    return null;
+  }
+  let pool;
+  try { pool = getGachaPool(db, guildId) || {}; }
+  catch (e) { console.error('[diyar wanted pool]', e.message); return null; }
+  const ids = Object.keys(pool);
+  if (!ids.length) return null;                     // nobody has opted in yet
+  const uid = ids[Math.floor(Math.random() * ids.length)];
+  const rarity = pool[uid].rarity || 'Common';
+  const city = CITY_DEFS[Math.floor(Math.random() * CITY_DEFS.length)];
+  const now = Date.now();
+  state.wanted = {
+    id: 'w' + now.toString(36),
+    userId: uid, rarity,
+    bounty: WANTED_BOUNTY[rarity] || WANTED_BOUNTY.Common,
+    crime: WANTED_CRIMES[Math.floor(Math.random() * WANTED_CRIMES.length)],
+    cityId: city.id,                                // the secret
+    clueIdx: 0, clues: [wantedClue(city.id, 0)],
+    nextClueAt: now + WANTED_CLUE_MS,
+    guesses: {},                                    // userId -> clue index they last guessed on
+    searchers: {},                                  // userId -> how much they've spent searching
+    startedAt: now, caughtBy: null,
+    channelId: state.channelId, messageId: null,
+  };
+  if (saveData) saveData(guildId);
+  return state.wanted;
+}
+
+// one guess per player per clue round, paid for up front
+function guessWanted(state, db, guildId, saveData, userId, cityId) {
+  const w = state.wanted;
+  if (!w) return { error: '🔍 That hunt is over.' };
+  if (w.caughtBy) return { error: '🔍 They\'ve already been caught.' };
+  if (!state.players[userId]) return { error: 'Join the game first with `/diyar`.' };
+  if (userId === w.userId) return { error: '🙃 You can\'t turn *yourself* in — sit tight and collect your cut.' };
+  if (w.guesses[userId] === w.clueIdx)
+    return { error: `🔍 You\'ve already searched since the last clue. The next one drops in **${msLeft(w.nextClueAt)}**.` };
+  if (!spendDinar(db, guildId, userId, WANTED_SEARCH_FEE, saveData))
+    return { error: `🔍 Searching a city costs **${fmt(WANTED_SEARCH_FEE)} Dinar** — you can\'t cover it right now.` };
+
+  w.guesses[userId] = w.clueIdx;
+  w.searchers[userId] = (w.searchers[userId] || 0) + WANTED_SEARCH_FEE;
+  const found = cityId === w.cityId;
+  if (found) {
+    w.caughtBy = userId;
+    const p = state.players[userId];
+    p.stats = p.stats || {};
+    p.stats.bountiesClaimed = (p.stats.bountiesClaimed || 0) + 1;
+    const cut = Math.round(w.bounty * WANTED_CUT);
+    awardDinar(db, guildId, userId, w.bounty, saveData);
+    awardDinar(db, guildId, w.userId, cut, saveData);     // the hunted keep a slice — being wanted pays
+    w.payout = { bounty: w.bounty, cut };
+  }
+  if (saveData) saveData(guildId);
+  return { ok: true, found, city: CITY_BY_ID[cityId] };
+}
+
+// nobody found them in time — the search fees are partly refunded across everyone who tried
+function escapeWanted(state, db, guildId, saveData) {
+  const w = state.wanted; if (!w) return null;
+  const ids = Object.keys(w.searchers);
+  const pot = Math.round(w.bounty * WANTED_ESCAPE_CONSOLATION);
+  const each = ids.length ? Math.floor(pot / ids.length) : 0;
+  if (each > 0) for (const uid of ids) awardDinar(db, guildId, uid, each, saveData);
+  const res = { cityId: w.cityId, refund: each, searchers: ids.length, wanted: w };
+  state.wanted = null;
+  if (saveData) saveData(guildId);
+  return res;
+}
+
+function ensureWantedSched(state, saveData, guildId, nowMs) {
+  const { dateStr, startOfDayUTC } = libyaDay(nowMs);
+  if (!state.wantedSched || state.wantedSched.date !== dateStr) {
+    const ws = startOfDayUTC + WANTED_WIN_START * 3600000;
+    const we = startOfDayUTC + WANTED_WIN_END * 3600000;
+    const eff = Math.max(ws, nowMs);
+    const spawns = (we - eff > 5 * 60000) ? pickTimes(eff, we, WANTED_SPAWNS_PER_DAY, 60 * 60000).map(at => ({ at, fired: false })) : [];
+    state.wantedSched = { date: dateStr, spawns };
+    if (saveData) saveData(guildId);
+  }
+  return state.wantedSched;
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 //  UI
 // ════════════════════════════════════════════════════════════════════════════
@@ -1104,13 +1262,15 @@ function dashboard(state, db, guildId, userId) {
   const boss = state.boss ? `\n\n👹 **${state.boss.name}** is loose — open **Attack → Boss** or use the strike button in the war room!` : '';
   const cvn = (state.caravan && !state.caravan.claimedBy)
     ? `\n\n🐪 **${state.caravan.name}** is on the road to **${state.caravan.toName}** — first ruler to act in the war room takes it!` : '';
+  const wtd = (state.wanted && !state.wanted.caughtBy)
+    ? `\n\n🪧 A **${fmt(state.wanted.bounty)} Dinar bounty** is live — someone's hiding out there. Check the war room for clues.` : '';
   const embed = new EmbedBuilder().setColor(COLOR.gold)
     .setTitle(`⚔ Diyar — ${p.name}`)
     .setDescription(
       `**${cities.length}** cit${cities.length === 1 ? 'y' : 'ies'} • **${fmt(dinar)}** Dinar\n` +
       `🪖 Army: **${fmt(p.army)}**  •  🏰 Garrisons: **${fmt(garr)}**\n` +
       `🗡 Weapon tier **${p.weaponTier}**  •  Military **${p.upg.mil}** / Walls **${p.upg.for}** / Economy **${p.upg.eco}**\n` +
-      `💰 Uncollected income: **${fmt(income)}**${shield}` + boss + cvn)
+      `💰 Uncollected income: **${fmt(income)}**${shield}` + boss + cvn + wtd)
     .setFooter({ text: 'Raids steal Dinar from rivals • capture cities to grow' });
   const row2 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('dy:upgrade').setLabel('⬆ Upgrades').setStyle(ButtonStyle.Primary),
@@ -1272,6 +1432,60 @@ function reinforceAmount(state, userId, cityId) {
     components: [amtRow, navRow] };
 }
 
+
+// ─── Wanted UI ──────────────────────────────────────────────────────────────
+const TIER_TINT = { Common: 0x95A5A6, Rare: 0x3498DB, Epic: 0x9B59B6, Legendary: 0xF1C40F, Mythic: 0xE74C3C };
+
+function wantedPosterEmbed(state, avatarUrl, displayName) {
+  const w = state.wanted; if (!w) return null;
+  const clues = w.clues.map((c, i) => `**${i + 1}.** ${c}`).join('\n');
+  const left = WANTED_MAX_CLUES - w.clues.length;
+  const e = new EmbedBuilder().setColor(TIER_TINT[w.rarity] || COLOR.grey)
+    .setTitle('🪧 WANTED — DEAD LINE OR ALIVE')
+    .setDescription(
+      `**${esc(displayName)}** *(${w.rarity})* has gone to ground somewhere in Libya.\n` +
+      `Wanted for: *${w.crime}*.\n\n` +
+      `💰 **Bounty: ${fmt(w.bounty)} Dinar**\n\n` +
+      `**What the informants say**\n${clues}\n\n` +
+      `🔍 Searching a city costs **${fmt(WANTED_SEARCH_FEE)} Dinar**. ` +
+      `**One search each** — then wait for the next clue.\n` +
+      (left > 0 ? `⏳ Next clue in **${msLeft(w.nextClueAt)}**  •  **${left}** clue${left === 1 ? '' : 's'} left before they slip away.`
+                : '⏳ **Final clue.** After this they\'re gone for good.'))
+    .setFooter({ text: 'The hunted keeps a cut of their own bounty — opt in with /gacha-optin' });
+  if (/^https?:\/\//.test(avatarUrl || '')) e.setThumbnail(avatarUrl);   // a bad URL would throw and kill the whole poster
+  return e;
+}
+
+// all 25 cities fit one Discord dropdown exactly
+function wantedRow(disabled) {
+  const menu = new StringSelectMenuBuilder().setCustomId('dy:wt_guess')
+    .setPlaceholder(disabled ? 'The hunt is over' : `🔍 Search a city  (${fmt(WANTED_SEARCH_FEE)} Dinar)`)
+    .setDisabled(!!disabled)
+    .addOptions(CITY_DEFS.slice(0, 25).map(c => ({ label: c.name, description: `Lv ${c.level}`, value: c.id })));
+  return new ActionRowBuilder().addComponents(menu);
+}
+
+function wantedCaughtEmbed(w, finderName, avatarUrl, displayName) {
+  const e = new EmbedBuilder().setColor(COLOR.green)
+    .setTitle('⛓ Caught!')
+    .setDescription(
+      `**${esc(finderName)}** kicked in a door in **${esc(CITY_BY_ID[w.cityId].name)}** and found **${esc(displayName)}** hiding there.\n\n` +
+      `💰 Bounty **${fmt(w.payout.bounty)} Dinar** to ${esc(finderName)}\n` +
+      `🪙 **${fmt(w.payout.cut)} Dinar** to ${esc(displayName)} — they talked their way to a cut`)
+    .setFooter({ text: 'A new face goes on the run each day.' });
+  if (/^https?:\/\//.test(avatarUrl || '')) e.setThumbnail(avatarUrl);   // a bad URL would throw and kill the whole poster
+  return e;
+}
+
+function wantedEscapedEmbed(res, displayName) {
+  return new EmbedBuilder().setColor(COLOR.grey)
+    .setTitle('🌫 Gone.')
+    .setDescription(
+      `Nobody found **${esc(displayName)}**. They were in **${esc(CITY_BY_ID[res.cityId].name)}** the whole time, and they\'re long gone now.\n\n` +
+      (res.searchers ? `🪙 **${fmt(res.refund)} Dinar** back to each of the **${res.searchers}** who searched.` : '*Not one soul went looking.*'))
+    .setFooter({ text: 'A new face goes on the run each day.' });
+}
+
 function leaderboard(state, viewerId) {
   const viewer = viewerId ? state.players[viewerId] : null;
   const vStr = viewer ? playerStrength(state, viewer) : 0;
@@ -1346,7 +1560,8 @@ function profileView(state, db, guildId, userId) {
       `**⚔ War Record**\nRaids **${s.raidsWon}W / ${s.raidsLost}L** (${winRate}% win rate)  •  🛡 **${s.defended}** defended\n` +
       `🏰 Captured **${s.captured}**  •  lost **${s.lost}**\n` +
       `👹 Boss kills **${s.bossKills}**  •  total boss damage **${fmt(s.bossDmg)}**\n` +
-      `🐪 Caravans raided **${s.caravansRaided || 0}**  •  welcomed **${s.caravansJoined || 0}**`)
+      `🐪 Caravans raided **${s.caravansRaided || 0}**  •  welcomed **${s.caravansJoined || 0}**\n` +
+      `⛓ Bounties claimed **${s.bountiesClaimed || 0}**`)
     .setFooter({ text: `Ruling since ${new Date(p.joinedAt).toISOString().slice(0, 10)}` });
   return { embeds: [embed], components: [backRow()] };
 }
@@ -1360,6 +1575,8 @@ function resetSeason(state, saveData, guildId) {
   state.bossSched = null;
   state.caravan = null;
   state.caravanSched = null;
+  state.wanted = null;
+  state.wantedSched = null;
   state.channelId = keepChannel;
   for (const c of CITY_DEFS) {
     state.cities[c.id] = {
@@ -1385,6 +1602,8 @@ function getDiyarCommands() {
     new SlashCommandBuilder().setName('diyar-spawn-threat').setDescription('(Admin) Unleash a threat on the realm right now')
       .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild).toJSON(),
     new SlashCommandBuilder().setName('diyar-spawn-caravan').setDescription('(Admin) Send a caravan across the realm right now')
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild).toJSON(),
+    new SlashCommandBuilder().setName('diyar-spawn-wanted').setDescription('(Admin) Put a bounty on an opted-in member right now')
       .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild).toJSON(),
   ];
 }
@@ -1527,6 +1746,58 @@ function initDiyar({ client, db, saveData, awardLP }) {
     } catch (e) { console.error('[diyar caravan expire]', e.message); }
   }
 
+  // ----- the Hunt -----
+  // resolve the hunted member's face/name at display time, so avatar changes keep up
+  async function wantedFace(guildId) {
+    const state = stateOf(guildId); const w = state.wanted;
+    if (!w) return { url: null, name: 'Unknown' };
+    try {
+      const g = await client.guilds.fetch(guildId);
+      const m = await g.members.fetch(w.userId);
+      return { url: m.displayAvatarURL({ extension: 'png', size: 256 }), name: m.displayName };
+    } catch { return { url: null, name: 'a stranger' }; }
+  }
+  async function postWanted(guildId) {
+    const state = stateOf(guildId); const w = state.wanted;
+    if (!w || !state.channelId) return;
+    try {
+      const ch = await client.channels.fetch(state.channelId);
+      const face = await wantedFace(guildId);
+      const msg = await ch.send({ embeds: [wantedPosterEmbed(state, face.url, face.name)], components: [wantedRow(false)] });
+      w.messageId = msg.id; w.channelId = ch.id; saveData(guildId);
+    } catch (e) { console.error('[diyar wanted post]', e.message); }
+  }
+  async function refreshWanted(guildId) {
+    const state = stateOf(guildId); const w = state.wanted;
+    if (!w || !w.channelId || !w.messageId) return;
+    try {
+      const ch = await client.channels.fetch(w.channelId);
+      const msg = await ch.messages.fetch(w.messageId);
+      const face = await wantedFace(guildId);
+      await msg.edit({ embeds: [wantedPosterEmbed(state, face.url, face.name)], components: [wantedRow(false)] });
+    } catch { /* poster gone — the hunt carries on regardless */ }
+  }
+  async function finishWanted(guildId, how) {
+    const state = stateOf(guildId); const w = state.wanted;
+    if (!w) return;
+    const face = await wantedFace(guildId);
+    let embed;
+    if (how === 'caught') {
+      const finder = state.players[w.caughtBy]?.name || 'Someone';
+      embed = wantedCaughtEmbed(w, finder, face.url, face.name);
+      state.wanted = null; saveData(guildId);
+    } else {
+      const res = escapeWanted(state, db, guildId, saveData);
+      embed = wantedEscapedEmbed(res, face.name);
+    }
+    try {
+      const ch = await client.channels.fetch(w.channelId);
+      const msg = w.messageId ? await ch.messages.fetch(w.messageId).catch(() => null) : null;
+      if (msg) await msg.edit({ embeds: [embed], components: [wantedRow(true)] });
+      else await announce(guildId, { embeds: [embed] });
+    } catch (e) { console.error('[diyar wanted finish]', e.message); }
+  }
+
   async function announce(guildId, payload) {
     const state = stateOf(guildId); if (!state.channelId) return;
     try { const ch = await client.channels.fetch(state.channelId); await ch.send(payload); } catch (e) { console.error('[diyar announce]', e.message); }
@@ -1643,6 +1914,28 @@ function initDiyar({ client, db, saveData, awardLP }) {
           spawnCaravan(state, saveData, guild.id);
           await postCaravan(guild.id);
         }
+        // the Hunt: drop the next clue on the hour, or let them slip away when clues run out
+        if (state.wanted) {
+          const w = state.wanted;
+          if (w.caughtBy) await finishWanted(guild.id, 'caught');
+          else if (now >= w.nextClueAt) {
+            if (w.clues.length >= WANTED_MAX_CLUES) await finishWanted(guild.id, 'escaped');
+            else {
+              w.clueIdx++;
+              w.clues.push(wantedClue(w.cityId, w.clueIdx));
+              w.nextClueAt = now + WANTED_CLUE_MS;
+              saveData(guild.id);
+              await refreshWanted(guild.id);
+            }
+          }
+        }
+        // start the day's hunt — needs opted-in gacha members, and stays clear of a live boss
+        const wtSched = ensureWantedSched(state, saveData, guild.id, now);
+        const wtDue = wtSched.spawns.find(s2 => !s2.fired && s2.at <= now);
+        if (wtDue && !state.boss && !state.wanted) {
+          wtDue.fired = true; saveData(guild.id);
+          if (spawnWanted(state, db, guild.id, saveData)) await postWanted(guild.id);
+        }
         // discovery nudge: a burst of activity (≥30 messages) has since settled into a lull
         // (≥10 min quiet), and we're past the cooldown → post the bilingual invite as the last
         // message, deleting the previous nudge so only one ever sits in the channel
@@ -1743,6 +2036,18 @@ function initDiyar({ client, db, saveData, awardLP }) {
           await postCaravan(gid);
           return;
         }
+        if (interaction.commandName === 'diyar-spawn-wanted') {
+          if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild))
+            return interaction.reply(eph({ content: 'You need the **Manage Server** permission to post a bounty.' }));
+          const state = stateOf(gid);
+          if (state.wanted) return interaction.reply(eph({ content: '🪧 A hunt is already running — let that one play out first.' }));
+          if (!state.channelId) return interaction.reply(eph({ content: 'Set a war room first with `/diyar-set-channel`.' }));
+          if (!spawnWanted(state, db, gid, saveData))
+            return interaction.reply(eph({ content: 'Nobody has opted into the card pool yet — they need `/gacha-optin` before they can be hunted.' }));
+          await interaction.reply(eph({ content: '🪧 A bounty is live — check the war room!' }));
+          await postWanted(gid);
+          return;
+        }
         return;
       }
 
@@ -1773,6 +2078,21 @@ function initDiyar({ client, db, saveData, awardLP }) {
         if (r.usedHeavy) return interaction.reply(eph({ content: `💥 **HEAVY HIT!** You struck for **${fmt(r.dmg)}** — triple damage! Back to normal strikes now.` }));
         return interaction.deferUpdate();
       }
+      // the Hunt's dropdown is on the PUBLIC poster, so it's handled before the dashboard gate
+      if (action === 'wt_guess') {
+        const pick = interaction.values?.[0];
+        const r = guessWanted(state, db, gid, saveData, uid, pick);
+        if (r.error) return interaction.reply(eph({ content: r.error }));
+        if (r.found) {
+          await interaction.reply({ content: `⛓ **${state.players[uid].name}** found them in **${r.city.name}**!` });
+          finishWanted(gid, 'caught').catch(e => console.error('[diyar wanted]', e.message));
+          return;
+        }
+        const w = state.wanted;
+        await interaction.reply(eph({ content: `🔍 You turn over **${r.city.name}** and find nothing but tea glasses and a cold trail. **−${fmt(WANTED_SEARCH_FEE)} Dinar**.\n\nNext clue in **${msLeft(w.nextClueAt)}** — you get another search then.` }));
+        return;
+      }
+
       if (action === 'bossdmg') return interaction.reply(eph(bossView(state)));
 
       // caravan buttons also come from the PUBLIC war-room message. The claim below is
@@ -1926,6 +2246,7 @@ function initDiyar({ client, db, saveData, awardLP }) {
       getState: () => stateOf, ensurePlayer, resolveAttack, recruit, upgrade, reinforce, collectIncome, tick,
       spawnBoss, strikeBoss, resolveBossDefeat, resolveBossExpire, playerStrength, ensureBossSched,
       pendingIncome, renderMap, renderBoss, renderBattle, pickTimes, reseedIfLanded, rankPlayers, threatEmbed, threatSiegeLines, threatBar,
+      spawnWanted, guessWanted, escapeWanted, ensureWantedSched, wantedClue, wantedPosterEmbed, wantedRow, cityRegion,
       spawnCaravan, claimCaravan, ensureCaravanSched, caravanOfferEmbed, caravanFrameEmbed, caravanFinalEmbed, caravanExpireEmbed, caravanRow,
       claimTribute, buyWeapon, armouryView, profileView, leaderboard, resetSeason, targetSelect, reinforceSelect, effectiveDefence, effectiveAttack, startRaid, resolveRaid, troopCost, raidLiveEmbed, raidResultEmbed, threatTick, finishThreat, inviteLine, postNudge, threatDefeatEmbed, threatWithdrawEmbed, strikeBoss,
     },
