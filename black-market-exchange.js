@@ -436,12 +436,21 @@ function buildChartSvg(history, mainCurrency = 'USD') {
     ? pad.left + plotW / 2
     : pad.left + (i / (pts.length - 1)) * plotW;
 
+  // Label precision has to follow the tick step, not a fixed 2 decimals. EGP and
+  // TRY trade around 0.18–0.25, where two decimals would print the same number on
+  // every gridline ("0.24, 0.24, 0.24…") and make the axis useless.
+  const tickDecimals = step >= 1 ? 2
+    : step >= 0.1 ? 2
+    : step >= 0.01 ? 3
+    : step >= 0.001 ? 4
+    : 5;
+
   // ── grid + y labels ─────────────────────────────────────────────────────
   const grid = ticks.map(v => {
     const y = yFor(v).toFixed(1);
     return `<line x1="${pad.left}" y1="${y}" x2="${pad.left + plotW}" y2="${y}" stroke="#252932" stroke-width="1"/>
     <text x="${pad.left - 12}" y="${(+y + 4).toFixed(1)}" text-anchor="end" font-family="'DejaVu Sans',Arial,sans-serif"
-      font-size="12" fill="#7c8798">${v.toFixed(2)}</text>`;
+      font-size="12" fill="#7c8798">${v.toFixed(tickDecimals)}</text>`;
   }).join('\n  ');
 
   // ── x labels: date + time, thinned so they never collide ────────────────
@@ -537,9 +546,13 @@ function buildChartSvg(history, mainCurrency = 'USD') {
   // ── header ──────────────────────────────────────────────────────────────
   const pct = first !== 0 ? (change / first) * 100 : 0;
   const arrow = flat ? '—' : (up ? '▲' : '▼');
+  // A currency trading near 0.20 can move by 0.0008 — fmtRate's 3 decimals would
+  // round that to "0.001" or even "0.000", so small deltas get extra precision.
+  const mag = Math.abs(change);
+  const deltaDecimals = mag >= 0.1 ? 2 : mag >= 0.01 ? 3 : mag >= 0.001 ? 4 : 5;
   const deltaTxt = flat
     ? 'No change over this period'
-    : `${arrow} ${up ? '+' : '−'}${fmtRate(Math.abs(change))} (${up ? '+' : '−'}${Math.abs(pct).toFixed(2)}%)`;
+    : `${arrow} ${up ? '+' : '−'}${mag.toFixed(deltaDecimals)} (${up ? '+' : '−'}${Math.abs(pct).toFixed(2)}%)`;
   const meaning = flat ? '' : (up ? 'dinar weaker' : 'dinar stronger');
 
   const fmtStamp = d => `${d.getDate()} ${MON[d.getMonth()]} ${two(d.getHours())}:${two(d.getMinutes())}`;
