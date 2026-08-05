@@ -330,10 +330,12 @@ function buildRateEmbed(exchangeData, latest, forced = false) {
       const d = latest.changes && latest.changes[currency];
       let trendLabel;
       if (typeof d === 'number' && d !== 0) {
-        const arrow = d > 0 ? '🔺' : '🔻';
-        trendLabel = `${arrow} ${d > 0 ? '+' : '−'}${fmtRate(Math.abs(d))} today`;
+        // Coloured circle + arrow, matching the trend() labels below:
+        // red = rate rose (dinar weaker), green = rate fell (dinar stronger).
+        const marker = d > 0 ? '🔴 ↑' : '🟢 ↓';
+        trendLabel = `${marker} ${d > 0 ? '+' : '−'}${fmtRate(Math.abs(d))} today`;
       } else if (typeof d === 'number' && d === 0) {
-        trendLabel = '➖ No change today';
+        trendLabel = '⚪ No change today';
       } else {
         trendLabel = trend(history.slice(0, -1), currency, value).label;
       }
@@ -356,227 +358,238 @@ function svgEscape(value) {
 }
 
 function buildChartSvg(history, mainCurrency = 'USD') {
-  // Aggregate: one data point per day (last entry of each day wins)
-  const dailyMap = new Map();
-  (history || [])
-    .filter(entry => entry.rates && typeof entry.rates[mainCurrency] === 'number')
-    .forEach(entry => {
-      const key = entry.scrapedAt.slice(0, 10);
-      if (!dailyMap.has(key) || new Date(entry.scrapedAt) > new Date(dailyMap.get(key).scrapedAt)) {
-        dailyMap.set(key, entry);
-      }
-    });
+  const meta  = CURRENCY_META[mainCurrency] || {};
+  const cName = meta.name || mainCurrency;
 
-  const rows = Array.from(dailyMap.values())
-    .sort((a, b) => new Date(a.scrapedAt) - new Date(b.scrapedAt))
-    .slice(-30);
+  // ── build the series ────────────────────────────────────────────────────
+  // Consecutive identical readings are collapsed, so every plotted point is a
+  // real movement rather than the same number repeated hourly. The most recent
+  // reading is always kept so the chart ends on "now".
+  const readings = (history || [])
+    .filter(e => e && e.rates && typeof e.rates[mainCurrency] === 'number' && e.scrapedAt)
+    .map(e => ({ ts: new Date(e.scrapedAt), v: e.rates[mainCurrency] }))
+    .filter(p => !isNaN(p.ts))
+    .sort((a, b) => a.ts - b.ts);
 
-  if (rows.length === 0) {
-    return `<svg width="960" height="420" xmlns="http://www.w3.org/2000/svg"><rect width="100%" height="100%" fill="#1a1c22" rx="10"/><text x="480" y="210" text-anchor="middle" font-family="'Segoe UI',Arial,sans-serif" font-size="18" fill="#6b7280">Not enough data for chart yet</text></svg>`;
+  const deduped = [];
+  for (const p of readings) {
+    const prev = deduped[deduped.length - 1];
+    if (!prev || prev.v !== p.v) deduped.push(p);
+    else prev.ts = p.ts;            // same rate still holding — move its timestamp forward
   }
 
-  // LIBYAN COLOR LOGIC: GREEN = rate fell (dinar strengthened), RED = rate rose (dinar weakened)
-  const GREEN       = '#22c55e';
-  const GREEN_LIGHT = '#4ade80';
-  const RED         = '#ef4444';
-  const RED_LIGHT   = '#f87171';
-  const NEUTRAL     = '#94a3b8';
+  // ── ROLLING WINDOW: only ever the newest MAX_POINTS ─────────────────────
+  // Fixed count means the chart never compresses as history grows; a new point
+  // enters on the right and the oldest drops off the left.
+  const MAX_POINTS = 20;   // ~20 rate movements; at roughly one change a day that is about three weeks of history
+  // If the rate has barely moved, deduping can leave one or two points and the
+  // chart says nothing. Fall back to the raw readings so there's still a
+  // timeline to read.
+  const source = deduped.length >= 3 ? deduped : readings;
+  const pts = source.slice(-MAX_POINTS);
 
-  const candles = [];
-  for (let i = 0; i < rows.length; i++) {
-    const close              = rows[i].rates[mainCurrency];
-    const open               = i === 0 ? close : rows[i - 1].rates[mainCurrency];
-    const high               = Math.max(open, close);
-    const low                = Math.min(open, close);
-    const ts                 = new Date(rows[i].scrapedAt);
-    const dinarStrengthened  = close < open;
-    const dinarWeakened      = close > open;
-    const color              = dinarStrengthened ? GREEN  : (dinarWeakened ? RED  : NEUTRAL);
-    const colorLight         = dinarStrengthened ? GREEN_LIGHT : (dinarWeakened ? RED_LIGHT : NEUTRAL);
-    candles.push({ ts, open, high, low, close, color, colorLight, dinarStrengthened });
+  const W = 1000, H = 470;
+  const bg = '#12141a', panel = '#171a21';
+
+  if (pts.length === 0) {
+    return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
+      <rect width="${W}" height="${H}" fill="${bg}" rx="14"/>
+      <text x="${W/2}" y="${H/2}" text-anchor="middle" font-family="'DejaVu Sans',Arial,sans-serif"
+        font-size="18" fill="#6b7280">No exchange-rate data yet</text></svg>`;
   }
 
-  const allVals  = candles.flatMap(c => [c.high, c.low]);
-  let minVal     = Math.min(...allVals);
-  let maxVal     = Math.max(...allVals);
-  const dataRange = maxVal - minVal || 0.05;
-  const vPad     = dataRange * 0.15;
-  minVal         = Math.max(0, minVal - vPad);
-  maxVal         = maxVal + vPad;
+  // Libyan convention: rate UP = dinar weaker = RED, rate DOWN = dinar stronger = GREEN
+  const first = pts[0].v, last = pts[pts.length - 1].v;
+  const change = last - first;
+  const up = change > 0, flat = Math.abs(change) < 1e-9;
+  const ACCENT = flat ? '#94a3b8' : (up ? '#ef4444' : '#22c55e');
+  const ACCENT_SOFT = flat ? '#64748b' : (up ? '#f87171' : '#4ade80');
 
-  function niceNumber(range, round) {
-    const exp = Math.floor(Math.log10(range));
-    const f   = range / Math.pow(10, exp);
-    let nf;
-    if (round) { nf = f < 1.5 ? 1 : f < 3 ? 2 : f < 7 ? 5 : 10; }
-    else        { nf = f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10; }
-    return nf * Math.pow(10, exp);
-  }
-
-  const niceTickStep = niceNumber((maxVal - minVal) / 4, true);
-  const niceMinTick  = Math.floor(minVal / niceTickStep) * niceTickStep;
-  const tickValues   = [];
-  for (
-    let v = niceMinTick;
-    v <= maxVal + niceTickStep * 0.01;
-    v = Math.round((v + niceTickStep) * 1e6) / 1e6
-  ) {
-    if (v >= minVal - 1e-9) tickValues.push(v);
-    if (tickValues.length >= 8) break;
-  }
-
-  const W     = 960;
-  const H     = 420;
-  const pad   = { left: 68, right: 80, top: 72, bottom: 56 };
+  const pad = { left: 74, right: 92, top: 96, bottom: 76 };
   const plotW = W - pad.left - pad.right;
-  const plotH = H - pad.top  - pad.bottom;
+  const plotH = H - pad.top - pad.bottom;
 
-  const yFor = v => pad.top + (1 - (v - minVal) / (maxVal - minVal)) * plotH;
-  // Time-based x-axis: each candle is positioned by its ACTUAL date across the
-  // span from the oldest shown change up to now. The source now updates only
-  // once or twice a week, so plotting by real time makes the gaps honest instead
-  // of squashing irregular changes into evenly-spaced candles. The empty space
-  // between the last candle and the right edge shows how long the current rate
-  // has held without changing.
-  const xMinTs = candles[0].ts.getTime();
-  const xMaxTs = Date.now();
-  const tsSpan = Math.max(1, xMaxTs - xMinTs);
-  const xFor   = ts => candles.length === 1
+  // ── y scale with nice round ticks ───────────────────────────────────────
+  const vals = pts.map(p => p.v);
+  let lo = Math.min(...vals), hi = Math.max(...vals);
+  if (hi - lo < 1e-9) { const b = Math.max(0.02, Math.abs(hi) * 0.01); lo -= b; hi += b; }
+  const headroom = (hi - lo) * 0.22;
+  lo = Math.max(0, lo - headroom); hi = hi + headroom;
+
+  const niceStep = (range) => {
+    const exp = Math.floor(Math.log10(range || 1));
+    const f = range / Math.pow(10, exp);
+    return (f < 1.5 ? 1 : f < 3 ? 2 : f < 7 ? 5 : 10) * Math.pow(10, exp);
+  };
+  const step = niceStep((hi - lo) / 4);
+  const ticks = [];
+  for (let v = Math.floor(lo / step) * step; v <= hi + step * 0.001; v += step) {
+    const r = Math.round(v * 1e6) / 1e6;
+    if (r >= lo - 1e-9 && r <= hi + 1e-9) ticks.push(r);
+    if (ticks.length > 8) break;
+  }
+
+  const yFor = v => pad.top + (1 - (v - lo) / (hi - lo)) * plotH;
+  // Evenly spaced by INDEX, not by timestamp — irregular scrape gaps would
+  // otherwise bunch points together and leave dead space.
+  const xFor = i => pts.length === 1
     ? pad.left + plotW / 2
-    : pad.left + ((ts - xMinTs) / tsSpan) * plotW;
+    : pad.left + (i / (pts.length - 1)) * plotW;
 
-  // Candle width from the tightest gap between consecutive candles, so two
-  // changes close together in time don't overlap; clamped to a sensible range.
-  let minGap = plotW;
-  for (let i = 1; i < candles.length; i++) {
-    minGap = Math.min(minGap, xFor(candles[i].ts.getTime()) - xFor(candles[i - 1].ts.getTime()));
-  }
-  const bodyW = Math.max(3, Math.min(14, (candles.length > 1 ? minGap : plotW) * 0.6));
-  const halfW = bodyW / 2;
+  // ── grid + y labels ─────────────────────────────────────────────────────
+  const grid = ticks.map(v => {
+    const y = yFor(v).toFixed(1);
+    return `<line x1="${pad.left}" y1="${y}" x2="${pad.left + plotW}" y2="${y}" stroke="#252932" stroke-width="1"/>
+    <text x="${pad.left - 12}" y="${(+y + 4).toFixed(1)}" text-anchor="end" font-family="'DejaVu Sans',Arial,sans-serif"
+      font-size="12" fill="#7c8798">${v.toFixed(2)}</text>`;
+  }).join('\n  ');
 
-  // Grid lines
-  const gridLines = [];
-  for (const val of tickValues) {
-    const y = yFor(val);
-    if (y < pad.top - 2 || y > pad.top + plotH + 2) continue;
-    gridLines.push(
-      `<line x1="${pad.left}" y1="${y.toFixed(1)}" x2="${pad.left + plotW}" y2="${y.toFixed(1)}" stroke="#2a2d35" stroke-width="1"/>`,
-      `<text x="${(pad.left - 8).toFixed(1)}" y="${(y + 4).toFixed(1)}" text-anchor="end" font-family="'Segoe UI',Arial,sans-serif" font-size="12" fill="#6b7280">${val.toFixed(2)}</text>`
-    );
-  }
-
-  // X-axis labels
-  const xLabels        = [];
-  let   lastDay        = null;
-  const dayBoundaries  = [];
-  for (let i = 0; i < candles.length; i++) {
-    const dayKey = candles[i].ts.toISOString().slice(0, 10);
-    if (dayKey !== lastDay) { dayBoundaries.push({ i, ts: candles[i].ts }); lastDay = dayKey; }
-  }
-  const MONTHS      = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-  let   lastLabelX  = -999;
-  for (const { i, ts } of dayBoundaries) {
-    const x = xFor(ts.getTime());
-    if (x - lastLabelX < 60 && lastLabelX !== -999) continue;
-    const label = `${ts.getUTCDate()} ${MONTHS[ts.getUTCMonth()]}`;
+  // ── x labels: date + time, thinned so they never collide ────────────────
+  // The axis adapts to what the data actually is. Rates usually move about once
+  // a day, so across a multi-day window the DATE is the useful label and the
+  // clock time is noise — we lead with the date and shrink the time. If the
+  // window happens to cover only a few hours, we flip it round.
+  const spanMs = pts.length > 1 ? (pts[pts.length - 1].ts - pts[0].ts) : 0;
+  const dateLed = spanMs > 36 * 3600 * 1000;          // more than ~1.5 days
+  const MIN_LABEL_PX = dateLed ? 58 : 74;
+  const spacing = pts.length > 1 ? plotW / (pts.length - 1) : plotW;
+  const every = Math.max(1, Math.ceil(MIN_LABEL_PX / spacing));
+  const MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const two = n => String(n).padStart(2, '0');
+  const xLabels = [];
+  let lastMonth = null;
+  pts.forEach((p, i) => {
+    const isLast = i === pts.length - 1;
+    // always label the first and last point, then every Nth in between
+    if (!(i === 0 || isLast || i % every === 0)) return;
+    // don't let the penultimate label crowd the (always-shown) last one
+    if (!isLast && i !== 0 && (pts.length - 1 - i) * spacing < MIN_LABEL_PX * 0.8) return;
+    const x = xFor(i);
+    const y = pad.top + plotH;
+    const primary = dateLed ? `${p.ts.getDate()} ${MON[p.ts.getMonth()]}` : `${two(p.ts.getHours())}:${two(p.ts.getMinutes())}`;
+    // secondary line: the clock time when date-led, the date when time-led —
+    // and only when it changes, so it never repeats down the whole axis.
+    let secondary = '';
+    if (dateLed) {
+      secondary = `${two(p.ts.getHours())}:${two(p.ts.getMinutes())}`;
+    } else {
+      const monthKey = `${p.ts.getDate()}-${p.ts.getMonth()}`;
+      if (monthKey !== lastMonth) { secondary = `${p.ts.getDate()} ${MON[p.ts.getMonth()]}`; lastMonth = monthKey; }
+    }
     xLabels.push(
-      `<line x1="${x.toFixed(1)}" y1="${(pad.top + plotH).toFixed(1)}" x2="${x.toFixed(1)}" y2="${(pad.top + plotH + 6).toFixed(1)}" stroke="#374151" stroke-width="1"/>`,
-      `<text x="${x.toFixed(1)}" y="${(H - pad.bottom + 22).toFixed(1)}" text-anchor="middle" font-family="'Segoe UI',Arial,sans-serif" font-size="12" fill="#9ca3af">${svgEscape(label)}</text>`
+      `<line x1="${x.toFixed(1)}" y1="${y}" x2="${x.toFixed(1)}" y2="${y + 5}" stroke="#3b4250" stroke-width="1"/>`,
+      `<text x="${x.toFixed(1)}" y="${y + 21}" text-anchor="middle" font-family="'DejaVu Sans',Arial,sans-serif"
+        font-size="11" font-weight="${isLast ? 700 : 600}" fill="${isLast ? '#e5e7eb' : '#8b95a6'}">${primary}</text>`,
+      secondary
+        ? `<text x="${x.toFixed(1)}" y="${y + 36}" text-anchor="middle" font-family="'DejaVu Sans',Arial,sans-serif"
+            font-size="9.5" fill="#5b6474">${secondary}</text>`
+        : ''
     );
-    lastLabelX = x;
-  }
+  });
 
-  // Candlestick elements
-  const gradDefs    = [];
-  const candleElems = [];
-  for (let i = 0; i < candles.length; i++) {
-    const c          = candles[i];
-    const x          = xFor(c.ts.getTime());
-    const openY      = yFor(c.open);
-    const closeY     = yFor(c.close);
-    const highY      = yFor(c.high);
-    const lowY       = yFor(c.low);
-    const bodyTop    = Math.min(openY, closeY);
-    const bodyBottom = Math.max(openY, closeY);
-    const bodyH      = Math.max(2, bodyBottom - bodyTop);
+  // ── the line + area ─────────────────────────────────────────────────────
+  const linePts = pts.map((p, i) => `${xFor(i).toFixed(1)},${yFor(p.v).toFixed(1)}`);
+  const areaPath = `M ${xFor(0).toFixed(1)},${(pad.top + plotH).toFixed(1)} L ${linePts.join(' L ')} `
+    + `L ${xFor(pts.length - 1).toFixed(1)},${(pad.top + plotH).toFixed(1)} Z`;
 
-    candleElems.push(
-      `<line x1="${x.toFixed(1)}" y1="${highY.toFixed(1)}" x2="${x.toFixed(1)}" y2="${lowY.toFixed(1)}" stroke="${c.color}" stroke-width="1.2" stroke-linecap="round"/>`
-    );
-    const gid = `g${i}`;
-    gradDefs.push(
-      `<linearGradient id="${gid}" x1="0" y1="0" x2="0" y2="1">` +
-        `<stop offset="0%" stop-color="${c.colorLight}" stop-opacity="1"/>` +
-        `<stop offset="100%" stop-color="${c.color}" stop-opacity="1"/>` +
-      `</linearGradient>`
-    );
-    candleElems.push(
-      `<rect x="${(x - halfW).toFixed(1)}" y="${bodyTop.toFixed(1)}" width="${bodyW.toFixed(1)}" height="${bodyH.toFixed(1)}" rx="1.5" fill="url(#${gid})" stroke="${c.color}" stroke-width="0.5"/>`
-    );
-  }
+  // ── markers ─────────────────────────────────────────────────────────────
+  const hiIdx = vals.indexOf(Math.max(...vals));
+  const loIdx = vals.indexOf(Math.min(...vals));
+  const dots = pts.map((p, i) => {
+    const x = xFor(i), y = yFor(p.v);
+    const isLast = i === pts.length - 1;
+    if (isLast) return '';                       // drawn separately with a halo
+    return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="4" fill="${panel}" stroke="${ACCENT}" stroke-width="2"/>`;
+  }).join('\n    ');
 
-  // Latest price tag
-  const last      = candles[candles.length - 1];
-  const lastY     = yFor(last.close);
-  const tagColor  = last.dinarStrengthened ? GREEN : RED;
-  const TAG_W = 62, TAG_H = 22, TAG_X = pad.left + plotW + 4;
-  const priceTag  = [
-    `<line x1="${pad.left}" y1="${lastY.toFixed(1)}" x2="${(TAG_X - 2).toFixed(1)}" y2="${lastY.toFixed(1)}" stroke="${tagColor}" stroke-width="1" stroke-dasharray="3,3" opacity="0.55"/>`,
-    `<rect x="${TAG_X}" y="${(lastY - TAG_H / 2).toFixed(1)}" width="${TAG_W}" height="${TAG_H}" rx="4" fill="${tagColor}"/>`,
-    `<text x="${(TAG_X + TAG_W / 2).toFixed(1)}" y="${(lastY + 5).toFixed(1)}" text-anchor="middle" font-family="'Segoe UI',Arial,sans-serif" font-size="12" font-weight="700" fill="#ffffff">${fmtRate(last.close)}</text>`,
-  ];
+  const lastX = xFor(pts.length - 1), lastY = yFor(last);
+  const endMarker = `
+    <circle cx="${lastX.toFixed(1)}" cy="${lastY.toFixed(1)}" r="11" fill="${ACCENT}" opacity="0.18"/>
+    <circle cx="${lastX.toFixed(1)}" cy="${lastY.toFixed(1)}" r="6.5" fill="${ACCENT}" stroke="#0b0d12" stroke-width="2"/>`;
 
-  // Header — symbols limited to glyphs DejaVu Sans definitely has; others show the code
-  const SYM   = { USD: '$', EUR: '€', GBP: '£', CNY: '¥' };
-  const sym   = SYM[mainCurrency] || '';
-  const cName = (CURRENCY_META[mainCurrency] && CURRENCY_META[mainCurrency].name) || mainCurrency;
+  // dashed guide + price tag at the current rate
+  const tagW = 78, tagH = 26;
+  const tagX = Math.min(pad.left + plotW + 8, W - tagW - 8);
+  const priceTag = `
+    <line x1="${pad.left}" y1="${lastY.toFixed(1)}" x2="${(pad.left + plotW).toFixed(1)}" y2="${lastY.toFixed(1)}"
+      stroke="${ACCENT}" stroke-width="1" stroke-dasharray="4 4" opacity="0.55"/>
+    <rect x="${tagX}" y="${(lastY - tagH / 2).toFixed(1)}" width="${tagW}" height="${tagH}" rx="6" fill="${ACCENT}"/>
+    <text x="${(tagX + tagW / 2).toFixed(1)}" y="${(lastY + 5).toFixed(1)}" text-anchor="middle"
+      font-family="'DejaVu Sans',Arial,sans-serif" font-size="13" font-weight="700" fill="#0b0d12">${fmtRate(last)}</text>`;
 
-  const periodDelta = candles.length > 1 ? last.close - candles[0].close : 0;
-  const deltaTxt    = (periodDelta > 0 ? '+' : '') + periodDelta.toFixed(3);
-  const deltaColor  = periodDelta < 0 ? GREEN : (periodDelta > 0 ? RED : NEUTRAL);
-  const deltaArrow  = periodDelta < 0 ? '▼' : (periodDelta > 0 ? '▲' : '');
+  // high / low callouts, only when they aren't the current point
+  const callout = (idx, label, colour) => {
+    // Nothing useful to say when the series is flat, or when high and low land on
+    // the same point — they'd just print on top of each other.
+    if (pts.length < 3 || idx === pts.length - 1) return '';
+    if (hiIdx === loIdx || Math.abs(vals[hiIdx] - vals[loIdx]) < 1e-9) return '';
+    const x = xFor(idx), y = yFor(pts[idx].v);
+    const above = idx === hiIdx;
+    const ly = above ? y - 14 : y + 22;
+    // Nudge the end labels inward so they don't run off the plot edges.
+    const nearLeft = x < pad.left + 46, nearRight = x > pad.left + plotW - 46;
+    const anchor = nearLeft ? 'start' : nearRight ? 'end' : 'middle';
+    const lx = nearLeft ? pad.left + 6 : nearRight ? pad.left + plotW - 6 : x;
+    return `<text x="${lx.toFixed(1)}" y="${ly.toFixed(1)}" text-anchor="${anchor}"
+      font-family="'DejaVu Sans',Arial,sans-serif" font-size="10.5" font-weight="600" fill="${colour}">${label} ${fmtRate(pts[idx].v)}</text>`;
+  };
 
-  const first     = candles[0].ts;
-  const daysSince = Math.floor((Date.now() - last.ts.getTime()) / 86400000);
-  const staleTxt  = daysSince <= 0 ? 'today' : (daysSince === 1 ? '1 day ago' : `${daysSince} days ago`);
-  const dateRange = (candles.length > 1
-    ? `${first.getUTCDate()} ${MONTHS[first.getUTCMonth()]} – ${last.ts.getUTCDate()} ${MONTHS[last.ts.getUTCMonth()]} ${last.ts.getUTCFullYear()}`
-    : `${last.ts.getUTCDate()} ${MONTHS[last.ts.getUTCMonth()]} ${last.ts.getUTCFullYear()}`)
-    + `  ·  last change ${staleTxt}`;
+  // ── header ──────────────────────────────────────────────────────────────
+  const pct = first !== 0 ? (change / first) * 100 : 0;
+  const arrow = flat ? '—' : (up ? '▲' : '▼');
+  const deltaTxt = flat
+    ? 'No change over this period'
+    : `${arrow} ${up ? '+' : '−'}${fmtRate(Math.abs(change))} (${up ? '+' : '−'}${Math.abs(pct).toFixed(2)}%)`;
+  const meaning = flat ? '' : (up ? 'dinar weaker' : 'dinar stronger');
 
-  // Legend — green on the left half, red on the right half, with a clear gap between them
-  const legY  = H - 14;
-  const legCX = W / 2;
-  const legend = [
-    `<rect x="${legCX - 250}" y="${legY - 10}" width="12" height="12" rx="2" fill="${GREEN}"/>`,
-    `<text x="${legCX - 234}" y="${legY}" font-family="'Segoe UI',Arial,sans-serif" font-size="11" fill="${GREEN}">Green = Dinar Strengthens (Rate Falls)</text>`,
-    `<rect x="${legCX + 40}" y="${legY - 10}" width="12" height="12" rx="2" fill="${RED}"/>`,
-    `<text x="${legCX + 56}" y="${legY}" font-family="'Segoe UI',Arial,sans-serif" font-size="11" fill="${RED}">Red = Dinar Weakens (Rate Rises)</text>`,
-  ].join('\n');
+  const fmtStamp = d => `${d.getDate()} ${MON[d.getMonth()]} ${two(d.getHours())}:${two(d.getMinutes())}`;
+  const spanTxt = pts.length > 1
+    ? `${fmtStamp(pts[0].ts)}  →  ${fmtStamp(pts[pts.length - 1].ts)}`
+    : fmtStamp(pts[0].ts);
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
   <defs>
-    ${gradDefs.join('\n    ')}
-    <clipPath id="plotClip">
-      <rect x="${pad.left}" y="${pad.top}" width="${plotW}" height="${plotH}"/>
-    </clipPath>
+    <linearGradient id="areaFill" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="${ACCENT}" stop-opacity="0.34"/>
+      <stop offset="100%" stop-color="${ACCENT}" stop-opacity="0.02"/>
+    </linearGradient>
+    <linearGradient id="lineGrad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="${ACCENT_SOFT}"/>
+      <stop offset="100%" stop-color="${ACCENT}"/>
+    </linearGradient>
+    <clipPath id="plotClip"><rect x="${pad.left}" y="${pad.top}" width="${plotW}" height="${plotH}"/></clipPath>
   </defs>
-  <rect width="${W}" height="${H}" fill="#1a1c22" rx="10"/>
-  <rect x="${pad.left}" y="${pad.top}" width="${plotW}" height="${plotH}" fill="#14151a" rx="3"/>
-  ${gridLines.join('\n  ')}
-  <line x1="${pad.left}" y1="${pad.top}" x2="${pad.left}" y2="${pad.top + plotH}" stroke="#374151" stroke-width="1"/>
-  <line x1="${pad.left}" y1="${pad.top + plotH}" x2="${pad.left + plotW}" y2="${pad.top + plotH}" stroke="#374151" stroke-width="1"/>
+
+  <rect width="${W}" height="${H}" fill="${bg}" rx="14"/>
+  <rect x="${pad.left}" y="${pad.top}" width="${plotW}" height="${plotH}" fill="${panel}" rx="6"/>
+  ${grid}
+
   <g clip-path="url(#plotClip)">
-    ${candleElems.join('\n    ')}
+    <path d="${areaPath}" fill="url(#areaFill)"/>
+    <polyline points="${linePts.join(' ')}" fill="none" stroke="url(#lineGrad)" stroke-width="3"
+      stroke-linejoin="round" stroke-linecap="round"/>
+    ${dots}
+    ${endMarker}
   </g>
-  ${priceTag.join('\n  ')}
+  ${callout(hiIdx, 'high', '#f87171')}
+  ${callout(loIdx, 'low', '#4ade80')}
+  ${priceTag}
+
+  <line x1="${pad.left}" y1="${pad.top + plotH}" x2="${pad.left + plotW}" y2="${pad.top + plotH}" stroke="#3b4250" stroke-width="1"/>
+  <line x1="${pad.left}" y1="${pad.top}" x2="${pad.left}" y2="${pad.top + plotH}" stroke="#3b4250" stroke-width="1"/>
   ${xLabels.join('\n  ')}
-  <text x="${pad.left}" y="26" font-family="'Segoe UI',Arial,sans-serif" font-size="15" font-weight="700" fill="#f9fafb">Black Market Rate - ${svgEscape(cName)} / Libyan Dinar</text>
-  <text x="${pad.left}" y="46" font-family="'Segoe UI',Arial,sans-serif" font-size="11" fill="#6b7280">${svgEscape(dateRange)}</text>
-  <text x="${pad.left + plotW}" y="26" text-anchor="end" font-family="'Segoe UI',Arial,sans-serif" font-size="20" font-weight="700" fill="#f9fafb">${sym}${fmtRate(last.close)} LYD</text>
-  <text x="${pad.left + plotW}" y="46" text-anchor="end" font-family="'Segoe UI',Arial,sans-serif" font-size="12" font-weight="600" fill="${deltaColor}">${deltaArrow} ${svgEscape(deltaTxt)}</text>
-  ${legend}
+
+  <text x="${pad.left}" y="34" font-family="'DejaVu Sans',Arial,sans-serif" font-size="17" font-weight="700" fill="#f3f4f6">${svgEscape(cName)} / Libyan Dinar</text>
+  <text x="${pad.left}" y="55" font-family="'DejaVu Sans',Arial,sans-serif" font-size="11.5" fill="#6b7280">Black market rate · last ${pts.length} update${pts.length === 1 ? '' : 's'}</text>
+  <text x="${pad.left}" y="73" font-family="'DejaVu Sans',Arial,sans-serif" font-size="11" fill="#565f6e">${svgEscape(spanTxt)}</text>
+
+  <text x="${W - pad.right + 60}" y="38" text-anchor="end" font-family="'DejaVu Sans',Arial,sans-serif" font-size="30" font-weight="700" fill="#f9fafb">${fmtRate(last)}</text>
+  <text x="${W - pad.right + 60}" y="58" text-anchor="end" font-family="'DejaVu Sans',Arial,sans-serif" font-size="12" font-weight="600" fill="${ACCENT}">${svgEscape(deltaTxt)}</text>
+  ${meaning ? `<text x="${W - pad.right + 60}" y="75" text-anchor="end" font-family="'DejaVu Sans',Arial,sans-serif" font-size="10.5" fill="#6b7280">${meaning}</text>` : ''}
+
+  <text x="${pad.left}" y="${H - 14}" font-family="'DejaVu Sans',Arial,sans-serif" font-size="10" fill="#4b5563">Green = dinar stronger · Red = dinar weaker</text>
+  <text x="${W - 20}" y="${H - 14}" text-anchor="end" font-family="'DejaVu Sans',Arial,sans-serif" font-size="10" fill="#4b5563">Created &amp; Designed by Captain</text>
 </svg>`;
 }
 
