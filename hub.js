@@ -410,6 +410,11 @@ function getShopCommands() {
         .setRequired(true))
       .toJSON(),
     new SlashCommandBuilder()
+      .setName('hub-upload-channel')
+      .setDescription('Set the channel members should post images in (admin only)')
+      .setDefaultMemberPermissions(0)
+      .toJSON(),
+    new SlashCommandBuilder()
       .setName('hub-panel')
       .setDescription('Post the permanent Hub board in this channel (admin only)')
       .setDefaultMemberPermissions(0)
@@ -616,6 +621,26 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
     };
   }
 
+  /* Where should we tell someone to post their image?
+     Discord requires SEND_MESSAGES *as well as* USE_APPLICATION_COMMANDS, so in a
+     locked-down board channel neither posting an image nor running a slash command
+     works. Buttons still do — so the button can fire, but it has to send people
+     somewhere they can actually type. Admins nominate that channel with
+     /hub-upload-channel; failing that we just say "any channel you can type in". */
+  function uploadHint(interaction) {
+    const st = stateOf(interaction.guildId);
+    const id = st.uploadChannelId;
+    const here = interaction.channel;
+    let canPostHere = true;
+    try {
+      const perms = here?.permissionsFor?.(interaction.member);
+      if (perms) canPostHere = perms.has(PermissionFlagsBits.SendMessages);
+    } catch { /* assume they can, and let them find out */ }
+    if (id && id !== interaction.channelId) return { canPostHere, where: `<#${id}>` };
+    if (!canPostHere) return { canPostHere, where: id ? `<#${id}>` : 'any channel you can type in' };
+    return { canPostHere, where: 'this channel' };
+  }
+
   /* ── the permanent Hub board ──────────────────────────────────────────────
      A public, pinned message that never expires. Its buttons live in their own
      `hubp:` namespace because every one of them must REPLY privately — the
@@ -818,10 +843,12 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
     const prev = iconSessions.get(uid);
     if (prev) { prev.done = true; prev.collector.stop('replaced'); }
 
+    const iconHint = uploadHint(interaction);
+
     const embed = new EmbedBuilder().setColor(0x5865F2).setTitle('🖼️ Role Icon — upload your image')
       .setDescription(
-        `**Easiest way:** run **\`/role-icon\`** and attach your image — that works in every channel, even ones where you can't type.\n\n` +
-        `Or send your icon **as an image message here** within **60 seconds** and I'll grab it.\n\n` +
+        `Post your icon **as an image** in ${iconHint.where} within **60 seconds** and I'll grab it.\n\n` +
+        `${iconHint.canPostHere ? '' : `⚠️ You can't post in this channel — head to ${iconHint.where}.\n\n`}` +
         `• Square **PNG or JPG** works best (it shows tiny, next to your name)\n` +
         `• I'll resize it automatically\n` +
         `• ${free ? '⭐ **Free** — booster perk!' : `💰 **${fmt(ICON_PRICE)} Dinar** — charged only once the icon is applied`}\n` +
@@ -898,10 +925,11 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
     if (prev) { prev.done = true; prev.collector.stop('replaced'); }
 
     const has = coins.getCustomImage(db, gid, uid);
+    const coinHint = uploadHint(interaction);
     const embed = new EmbedBuilder().setColor(0xE6B840).setTitle('🪙 Custom Coin — upload your image')
       .setDescription(
-        `**Easiest way:** run **\`/coin-image\`** and attach your picture — that works in every channel, even ones where you can't type.\n\n` +
-        `Or send an image **as a message here** within **60 seconds** and it becomes your coin.\n\n` +
+        `Post an image in ${coinHint.where} within **60 seconds** and it becomes your coin!\n\n` +
+        `${coinHint.canPostHere ? '' : `⚠️ You can't post in this channel — head to ${coinHint.where}.\n\n`}` +
         `• Square **PNG or JPG** works best (it fills the coin face)\n` +
         `• **HEADS** / **TAILS** text is added on top automatically\n` +
         `• The spin animation stays the same — your image shows when the coin lands\n` +
@@ -1715,6 +1743,19 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
         }
       }
 
+      if (interaction.isChatInputCommand() && interaction.commandName === 'hub-upload-channel') {
+        if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator))
+          return interaction.reply({ content: '❌ Admins only.', flags: 64 });
+        const st = stateOf(interaction.guildId);
+        st.uploadChannelId = interaction.channelId;
+        saveData(interaction.guildId);
+        return interaction.reply({
+          content: `✅ <#${interaction.channelId}> is now the image-upload channel.\n`
+            + `Whenever someone is asked for an image, they'll be pointed here. Make sure members **can** post in it.`,
+          flags: 64,
+        });
+      }
+
       // ── Hub board: admin commands ──────────────────────────────────────
       if (interaction.isChatInputCommand() && interaction.commandName === 'hub-panel') {
         if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator))
@@ -2395,10 +2436,11 @@ if (interaction.isButton() && interaction.customId === 'prof:upload') {
 
   // Arm the upload window before acknowledging the interaction
   awaitingUpload.set(uid, Date.now() + UPLOAD_WINDOW_MS);
+  const hint = uploadHint(interaction);
 
   try {
     await interaction.reply({
-      content: `📤 **Ready for your image!**\n\n**Easiest way:** run **\`/profile-image\`** and attach your picture — that works in every channel, even ones where you can't type.\n\nOr, within the next **2 minutes**, just drag an image into any channel you can post in and send it (no caption needed).\n\n*PNG, JPG, GIF or WEBP, up to 8MB. You can also caption any image with \`!cardimg\` anytime.*`,
+      content: `📤 **Ready for your image!**\n\nPost your image in ${hint.where} within the next **2 minutes** — no caption needed — and I'll add it to your card.${hint.canPostHere ? '' : `\n\n*(You can't post in this channel, so head to ${hint.where}.)*`}\n\n*PNG, JPG, GIF or WEBP, up to 8MB. You can also caption any image with \`!cardimg\`, or run \`/profile-image\` in a channel you can type in.*`,
       flags: 64
     });
   } catch (err) {
