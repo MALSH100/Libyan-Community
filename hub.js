@@ -15,7 +15,7 @@
 const {
   SlashCommandBuilder, EmbedBuilder, AttachmentBuilder, ActionRowBuilder,
   StringSelectMenuBuilder, ButtonBuilder, ButtonStyle, ModalBuilder,
-  TextInputBuilder, TextInputStyle, UserSelectMenuBuilder,
+  TextInputBuilder, TextInputStyle, UserSelectMenuBuilder, PermissionFlagsBits,
 } = require('discord.js');
 const path = require('path');
 const fs = require('fs');
@@ -389,6 +389,16 @@ function getShopCommands() {
       .addUserOption(o => o.setName('user').setDescription('Whose profile to show (defaults to you)').setRequired(false))
       .toJSON(),
     new SlashCommandBuilder()
+      .setName('hub-panel')
+      .setDescription('Post the permanent Hub board in this channel (admin only)')
+      .setDefaultMemberPermissions(0)
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('hub-channel')
+      .setDescription('Set this channel as the Hub home — shown to new members (admin only)')
+      .setDefaultMemberPermissions(0)
+      .toJSON(),
+    new SlashCommandBuilder()
       .setName('hub-mod-role')
       .setDescription('Set the moderator role — bot-made custom roles will always sit below it (admin only)')
       .addRoleOption(o => o.setName('role').setDescription('Your moderator role (custom roles go below this). Leave empty to auto-detect.').setRequired(false))
@@ -551,6 +561,43 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
     new ButtonBuilder().setCustomId('hub:profile').setLabel('My Profile').setEmoji('🪪').setStyle(ButtonStyle.Primary).setDisabled(!profileApi),
     new ButtonBuilder().setCustomId('hub:showcase:0').setLabel('Profile Showcase').setEmoji('❤️').setStyle(ButtonStyle.Secondary).setDisabled(!profileApi));
   const hubComponents = (isBooster) => profileApi ? [hubRow(isBooster), hubRow2(), hubRow3()] : [hubRow(isBooster), hubRow2()];
+
+  /* ── the permanent Hub board ──────────────────────────────────────────────
+     A public, pinned message that never expires. Its buttons live in their own
+     `hubp:` namespace because every one of them must REPLY privately — the
+     existing `hub:` buttons call interaction.update(), which on a shared message
+     would rewrite the board for everybody at once. Each click here opens the
+     clicker's own ephemeral hub, so any number of people can use the same board
+     and the channel stays clean.
+     Deliberately static: no live figures, so it never needs re-editing and costs
+     nothing to keep sitting there.                                              */
+  function hubPanelMessage() {
+    const embed = new EmbedBuilder()
+      .setColor(0xE7B41A)
+      .setTitle('🏛️  Community Hub')
+      .setDescription(
+        'Everything the server has to offer, in one place. **Tap a button below** — '
+        + 'whatever you open is private and only visible to you.\n\u200b')
+      .addFields(
+        { name: '🪪  Profile Cards', value: 'Design your own card with colours, borders, images and live stats.', inline: false },
+        { name: '🎨  Custom Roles & Coins', value: 'Spend Dinar on your own colour role, an image icon, or a themed coin.', inline: false },
+        { name: '🔥  Daily Streak', value: 'Check in each day to build a streak and earn Dinar.', inline: false },
+        { name: '⚔️  Clans', value: 'Create or join a clan, level it up and go to war.', inline: false },
+      )
+      .setFooter({ text: 'New here? Start with "Open the Hub" — everything is free to look at.' });
+
+    const rows = [
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('hubp:open').setLabel('Open the Hub').setEmoji('🏛️').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId('hubp:profile').setLabel('My Profile Card').setEmoji('🪪').setStyle(ButtonStyle.Success).setDisabled(!profileApi),
+        new ButtonBuilder().setCustomId('hubp:streak').setLabel('Daily Check-in').setEmoji('🔥').setStyle(ButtonStyle.Success)),
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('hubp:shop').setLabel('Shop').setEmoji('🛒').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('hubp:clan').setLabel('Clans').setEmoji('⚔️').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('hubp:help').setLabel('How it works').setEmoji('❓').setStyle(ButtonStyle.Secondary)),
+    ];
+    return { embeds: [embed], components: rows };
+  }
   const backHubRow = () => new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('hub:home').setLabel('← Back to Hub').setStyle(ButtonStyle.Secondary));
   const backRolesRow = () => new ActionRowBuilder().addComponents(
@@ -1514,6 +1561,69 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
         console.log(`🏛️ /hub opened by ${uname} (${interaction.user.id})${boosting ? ' [booster]' : ''}`);
         return interaction.reply({ embeds: [hubEmbed(boosting, interaction.user.id, interaction.guildId)], components: hubComponents(boosting), flags: 64 });
       }
+      // ── Hub board: admin commands ──────────────────────────────────────
+      if (interaction.isChatInputCommand() && interaction.commandName === 'hub-panel') {
+        if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator))
+          return interaction.reply({ content: '❌ Admins only.', flags: 64 });
+        try {
+          const msg = await interaction.channel.send(hubPanelMessage());
+          try { await msg.pin(); } catch { /* needs Manage Messages — not fatal */ }
+          const st = stateOf(interaction.guildId);
+          st.panel = { channelId: interaction.channelId, messageId: msg.id };
+          saveData(interaction.guildId);
+          return interaction.reply({
+            content: `✅ Hub board posted${msg.pinned ? ' and pinned' : ''}.\n`
+              + `Tip: deny **Send Messages** for @everyone in this channel so the board stays the only thing here, `
+              + `then point Discord **Onboarding** at it for new members.`,
+            flags: 64,
+          });
+        } catch (e) {
+          console.error('[hub-panel]', e.message);
+          return interaction.reply({ content: `⚠️ Couldn't post the board: ${e.message}. Check I can send messages and embeds here.`, flags: 64 });
+        }
+      }
+      if (interaction.isChatInputCommand() && interaction.commandName === 'hub-channel') {
+        if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator))
+          return interaction.reply({ content: '❌ Admins only.', flags: 64 });
+        const st = stateOf(interaction.guildId);
+        st.homeChannelId = interaction.channelId;
+        saveData(interaction.guildId);
+        return interaction.reply({ content: `✅ <#${interaction.channelId}> is now the Hub home. Run **/hub-panel** here to post the board.`, flags: 64 });
+      }
+
+      // ── Hub board: buttons ─────────────────────────────────────────────
+      // These must REPLY (never update) — the board is a shared public message.
+      if (interaction.isButton() && interaction.customId.startsWith('hubp:')) {
+        const what = interaction.customId.slice(5);
+        const gid2 = interaction.guildId, uid2 = interaction.user.id;
+        const boosting = isBoosting(interaction);
+        const name2 = interaction.member?.displayName || interaction.user.username;
+        try {
+          if (what === 'profile') {
+            if (!profileApi) return interaction.reply({ content: 'Profiles aren\'t available right now.', flags: 64 });
+            await interaction.deferReply({ flags: 64 });
+            const member = interaction.member || await interaction.guild.members.fetch(uid2);
+            return interaction.editReply(await profileHomeView(gid2, member));
+          }
+          if (what === 'streak') {
+            return interaction.reply({ ...streakView(gid2, uid2, name2), flags: 64 });
+          }
+          // everything else opens the normal hub home, which the existing
+          // hub:* buttons then drive as usual on this user's own message
+          return interaction.reply({
+            embeds: [hubEmbed(boosting, uid2, gid2)],
+            components: hubComponents(boosting),
+            flags: 64,
+          });
+        } catch (e) {
+          console.error('[hub panel button]', e.message);
+          const m = '⚠️ Couldn\'t open that. Try again in a moment.';
+          if (interaction.deferred && !interaction.replied) return interaction.editReply({ content: m }).catch(() => {});
+          if (!interaction.replied) return interaction.reply({ content: m, flags: 64 }).catch(() => {});
+        }
+        return;
+      }
+
       if (!interaction.guildId) return;
       const gid = interaction.guildId, uid = interaction.user.id;
       const name = interaction.member?.displayName || interaction.user.username;
