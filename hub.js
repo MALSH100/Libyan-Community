@@ -562,6 +562,39 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
     new ButtonBuilder().setCustomId('hub:showcase:0').setLabel('Profile Showcase').setEmoji('❤️').setStyle(ButtonStyle.Secondary).setDisabled(!profileApi));
   const hubComponents = (isBooster) => profileApi ? [hubRow(isBooster), hubRow2(), hubRow3()] : [hubRow(isBooster), hubRow2()];
 
+  /* The Shop landing view, shared by the in-hub button and the public board so
+     both always show the same thing. */
+  function shopEntryView() {
+    const embed = new EmbedBuilder().setColor(0xE7B41A).setTitle('🛒 The Shop')
+      .setDescription(`Spend your Dinar 💰\n\n🎨 **Custom Roles** — a personalised colour or gradient role, plus your own 🖼️ image icon\n🪙 **Coin Designs** — reskin your coin flip with themed coins`);
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('hub:roles').setLabel('Custom Roles').setEmoji('🎨').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('hub:coins').setLabel('Coin Designs').setEmoji('🪙').setStyle(ButtonStyle.Success));
+    return { embeds: [embed], components: [row] };
+  }
+
+  /* Lets the shared (public) flip engine play out inside a private reply.
+     runFlip() posts a spinning-coin message and then edits it to the result, so
+     it needs something channel-shaped. This stands in for one: send() creates an
+     ephemeral follow-up, and the object it hands back edits that same follow-up,
+     so the whole animation happens where only the player can see it. The flip
+     engine itself is untouched — /dinar-flip stays public as before. */
+  function ephemeralFlipChannel(interaction) {
+    return {
+      send: async (payload) => {
+        const m = await interaction.followUp({ ...payload, flags: 64 });
+        return {
+          id: m.id,
+          edit: async (p) => {
+            try { return await interaction.webhook.editMessage(m.id, p); }
+            catch { try { return await m.edit(p); } catch { return m; } }
+          },
+          delete: async () => {},
+        };
+      },
+    };
+  }
+
   /* ── the permanent Hub board ──────────────────────────────────────────────
      A public, pinned message that never expires. Its buttons live in their own
      `hubp:` namespace because every one of them must REPLY privately — the
@@ -1598,27 +1631,51 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
         const gid2 = interaction.guildId, uid2 = interaction.user.id;
         const boosting = isBoosting(interaction);
         const name2 = interaction.member?.displayName || interaction.user.username;
+        // Every board reply carries a Dismiss control. Discord won't let a bot
+        // delete someone's ephemeral messages later on, so the only reliable way
+        // to keep a user's view tidy is to let them clear it themselves.
+        const dismiss = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId('hubp:dismiss').setLabel('Dismiss').setEmoji('✖️').setStyle(ButtonStyle.Secondary));
+        const withDismiss = (view) => {
+          const comps = [...(view.components || [])];
+          if (comps.length < 5) comps.push(dismiss);
+          return { ...view, components: comps, flags: 64 };
+        };
         try {
+          if (what === 'dismiss') {
+            // Removes the ephemeral message this button lives on.
+            return interaction.update({ content: '✔️ Closed.', embeds: [], components: [], files: [], attachments: [] })
+              .then(() => interaction.deleteReply().catch(() => {}))
+              .catch(() => {});
+          }
           if (what === 'profile') {
             if (!profileApi) return interaction.reply({ content: 'Profiles aren\'t available right now.', flags: 64 });
             await interaction.deferReply({ flags: 64 });
             const member = interaction.member || await interaction.guild.members.fetch(uid2);
-            return interaction.editReply(await profileHomeView(gid2, member));
+            return interaction.editReply(withDismiss(await profileHomeView(gid2, member)));
           }
           if (what === 'streak') {
-            return interaction.reply({ ...streakView(gid2, uid2, name2), flags: 64 });
+            return interaction.reply(withDismiss(streakView(gid2, uid2, name2)));
           }
-          // everything else opens the normal hub home, which the existing
-          // hub:* buttons then drive as usual on this user's own message
-          return interaction.reply({
+          if (what === 'shop') {
+            return interaction.reply(withDismiss(shopEntryView()));
+          }
+          if (what === 'clan') {
+            return interaction.reply(withDismiss(clanEntryView(gid2, uid2)));
+          }
+          if (what === 'help') {
+            const pages = helpPages();
+            return interaction.reply(withDismiss({ embeds: [pages[0]], components: [helpRow(0, pages.length)] }));
+          }
+          // 'open' and anything unrecognised → the normal hub home
+          return interaction.reply(withDismiss({
             embeds: [hubEmbed(boosting, uid2, gid2)],
             components: hubComponents(boosting),
-            flags: 64,
-          });
+          }));
         } catch (e) {
           console.error('[hub panel button]', e.message);
           const m = '⚠️ Couldn\'t open that. Try again in a moment.';
-          if (interaction.deferred && !interaction.replied) return interaction.editReply({ content: m }).catch(() => {});
+          if (interaction.deferred && !interaction.replied) return interaction.editReply({ content: m, embeds: [], components: [] }).catch(() => {});
           if (!interaction.replied) return interaction.reply({ content: m, flags: 64 }).catch(() => {});
         }
         return;
@@ -1664,12 +1721,8 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
       }
       // ── Shop sub-menu: Custom Roles + Coin Designs ──
       if (interaction.isButton() && interaction.customId === 'hub:shop') {
-        const embed = new EmbedBuilder().setColor(0xE7B41A).setTitle('🛒 The Shop')
-          .setDescription(`Spend your Dinar 💰\n\n🎨 **Custom Roles** — a personalised colour or gradient role, plus your own 🖼️ image icon\n🪙 **Coin Designs** — reskin your coin flip with themed coins`);
-        const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId('hub:roles').setLabel('Custom Roles').setEmoji('🎨').setStyle(ButtonStyle.Primary),
-          new ButtonBuilder().setCustomId('hub:coins').setLabel('Coin Designs').setEmoji('🪙').setStyle(ButtonStyle.Success));
-        return interaction.update({ content: '', embeds: [embed], components: [row, backHubRow()], files: [], attachments: [] });
+        const v = shopEntryView();
+        return interaction.update({ content: '', embeds: v.embeds, components: [...v.components, backHubRow()], files: [], attachments: [] });
       }
       // Coin Designs — browse, preview, buy & equip
       if (interaction.isButton() && interaction.customId === 'hub:coins') {
@@ -1754,13 +1807,15 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
           new ButtonBuilder().setCustomId(`hub:flipGo:tails:${amount}`).setLabel('Tails').setStyle(ButtonStyle.Primary));
         return interaction.reply({ content: `🪙 Betting **${fmt(amount)} Dinar** — call it!`, components: [row], flags: 64 });
       }
-      // side chosen → close the hub bits and fire the PUBLIC flip via the shared engine
+      // side chosen → play the flip out privately, in this user's own reply
       if (interaction.isButton() && interaction.customId.startsWith('hub:flipGo:')) {
         const [, , side, amtStr] = interaction.customId.split(':');
         const amount = parseInt(amtStr, 10);
-        await interaction.update({ content: '🪙 Tossing your coin in the channel…', components: [] }).catch(() => {});
-        setAction(uid, `🪙 Flipped **${fmt(amount)} Dinar** on **${side}** — watch the channel!`);
-        const r = await runFlip({ guildId: gid, channel: interaction.channel, uid, name, amount, side });
+        await interaction.update({ content: '🪙 Tossing your coin…', components: [] }).catch(() => {});
+        setAction(uid, `🪙 Flipped **${fmt(amount)} Dinar** on **${side}**`);
+        const r = await runFlip({
+          guildId: gid, channel: ephemeralFlipChannel(interaction), uid, name, amount, side,
+        });
         if (r && r.error) return interaction.editReply({ content: r.error, components: [] }).catch(() => {});
         return;
       }
