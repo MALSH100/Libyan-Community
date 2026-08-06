@@ -389,6 +389,27 @@ function getShopCommands() {
       .addUserOption(o => o.setName('user').setDescription('Whose profile to show (defaults to you)').setRequired(false))
       .toJSON(),
     new SlashCommandBuilder()
+      .setName('profile-image')
+      .setDescription('Add an image or GIF to your profile card — works in any channel')
+      .addAttachmentOption(o => o.setName('image')
+        .setDescription('PNG, JPG, GIF or WEBP (max 8MB)')
+        .setRequired(true))
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('role-icon')
+      .setDescription('Set your custom role\'s icon — works in any channel')
+      .addAttachmentOption(o => o.setName('image')
+        .setDescription('Square PNG or JPG works best')
+        .setRequired(true))
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('coin-image')
+      .setDescription('Boosters: set your custom coin face — works in any channel')
+      .addAttachmentOption(o => o.setName('image')
+        .setDescription('PNG or JPG')
+        .setRequired(true))
+      .toJSON(),
+    new SlashCommandBuilder()
       .setName('hub-panel')
       .setDescription('Post the permanent Hub board in this channel (admin only)')
       .setDefaultMemberPermissions(0)
@@ -799,7 +820,8 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
 
     const embed = new EmbedBuilder().setColor(0x5865F2).setTitle('🖼️ Role Icon — upload your image')
       .setDescription(
-        `Send your icon **as an image message in this channel** within **60 seconds** and I'll grab it.\n\n` +
+        `**Easiest way:** run **\`/role-icon\`** and attach your image — that works in every channel, even ones where you can't type.\n\n` +
+        `Or send your icon **as an image message here** within **60 seconds** and I'll grab it.\n\n` +
         `• Square **PNG or JPG** works best (it shows tiny, next to your name)\n` +
         `• I'll resize it automatically\n` +
         `• ${free ? '⭐ **Free** — booster perk!' : `💰 **${fmt(ICON_PRICE)} Dinar** — charged only once the icon is applied`}\n` +
@@ -878,7 +900,8 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
     const has = coins.getCustomImage(db, gid, uid);
     const embed = new EmbedBuilder().setColor(0xE6B840).setTitle('🪙 Custom Coin — upload your image')
       .setDescription(
-        `Send an image **as a message in this channel** within **60 seconds** and it becomes your coin!\n\n` +
+        `**Easiest way:** run **\`/coin-image\`** and attach your picture — that works in every channel, even ones where you can't type.\n\n` +
+        `Or send an image **as a message here** within **60 seconds** and it becomes your coin.\n\n` +
         `• Square **PNG or JPG** works best (it fills the coin face)\n` +
         `• **HEADS** / **TAILS** text is added on top automatically\n` +
         `• The spin animation stays the same — your image shows when the coin lands\n` +
@@ -1440,6 +1463,53 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
   // We fetch it, store as a data URI, and add it as a sticker element. Trusted community.
   const awaitingUpload = new Map();   // uid -> expiry timestamp
   const UPLOAD_WINDOW_MS = 2 * 60 * 1000;
+  /* Stores an uploaded image on a user's profile card. Shared by the
+     message-based flows (!cardimg / the armed upload button) and by
+     /profile-image, so all three behave identically.
+     Returns { ok, text, components? } — the caller decides how to deliver it. */
+  async function storeProfileImage(guildId, userId, att) {
+    if (!att) return { ok: false, text: '📎 No image attached.' };
+    const name = (att.name || '').toLowerCase();
+    const typeOk = (att.contentType || '').startsWith('image/');
+    const extOk = /\.(png|jpe?g|gif|webp)$/i.test(name);
+    if (!typeOk && !extOk)
+      return { ok: false, text: `That doesn't look like an image (got \`${att.contentType || name || 'unknown'}\`). Use a PNG, JPG, GIF or WEBP.` };
+    if (att.size > 8 * 1024 * 1024)
+      return { ok: false, text: 'That image is too large — please keep it under 8MB.' };
+    const used = profileApi.imageCount(guildId, userId);
+    if (used >= profileApi.MAX_IMAGES)
+      return { ok: false, text: `🚫 You've reached the max of **${profileApi.MAX_IMAGES} images**. Delete one from **🪪 My Profile → Edit Layout → Manage Images** before adding another.` };
+
+    const res = await fetch(att.url, { signal: AbortSignal.timeout(12000) })
+      .catch((e) => { console.error('[profile] image fetch error:', e.message); return null; });
+    if (!res || !res.ok) return { ok: false, text: 'Couldn\'t download that image — try uploading it again.' };
+    const buf = Buffer.from(await res.arrayBuffer());
+    // Real format comes from the magic bytes, not the filename — Discord (especially
+    // mobile) often serves a PNG named ".webp", and a wrong label renders blank.
+    const sniffed = sniffImageMime(buf);
+    if (!sniffed)
+      return { ok: false, text: 'That image is in a format I can\'t use (I support PNG, JPG, GIF and WEBP). Try re-saving it as a PNG.' };
+    let finalBuf = buf, finalMime = sniffed;
+    if (sniffed === 'image/webp') {
+      const converted = await webpToPng(buf);
+      if (!converted)
+        return { ok: false, text: 'That\'s a WEBP image, which I can\'t display. Please re-save it as a **PNG** or **JPG** and upload again.' };
+      finalBuf = converted; finalMime = 'image/png';
+    }
+    const dataUri = `data:${finalMime};base64,${finalBuf.toString('base64')}`;
+    const key = profileApi.addUserImage(guildId, userId, dataUri);
+    profileApi.addElement(guildId, userId, 'sticker', { imageKey: key, circle: false });
+    console.log(`[profile] image stored for ${userId} (key=${key}, ${(buf.length/1024).toFixed(0)}KB, original=${sniffed}, final=${finalMime})`);
+    const doneRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('prof:editmine').setLabel('Open Editor').setEmoji('🎨').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId('prof:images').setLabel('Manage Images').setEmoji('🖼️').setStyle(ButtonStyle.Secondary));
+    return {
+      ok: true,
+      text: '🖼️ **Added to your card!** Tap **Open Editor** to position it, or **Manage Images** to set it as a banner. (It starts near the top-left.)',
+      components: [doneRow],
+    };
+  }
+
   if (profileApi) client.on('messageCreate', async (message) => {
     try {
       if (message.author?.bot || !message.guild) return;
@@ -1458,43 +1528,10 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
       const name = (att.name || '').toLowerCase();
       const extOk = /\.(png|jpe?g|gif|webp)$/.test(name);
       const typeOk = att.contentType && att.contentType.startsWith('image/');
-      if (!typeOk && !extOk) {
-        return message.reply(`That doesn't look like an image (got \`${att.contentType || name || 'unknown'}\`). Use a PNG, JPG, GIF or WEBP.`).catch(()=>{});
-      }
-      if (att.size > 8 * 1024 * 1024) return message.reply('That image is too large — please keep it under 8MB.').catch(()=>{});
-      const used = profileApi.imageCount(message.guild.id, message.author.id);
-      if (used >= profileApi.MAX_IMAGES) {
-        return message.reply(`🚫 You've reached the max of **${profileApi.MAX_IMAGES} images**. Delete one from **🪪 My Profile → Edit Layout → Manage Images** before adding another.`).catch(()=>{});
-      }
-      const res = await fetch(att.url, { signal: AbortSignal.timeout(12000) }).catch((e)=>{ console.error('[profile] image fetch error:', e.message); return null; });
-      if (!res || !res.ok) return message.reply('Couldn\'t download that image — try uploading it again.').catch(()=>{});
-      const buf = Buffer.from(await res.arrayBuffer());
-      // Determine the REAL format from magic bytes, not the filename/contentType. Discord
-      // (especially mobile) often serves images with a wrong extension — e.g. a PNG named
-      // ".webp". resvg decodes by the data-URI MIME, so a wrong label renders BLANK.
-      let sniffed = sniffImageMime(buf);
-      if (!sniffed) {
-        return message.reply('That image is in a format I can\'t use (I support PNG, JPG, GIF and WEBP). Try re-saving it as a PNG.').catch(()=>{});
-      }
-      let finalBuf = buf, finalMime = sniffed;
-      // resvg cannot render WEBP at all — convert real WEBP files to PNG first.
-      if (sniffed === 'image/webp') {
-        const converted = await webpToPng(buf);
-        if (!converted) {
-          return message.reply('That\'s a WEBP image, which I can\'t display. Please re-save it as a **PNG** or **JPG** and upload again.').catch(()=>{});
-        }
-        finalBuf = converted; finalMime = 'image/png';
-      }
-      const dataUri = `data:${finalMime};base64,${finalBuf.toString('base64')}`;
-      const key = profileApi.addUserImage(message.guild.id, message.author.id, dataUri);
-      profileApi.addElement(message.guild.id, message.author.id, 'sticker', { imageKey: key, circle: false });
-      console.log(`[profile] image stored for ${message.author.id} (key=${key}, ${(buf.length/1024).toFixed(0)}KB, original=${sniffed}, final=${finalMime})`);
-      // Discord doesn't auto-refresh an already-open Manage Images dropdown, so give the
-      // user buttons that open a FRESH view showing the image they just added.
-      const doneRow = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('prof:editmine').setLabel('Open Editor').setEmoji('🎨').setStyle(ButtonStyle.Success),
-        new ButtonBuilder().setCustomId('prof:images').setLabel('Manage Images').setEmoji('🖼️').setStyle(ButtonStyle.Secondary));
-      await message.reply({ content: '🖼️ **Added to your card!** Tap **Open Editor** to position it, or **Manage Images** to set it as a banner. (It starts near the top-left.)', components: [doneRow] }).catch(()=>{});
+      const out = await storeProfileImage(message.guild.id, message.author.id, att);
+      await message.reply(out.ok
+        ? { content: out.text, components: out.components }
+        : { content: out.text }).catch(()=>{});
     } catch (e) {
       console.error('[profile] image upload failed:', e.message, e.stack?.split('\n')[1]);
       try { await message.reply('⚠️ Something went wrong adding that image. Check the logs or try again.'); } catch {}
@@ -1594,6 +1631,90 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
         console.log(`🏛️ /hub opened by ${uname} (${interaction.user.id})${boosting ? ' [booster]' : ''}`);
         return interaction.reply({ embeds: [hubEmbed(boosting, interaction.user.id, interaction.guildId)], components: hubComponents(boosting), flags: 64 });
       }
+      // ── /profile-image ─────────────────────────────────────────────────
+      // Attachment-bearing slash command. This is the reliable way to upload in a
+      // locked-down channel: running a slash command needs "Use Application
+      // Commands", not "Send Messages", so it still works where members can't type.
+      if (interaction.isChatInputCommand() && interaction.commandName === 'profile-image') {
+        if (!interaction.guildId) return interaction.reply({ content: 'Use this in the server.', flags: 64 });
+        if (!profileApi) return interaction.reply({ content: 'Profiles aren\'t available right now.', flags: 64 });
+        await interaction.deferReply({ flags: 64 });
+        try {
+          const att = interaction.options.getAttachment('image');
+          const out = await storeProfileImage(interaction.guildId, interaction.user.id, att);
+          return interaction.editReply(out.ok
+            ? { content: out.text, components: out.components }
+            : { content: out.text });
+        } catch (e) {
+          console.error('[profile-image]', e.message);
+          return interaction.editReply({ content: '⚠️ Something went wrong adding that image. Try again in a moment.' }).catch(() => {});
+        }
+      }
+
+      // ── /role-icon ─────────────────────────────────────────────────────
+      // Same reasoning as /profile-image: an attachment on a slash command needs
+      // only "Use Application Commands", so this works in a channel where members
+      // can't post. The old "upload an image here" collector flow still works too.
+      if (interaction.isChatInputCommand() && interaction.commandName === 'role-icon') {
+        if (!interaction.guildId) return interaction.reply({ content: 'Use this in the server.', flags: 64 });
+        const gidR = interaction.guildId, uidR = interaction.user.id;
+        const rec = stateOf(gidR).roles[uidR];
+        if (!rec) return interaction.reply({ content: '🖼️ You need an active hub role first — grab a **Custom Role** from `/hub` → Shop, then set your icon.', flags: 64 });
+        await interaction.deferReply({ flags: 64 });
+        try {
+          const free = isBoosting(interaction);
+          const got = await fetchIconBuffer(interaction.options.getAttachment('image'));
+          if (got.error) return interaction.editReply({ content: `⚠️ ${got.error}\nNothing was charged.` });
+          if (!free && getDinar(db, gidR, uidR) < ICON_PRICE)
+            return interaction.editReply({ content: `💰 A role icon costs **${fmt(ICON_PRICE)} Dinar** — you have **${fmt(getDinar(db, gidR, uidR))}**.` });
+          const role = interaction.guild.roles.cache.get(rec.roleId)
+            || await interaction.guild.roles.fetch(rec.roleId).catch(() => null);
+          if (!role) return interaction.editReply({ content: '⚠️ I couldn\'t find your role anymore — grab a fresh one from the Shop, then add the icon.' });
+          try { await role.setIcon(got.buf, `Role icon set by ${interaction.user.tag}`); }
+          catch (e) {
+            console.error('[role-icon]', e.message);
+            return interaction.editReply({ content: '⚠️ Discord rejected that image (too large or unsupported). Nothing was charged — try a smaller, square PNG/JPG.' });
+          }
+          if (!free) spendDinar(db, gidR, uidR, ICON_PRICE, saveData);
+          rec.icon = true; saveData(gidR);
+          setAction(uidR, `🖼️ Added a custom icon to **${esc(rec.label)}**${free ? ' (booster perk)' : ` (${fmt(ICON_PRICE)} Dinar)`}.`);
+          const balLine = free ? '⭐ Free booster perk.' : `💰 Paid **${fmt(ICON_PRICE)} Dinar** — new balance **${fmt(getDinar(db, gidR, uidR))}**.`;
+          return interaction.editReply({ content: `✅ Icon applied to **${esc(rec.label)}**! It now shows next to your name.\n${balLine}` });
+        } catch (e) {
+          console.error('[role-icon]', e.message);
+          return interaction.editReply({ content: '⚠️ Something went wrong setting that icon. Try again in a moment.' }).catch(() => {});
+        }
+      }
+
+      // ── /coin-image (booster perk) ─────────────────────────────────────
+      if (interaction.isChatInputCommand() && interaction.commandName === 'coin-image') {
+        if (!interaction.guildId) return interaction.reply({ content: 'Use this in the server.', flags: 64 });
+        if (!isBoosting(interaction))
+          return interaction.reply({ content: '⭐ Custom coins are a **booster perk** — boost the server to unlock it!', flags: 64 });
+        const gidC = interaction.guildId, uidC = interaction.user.id;
+        await interaction.deferReply({ flags: 64 });
+        try {
+          const got = await fetchCoinBuffer(interaction.options.getAttachment('image'));
+          if (got.error) return interaction.editReply({ content: `⚠️ ${got.error}` });
+          let previewPng;
+          try {
+            coins.setCustomImage(db, gidC, uidC, got.buf.toString('base64'), got.mime, saveData);
+            previewPng = coins.renderCustomFace(got.buf, got.mime, 'heads');
+          } catch (e) {
+            console.error('[coin-image]', e.message);
+            return interaction.editReply({ content: '⚠️ I couldn\'t process that image. Try a different PNG/JPG.' });
+          }
+          setAction(uidC, '🪙 Set a custom coin design (booster perk).');
+          return interaction.editReply({
+            content: '✅ Your custom coin is set and equipped! Here\'s how **heads** will look — **tails** uses the same image.\n*Switch back anytime from Shop → Coin Designs.*',
+            files: [new AttachmentBuilder(previewPng, { name: 'coin-preview.png' })],
+          });
+        } catch (e) {
+          console.error('[coin-image]', e.message);
+          return interaction.editReply({ content: '⚠️ Something went wrong setting that coin. Try again in a moment.' }).catch(() => {});
+        }
+      }
+
       // ── Hub board: admin commands ──────────────────────────────────────
       if (interaction.isChatInputCommand() && interaction.commandName === 'hub-panel') {
         if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator))
@@ -2277,7 +2398,7 @@ if (interaction.isButton() && interaction.customId === 'prof:upload') {
 
   try {
     await interaction.reply({
-      content: `📤 **Ready for your image!** Just drag an image into this channel and send it (no caption needed) within the next **2 minutes**, and I'll add it to your card.\n\n*Works with PNG, JPG, GIF or WEBP. You can also caption any image with \`!cardimg\` anytime.*`,
+      content: `📤 **Ready for your image!**\n\n**Easiest way:** run **\`/profile-image\`** and attach your picture — that works in every channel, even ones where you can't type.\n\nOr, within the next **2 minutes**, just drag an image into any channel you can post in and send it (no caption needed).\n\n*PNG, JPG, GIF or WEBP, up to 8MB. You can also caption any image with \`!cardimg\` anytime.*`,
       flags: 64
     });
   } catch (err) {
