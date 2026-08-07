@@ -1889,6 +1889,13 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
         const gid2 = interaction.guildId, uid2 = interaction.user.id;
         const boosting = isBoosting(interaction);
         const name2 = interaction.member?.displayName || interaction.user.username;
+        // Visible in the Railway logs so board usage can be seen at a glance.
+        const LABEL = {
+          open: 'Open the Hub', profile: 'My Profile Card', streak: 'Daily Check-in',
+          shop: 'Shop', clan: 'Clans', help: 'How it works', dismiss: 'Dismiss',
+        };
+        console.log(`🏛️ [board] ${LABEL[what] || what} — ${name2} (${uid2})`
+          + `${boosting ? ' [booster]' : ''} in ${interaction.guild?.name || gid2}`);
         // Every board reply carries a Dismiss control. Discord won't let a bot
         // delete someone's ephemeral messages later on, so the only reliable way
         // to keep a user's view tidy is to let them clear it themselves.
