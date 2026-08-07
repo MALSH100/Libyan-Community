@@ -415,6 +415,21 @@ function getShopCommands() {
       .setDefaultMemberPermissions(0)
       .toJSON(),
     new SlashCommandBuilder()
+      .setName('hub-autoclean')
+      .setDescription('Auto-delete member messages in this channel so it stays a clean board (admin only)')
+      .addStringOption(o => o.setName('mode').setDescription('Turn it on or off').setRequired(true)
+        .addChoices({ name: 'on', value: 'on' }, { name: 'off', value: 'off' }))
+      .addIntegerOption(o => o.setName('seconds')
+        .setDescription('How long a message stays before it is removed (default 6)')
+        .setMinValue(2).setMaxValue(60).setRequired(false))
+      .setDefaultMemberPermissions(0)
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName('hub-war-channel')
+      .setDescription('Set where clan war announcements are posted (admin only)')
+      .setDefaultMemberPermissions(0)
+      .toJSON(),
+    new SlashCommandBuilder()
       .setName('hub-panel')
       .setDescription('Post the permanent Hub board in this channel (admin only)')
       .setDefaultMemberPermissions(0)
@@ -639,6 +654,57 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
     if (id && id !== interaction.channelId) return { canPostHere, where: `<#${id}>` };
     if (!canPostHere) return { canPostHere, where: id ? `<#${id}>` : 'any channel you can type in' };
     return { canPostHere, where: 'this channel' };
+  }
+
+  /* ── hub channel auto-clean ───────────────────────────────────────────────
+     Slash commands need SEND_MESSAGES, so the board channel can't simply be
+     locked. Instead we let people post — commands, images, anything — and quietly
+     remove their message a few seconds later, so the board stays the only thing
+     in the channel while every feature keeps working.
+
+     The delay matters: the image-upload handlers read the attachment off the
+     message, so deleting instantly would break uploads. A few seconds also lets
+     the person see their message actually sent.
+
+     Never touches: the pinned board, or any pinned message.                     */
+  const AUTOCLEAN_DEFAULT = 6;
+  function autoCleanFor(gid) {
+    const st = stateOf(gid);
+    return st.autoClean && st.autoClean.channelId ? st.autoClean : null;
+  }
+  client.on('messageCreate', (message) => {
+    try {
+      if (!message.guild) return;
+      const cfg = autoCleanFor(message.guild.id);
+      if (!cfg || message.channelId !== cfg.channelId) return;
+      const panel = stateOf(message.guild.id).panel;
+      if (panel && message.id === panel.messageId) return;   // never the board
+      if (message.pinned) return;
+      const wait = Math.max(2, cfg.seconds || AUTOCLEAN_DEFAULT) * 1000;
+      setTimeout(() => {
+        message.delete().catch(() => { /* already gone, or no Manage Messages */ });
+      }, wait).unref?.();
+    } catch { /* cleaning must never break message handling */ }
+  });
+
+  /* Where should clan war announcements go? A war is meant to be seen, so these
+     are never auto-deleted — they're redirected out of the board channel instead
+     of being hidden. Falls back to the current channel when nothing is set. */
+  function warChannelFor(interaction) {
+    const st = stateOf(interaction.guildId);
+    const id = st.warChannelId;
+    if (id && id !== interaction.channelId) {
+      const ch = interaction.guild?.channels?.cache?.get(id);
+      if (ch) return ch;
+    }
+    // no war channel configured, but we're in the auto-cleaned board — anything we
+    // post here would be swept away, so fall back to the upload channel if there is one
+    const cfg = autoCleanFor(interaction.guildId);
+    if (!id && cfg && interaction.channelId === cfg.channelId) {
+      const alt = st.uploadChannelId && interaction.guild?.channels?.cache?.get(st.uploadChannelId);
+      if (alt) return alt;
+    }
+    return interaction.channel;
   }
 
   /* ── the permanent Hub board ──────────────────────────────────────────────
@@ -1756,6 +1822,36 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
         });
       }
 
+      if (interaction.isChatInputCommand() && interaction.commandName === 'hub-autoclean') {
+        if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator))
+          return interaction.reply({ content: '❌ Admins only.', flags: 64 });
+        const st = stateOf(interaction.guildId);
+        const mode = interaction.options.getString('mode');
+        if (mode === 'off') {
+          st.autoClean = null; saveData(interaction.guildId);
+          return interaction.reply({ content: '✅ Auto-clean turned off. Messages here will stay.', flags: 64 });
+        }
+        const secs = interaction.options.getInteger('seconds') || AUTOCLEAN_DEFAULT;
+        st.autoClean = { channelId: interaction.channelId, seconds: secs };
+        saveData(interaction.guildId);
+        const me = await resolveMe(interaction.guild);
+        const canDelete = me ? me.permissions.has(PermissionFlagsBits.ManageMessages) : false;
+        return interaction.reply({
+          content: `✅ Auto-clean is **on** in <#${interaction.channelId}> — member messages are removed after **${secs}s**.\n`
+            + `The pinned board is never touched, and slash commands and image uploads keep working normally.\n`
+            + (canDelete ? '' : '\n⚠️ I don\'t have **Manage Messages** here, so I can\'t actually delete anything yet — grant it and this starts working.'),
+          flags: 64,
+        });
+      }
+      if (interaction.isChatInputCommand() && interaction.commandName === 'hub-war-channel') {
+        if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator))
+          return interaction.reply({ content: '❌ Admins only.', flags: 64 });
+        const st = stateOf(interaction.guildId);
+        st.warChannelId = interaction.channelId;
+        saveData(interaction.guildId);
+        return interaction.reply({ content: `✅ Clan war announcements will now be posted in <#${interaction.channelId}>.`, flags: 64 });
+      }
+
       // ── Hub board: admin commands ──────────────────────────────────────
       if (interaction.isChatInputCommand() && interaction.commandName === 'hub-panel') {
         if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator))
@@ -2204,7 +2300,8 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
         if (!mine) return interaction.update(clanEntryView(gid, uid));
         const defenderName = interaction.values[0];
         await interaction.deferUpdate();
-        const res = await warApi.challenge(interaction.guild, interaction.channel, mine.name, defenderName, uid);
+        const warCh = warChannelFor(interaction);
+        const res = await warApi.challenge(interaction.guild, warCh, mine.name, defenderName, uid);
         if (res.error) return interaction.editReply(Object.assign(clanWarsView(gid, uid), { content: `⚠️ ${res.error}` }));
         setAction(uid, `⚔️ Challenged **${esc(defenderName)}** to a clan war.`);
         return interaction.editReply(Object.assign(clanWarsView(gid, uid), { content: `⚔️ Challenge sent to **${esc(defenderName)}**! They have 2 minutes to respond.` }));
@@ -2214,8 +2311,9 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
         if (!warApi) return interaction.reply({ content: 'Wars are unavailable right now.', flags: 64 });
         const mine = clans.userClan(db, gid, uid);
         if (!mine) return interaction.update(clanEntryView(gid, uid));
-        await interaction.update(Object.assign(clanDashboard(gid, uid), { content: '⚔️ War accepted — head to the channel, it\'s starting now!' }));
-        const res = await warApi.accept(interaction.guild, interaction.channel, mine.name, uid);
+        const warCh = warChannelFor(interaction);
+        await interaction.update(Object.assign(clanDashboard(gid, uid), { content: `⚔️ War accepted — it's starting now in ${warCh ? `<#${warCh.id}>` : 'the channel'}!` }));
+        const res = await warApi.accept(interaction.guild, warCh, mine.name, uid);
         if (res && res.error) return interaction.followUp({ content: `⚠️ ${res.error}`, flags: 64 }).catch(() => {});
         setAction(uid, `⚔️ Accepted a clan war.`);
         return;
@@ -2229,7 +2327,7 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
         const res = await warApi.decline(interaction.guild, mine.name, uid);
         if (res.error) return interaction.editReply(Object.assign(clanWarsView(gid, uid), { content: `⚠️ ${res.error}` }));
         setAction(uid, `🏳️ Declined a war challenge.`);
-        interaction.channel.send(`🏳️ **${esc(mine.name)}** declined the war challenge from **${esc(res.challengerName)}**.`).catch(() => {});
+        warChannelFor(interaction).send(`🏳️ **${esc(mine.name)}** declined the war challenge from **${esc(res.challengerName)}**.`).catch(() => {});
         return interaction.editReply(Object.assign(clanWarsView(gid, uid), { content: `🏳️ You declined the challenge from **${esc(res.challengerName)}**.` }));
       }
 
