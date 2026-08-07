@@ -929,8 +929,10 @@ const { getGachaCommands, initGacha, awardDinar, isAtDinarCap, dinarDailyCap, ge
 const { CLAN_CREATE_COST, CLAN_JOIN_COST, CLAN_CHANNEL_COST } = require('./clanfns');
 const { getBattleCardsCommands, initBattleCards } = require('./battlecards');
 const { getDiyarCommands, initDiyar } = require('./diyar');
-// Football Manager — DISABLED. Re-enable by uncommenting this line and the two
-// blocks below (marked "FOOTBALL MANAGER (disabled)").
+const { getClanChannelCommands, initClanChannels } = require('./clan-channels');
+// Football Manager — DISABLED (football.js is not deployed). Requiring a missing
+// module throws at startup and crash-loops the whole bot, so this stays commented
+// out until football.js and fm-render.js are actually in the repo.
 // const { getFootballCommands, initFootball } = require('./football');
 
 const { getLottoCommands, initLotto } = require('./lottery');
@@ -1002,8 +1004,13 @@ function getAllCommands() {
   } catch (e) {
     console.error('Could not load diyar.js commands:', e.message);
   }
-  // ── FOOTBALL MANAGER (disabled) ──
-  // Left as an empty array so the command spread below needs no edit.
+  let clanChannelCommands = [];
+  try {
+    clanChannelCommands = getClanChannelCommands();
+  } catch (e) {
+    console.error('Could not load clan-channels.js commands:', e.message);
+  }
+  // ── FOOTBALL MANAGER (disabled) ── empty array so the spread below needs no edit
   let footballCommands = [];
   // try {
   //   footballCommands = getFootballCommands();
@@ -1022,7 +1029,7 @@ function getAllCommands() {
   } catch (e) {
     console.error('Could not load shop.js commands:', e.message);
   }
-  _allCommands = [...commands, ...pokeCommands, ...yaraytCommands, ...exchangeCommands, ...newsCommands, ...jobsCommands, ...potdCommands, ...translatorCommands, ...libyaChatCommands, ...gachaCommands, ...battleCardsCommands, ...diyarCommands, ...footballCommands, ...lottoCommands, ...shopCommands];
+  _allCommands = [...commands, ...pokeCommands, ...yaraytCommands, ...exchangeCommands, ...newsCommands, ...jobsCommands, ...potdCommands, ...translatorCommands, ...libyaChatCommands, ...gachaCommands, ...battleCardsCommands, ...diyarCommands, ...clanChannelCommands, ...footballCommands, ...lottoCommands, ...shopCommands];
   console.log(`📋 Command list built: ${_allCommands.map(c => c.name).join(', ')}`);
   return _allCommands;
 }
@@ -2966,8 +2973,14 @@ initBattleCards({ client, db, saveData, awardLP });
 // Diyar — Libyan conquest game (Dinar economy)
 initDiyar({ client, db, saveData, awardLP });
 
+// Clan channel upkeep — warns at 28 days idle, archives (never deletes) at 30.
+try {
+  initClanChannels({ client, db, saveData, getDinar, spendDinar });
+} catch (e) {
+  console.error('Could not start clan channel upkeep:', e.message);
+}
+
 // ── FOOTBALL MANAGER (disabled) ──
-// Clubs, transfers, retainers and live animated matches. Uses the same Dinar wallet.
 // try {
 //   initFootball({ client, db, saveData, getDinar, spendDinar, awardDinar });
 // } catch (e) {
@@ -3012,5 +3025,58 @@ process.on('uncaughtException', (err) => {
   console.error('[process] uncaught exception:', err && err.stack ? err.stack.split('\n').slice(0, 3).join(' | ') : err);
   // deliberately not exiting: a single bad interaction should not end the bot
 });
+
+/* ── keepalive HTTP server ─────────────────────────────────────────────────
+   Railway treats a service with no listening HTTP port as an idle web service
+   and will stop the container — which is what "Stopping Container" with a clean
+   SIGTERM and no stack trace means. A Discord bot never receives inbound HTTP,
+   so we expose a tiny health endpoint purely so the platform can see the process
+   is alive and healthy. It also gives you a URL to check the bot's status.       */
+try {
+  const http = require('http');
+  const PORT = process.env.PORT || 3000;
+  http.createServer((req, res) => {
+    const up = process.uptime();
+    const mem = process.memoryUsage();
+    const body = JSON.stringify({
+      status: client && client.isReady && client.isReady() ? 'ready' : 'starting',
+      uptimeSeconds: Math.round(up),
+      uptimeHuman: `${Math.floor(up / 3600)}h ${Math.floor((up % 3600) / 60)}m`,
+      guilds: (client && client.guilds && client.guilds.cache.size) || 0,
+      rssMB: Math.round(mem.rss / 1048576),
+      heapMB: Math.round(mem.heapUsed / 1048576),
+    });
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(body);
+  }).listen(PORT, '0.0.0.0', () => console.log(`🌐 Health endpoint listening on ${PORT}`));
+} catch (e) {
+  console.error('Could not start health endpoint:', e.message);
+}
+
+/* ── shutdown diagnostics ──────────────────────────────────────────────────
+   When Railway stops the container it sends SIGTERM. The existing shutdown()
+   handler above already flushes data to MongoDB — this only ADDS context to the
+   log so a platform-initiated stop (sleep, redeploy, resource limit) can be told
+   apart from a genuine crash. It deliberately does no saving of its own.        */
+let _shutdownLogged = false;
+function _logShutdown(signal) {
+  if (_shutdownLogged) return;
+  _shutdownLogged = true;
+  const up = process.uptime();
+  const mem = process.memoryUsage();
+  console.log('──────────────────────────────────────────────');
+  console.log(`🛑 ${signal} — the platform asked this container to stop.`);
+  console.log(`   uptime : ${Math.floor(up / 3600)}h ${Math.floor((up % 3600) / 60)}m ${Math.round(up % 60)}s`);
+  console.log(`   memory : rss ${Math.round(mem.rss / 1048576)}MB · heap ${Math.round(mem.heapUsed / 1048576)}`
+    + `/${Math.round(mem.heapTotal / 1048576)}MB · external ${Math.round((mem.external || 0) / 1048576)}MB`);
+  console.log(`   discord: ${client && client.isReady && client.isReady() ? 'connected' : 'NOT connected'}`
+    + ` · ws ping ${client && client.ws ? client.ws.ping : '?'}ms`);
+  console.log('   note   : a clean signal with healthy memory and no stack trace');
+  console.log('            means Railway stopped it (sleep / redeploy / limit),');
+  console.log('            not a crash in the bot.');
+  console.log('──────────────────────────────────────────────');
+}
+process.on('SIGTERM', () => _logShutdown('SIGTERM'));
+process.on('SIGINT',  () => _logShutdown('SIGINT'));
 
 client.login(process.env.DISCORD_TOKEN);
