@@ -16,6 +16,10 @@ const {
   SlashCommandBuilder, EmbedBuilder, AttachmentBuilder, ActionRowBuilder,
   StringSelectMenuBuilder, ButtonBuilder, ButtonStyle, ModalBuilder,
   TextInputBuilder, TextInputStyle, UserSelectMenuBuilder, PermissionFlagsBits,
+  // Components V2 — used by the showcase gallery and the Hub board
+  ContainerBuilder, SectionBuilder, TextDisplayBuilder, ThumbnailBuilder,
+  MediaGalleryBuilder, MediaGalleryItemBuilder, SeparatorBuilder, SeparatorSpacingSize,
+  MessageFlags,
 } = require('discord.js');
 const path = require('path');
 const fs = require('fs');
@@ -707,6 +711,79 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
     return interaction.channel;
   }
 
+  /* ── /topprofiles showcase gallery ────────────────────────────────────────
+     Components V2. A MediaGallery shows every top card at once instead of the
+     old one-at-a-time browse, so the card renderer's work is actually visible.
+
+     Two hard rules of V2 messages, both of which shape the code below:
+       • no `content` and no `embeds` — the container IS the message
+       • every image must be a real attachment, referenced as attachment://name
+     Cards are rendered in parallel and any that fail are simply left out rather
+     than taking the whole command down.                                        */
+  const SHOWCASE_MAX = 6;
+
+  async function showcaseGallery(interaction, gid, ranked, howTo) {
+    const medals = ['🥇', '🥈', '🥉'];
+    // Rendered ONE AT A TIME with a yield between each. Promise.all looks parallel
+    // but resvg is synchronous CPU work, so it just blocks the event loop for the
+    // sum of all six (~900ms measured) — long enough to delay other people's
+    // button presses. Yielding caps any single block at roughly one card.
+    const rendered = [];
+    for (let i = 0; i < ranked.length; i++) {
+      const r = ranked[i];
+      try {
+        const member = interaction.guild.members.cache.get(r.id)
+          || await interaction.guild.members.fetch(r.id).catch(() => null);
+        if (!member) { rendered.push(null); continue; }
+        // forceStatic keeps the gallery light — an animated card per tile would be
+        // megabytes of GIF in a single message.
+        const card = await profileApi.renderCard(gid, member, { forceStatic: true });
+        const name = `card-${i + 1}.png`;
+        rendered.push({
+          rank: i + 1, id: r.id, hearts: r.hearts,
+          label: `${medals[i] || `#${i + 1}`}  ${member.displayName} — ${fmt(r.hearts)} ❤️`,
+          file: new AttachmentBuilder(card.attachment, { name }),
+          url: `attachment://${name}`,
+        });
+      } catch (e) {
+        console.error(`[topprofiles] card for ${r.id} failed:`, e.message);
+        rendered.push(null);
+      }
+      await new Promise(res => setImmediate(res));   // hand control back between cards
+    }
+    const cards = rendered.filter(Boolean);
+    if (!cards.length) throw new Error('no cards could be rendered');
+
+    const container = new ContainerBuilder()
+      .setAccentColor(0xec4899)
+      .addTextDisplayComponents(
+        new TextDisplayBuilder().setContent('# 🏆  Most-Hearted Profiles'),
+        new TextDisplayBuilder().setContent(`-# The top ${cards.length} published card${cards.length === 1 ? '' : 's'} in the server`))
+      .addSeparatorComponents(new SeparatorBuilder().setDivider(true).setSpacing(SeparatorSpacingSize.Small))
+      .addMediaGalleryComponents(
+        new MediaGalleryBuilder().addItems(
+          cards.map(c => new MediaGalleryItemBuilder()
+            .setURL(c.url)
+            .setDescription(`${c.label}`.slice(0, 256)))))
+      // The gallery itself can't caption each tile in the client, so the ranking is
+      // restated underneath where it's readable and the mentions actually resolve.
+      .addTextDisplayComponents(
+        new TextDisplayBuilder().setContent(
+          cards.map(c => `${medals[c.rank - 1] || `**${c.rank}.**`} <@${c.id}> — **${fmt(c.hearts)}** ❤️`).join('\n')))
+      .addSeparatorComponents(new SeparatorBuilder().setDivider(true).setSpacing(SeparatorSpacingSize.Small))
+      .addTextDisplayComponents(new TextDisplayBuilder().setContent(howTo))
+      .addActionRowComponents(
+        new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId('prof:editmine').setLabel('Design my card').setEmoji('🪪').setStyle(ButtonStyle.Success),
+          new ButtonBuilder().setCustomId('hubp:open').setLabel('Open the Hub').setEmoji('🏛️').setStyle(ButtonStyle.Secondary)));
+
+    return {
+      flags: MessageFlags.IsComponentsV2,
+      components: [container],
+      files: cards.map(c => c.file),
+    };
+  }
+
   /* ── the permanent Hub board ──────────────────────────────────────────────
      A public, pinned message that never expires. Its buttons live in their own
      `hubp:` namespace because every one of them must REPLY privately — the
@@ -717,32 +794,50 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
      Deliberately static: no live figures, so it never needs re-editing and costs
      nothing to keep sitting there.                                              */
   function hubPanelMessage() {
-    const embed = new EmbedBuilder()
-      .setColor(0xE7B41A)
-      .setTitle('🏛️  Community Hub')
-      .setDescription(
-        'Everything the server has to offer, in one place. **Tap a button below** — '
-        + 'whatever you open is private and only visible to you.\n\u200b')
-      .addFields(
-        { name: '🪪  Profile Cards', value: 'Design your own card with colours, borders, images and live stats.', inline: false },
-        { name: '🎨  Custom Roles & Coins', value: 'Spend Dinar on your own colour role, an image icon, or a themed coin.', inline: false },
-        { name: '🔥  Daily Streak', value: 'Check in each day to build a streak and earn Dinar.', inline: false },
-        { name: '⚔️  Clans', value: 'Create or join a clan, level it up and go to war.', inline: false },
-      )
-      .setFooter({ text: 'New here? Start with "Open the Hub" — everything is free to look at.' });
+    // Components V2: each feature is its own Section with a thumbnail and its own
+    // button on the same row, separated by real dividers — rather than an embed
+    // with all the buttons stranded underneath.
+    // A V2 message carries no `content` and no `embeds`; the container is the message.
+    const sec = (emoji, title, body, id, label, style, disabled = false) =>
+      new SectionBuilder()
+        .addTextDisplayComponents(
+          new TextDisplayBuilder().setContent(`### ${emoji}  ${title}\n${body}`))
+        .setButtonAccessory(
+          new ButtonBuilder().setCustomId(id).setLabel(label).setStyle(style).setDisabled(disabled));
 
-    const rows = [
-      new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('hubp:open').setLabel('Open the Hub').setEmoji('🏛️').setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId('hubp:profile').setLabel('My Profile Card').setEmoji('🪪').setStyle(ButtonStyle.Success).setDisabled(!profileApi),
-        new ButtonBuilder().setCustomId('hubp:streak').setLabel('Daily Check-in').setEmoji('🔥').setStyle(ButtonStyle.Success)),
-      new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('hubp:shop').setLabel('Shop').setEmoji('🛒').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('hubp:clan').setLabel('Clans').setEmoji('⚔️').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('hubp:help').setLabel('How it works').setEmoji('❓').setStyle(ButtonStyle.Secondary)),
-    ];
-    return { embeds: [embed], components: rows };
+    const container = new ContainerBuilder()
+      .setAccentColor(0xE7B41A)
+      .addTextDisplayComponents(
+        new TextDisplayBuilder().setContent('# 🏛️  Community Hub'),
+        new TextDisplayBuilder().setContent(
+          '-# Everything the server has to offer. Whatever you open is **private** — only you can see it.'))
+      .addSeparatorComponents(new SeparatorBuilder().setDivider(true).setSpacing(SeparatorSpacingSize.Small))
+      .addSectionComponents(
+        sec('🪪', 'Profile Cards', 'Design your own card with colours, borders, images and live stats.',
+          'hubp:profile', 'Open', ButtonStyle.Success, !profileApi))
+      .addSeparatorComponents(new SeparatorBuilder().setDivider(true).setSpacing(SeparatorSpacingSize.Small))
+      .addSectionComponents(
+        sec('🎨', 'Shop', 'Custom colour roles, image icons and themed coin designs.',
+          'hubp:shop', 'Browse', ButtonStyle.Secondary))
+      .addSeparatorComponents(new SeparatorBuilder().setDivider(true).setSpacing(SeparatorSpacingSize.Small))
+      .addSectionComponents(
+        sec('🔥', 'Daily Streak', 'Check in each day to build a streak and earn Dinar.',
+          'hubp:streak', 'Check in', ButtonStyle.Success))
+      .addSeparatorComponents(new SeparatorBuilder().setDivider(true).setSpacing(SeparatorSpacingSize.Small))
+      .addSectionComponents(
+        sec('⚔️', 'Clans', 'Create or join a clan, level it up and go to war.',
+          'hubp:clan', 'View', ButtonStyle.Secondary))
+      .addSeparatorComponents(new SeparatorBuilder().setDivider(true).setSpacing(SeparatorSpacingSize.Large))
+      .addActionRowComponents(
+        new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId('hubp:open').setLabel('Open the full Hub').setEmoji('🏛️').setStyle(ButtonStyle.Primary),
+          new ButtonBuilder().setCustomId('hubp:help').setLabel('How it works').setEmoji('❓').setStyle(ButtonStyle.Secondary)))
+      .addTextDisplayComponents(
+        new TextDisplayBuilder().setContent('-# New here? Start with **Open the full Hub** — everything is free to look at.'));
+
+    return { flags: MessageFlags.IsComponentsV2, components: [container] };
   }
+
   const backHubRow = () => new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('hub:home').setLabel('← Back to Hub').setStyle(ButtonStyle.Secondary));
   const backRolesRow = () => new ActionRowBuilder().addComponents(
@@ -1667,18 +1762,16 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
         if (!interaction.guildId) return interaction.reply({ content: 'Use this in the server.', flags: 64 });
         if (!profileApi) return interaction.reply({ content: 'Profiles aren\'t available right now.', flags: 64 });
         const g = interaction.guildId;
-        // rank published profiles by hearts (desc)
         const ranked = profileApi.publishedList(g)
           .map(id => ({ id, hearts: profileApi.heartsFor(g, id) }))
           .sort((a, b) => b.hearts - a.hearts)
-          .slice(0, 10);
+          .slice(0, SHOWCASE_MAX);
 
         const howTo =
-          '**❤️ Want your profile on this board?**\n' +
-          '1️⃣ Run `/hub` → **🪪 My Profile** (or `/profile`) and design your card.\n' +
-          '2️⃣ Hit **🌍 Publish to Showcase** so others can see it.\n' +
-          '3️⃣ People heart it with **/profile @you** → the **❤️ Heart** button.\n' +
-          'The more hearts, the higher you climb!';
+          '**❤️ Want your card up here?**\n'
+          + '1. `/profile` → **Edit your Profile** and design your card\n'
+          + '2. Hit **🌍 Publish to Showcase**\n'
+          + '3. Others heart it with `/profile @you` → the **❤️ Heart** button';
 
         if (!ranked.length) {
           return interaction.reply({
@@ -1687,19 +1780,18 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
           });
         }
 
-        const medals = ['🥇', '🥈', '🥉'];
-        const lines = ranked.map((r, i) => {
-          const rank = medals[i] || `**${i + 1}.**`;
-          return `${rank} <@${r.id}> — **${fmt(r.hearts)}** heart${r.hearts === 1 ? '' : 's'}`;
-        });
-
-        return interaction.reply({
-          embeds: [new EmbedBuilder().setColor(0xec4899)
-            .setTitle('🏆 Top Profiles — Most Hearted')
-            .setDescription(lines.join('\n') + `\n\n${howTo}`)
-            .setFooter({ text: 'Tip: /profile @someone to view and heart their card' })
-            .setTimestamp()],
-        });
+        await interaction.deferReply();
+        try {
+          return await interaction.editReply(await showcaseGallery(interaction, g, ranked, howTo));
+        } catch (e) {
+          console.error('[topprofiles] gallery failed:', e.message);
+          // Fall back to the plain list so the command never simply breaks.
+          const medals = ['🥇', '🥈', '🥉'];
+          return interaction.editReply({
+            embeds: [new EmbedBuilder().setColor(0xec4899).setTitle('🏆 Top Profiles — Most Hearted')
+              .setDescription(ranked.map((r, i) => `${medals[i] || `**${i + 1}.**`} <@${r.id}> — **${fmt(r.hearts)}** heart${r.hearts === 1 ? '' : 's'}`).join('\n') + `\n\n${howTo}`)],
+          }).catch(() => {});
+        }
       }
       if (interaction.isChatInputCommand() && interaction.commandName === 'hub-mod-role') {
         if (!interaction.guildId) return interaction.reply({ content: 'Use this in the server.', flags: 64 });
