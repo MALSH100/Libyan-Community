@@ -1005,21 +1005,83 @@ function decodeGifFrames(dataUri) {
     // be decoded in order or the canvas is left half-composed (which showed up as
     // overlapping, smeared, "fuzzy" animation). We decode all of them and only choose
     // which ones to KEEP, rather than skipping the decode itself.
+    //
+    // decodeAndBlitFrameRGBA on its own only PAINTS a frame's own pixels onto the
+    // canvas — it never clears or restores anything. Per the GIF spec, each frame
+    // also carries a "disposal method" that says what to do with that frame's
+    // region *after* it's been shown, before the next one is drawn:
+    //   0/1 = leave it as-is (fine — this is what we were already doing)
+    //   2   = restore that region to background/transparent (sparkle/particle-style
+    //         GIFs — like the sparkles/hearts in this card — rely on this to "erase"
+    //         themselves each frame)
+    //   3   = restore that region to whatever was underneath it before this frame
+    // Skipping disposal is exactly what causes the ghosting/overlap: pixels from a
+    // frame that was supposed to clear itself just stay on the canvas forever, so
+    // every subsequent frame gets drawn on top of an ever-growing smear of old ones.
     const canvas = new Uint8Array(w * h * 4);
     const MAX = 28;                                   // cap on frames we keep (matches the card's frame cap)
     const step = n > MAX ? n / MAX : 1;               // fractional: spreads evenly, keeps the end
     let nextKeep = 0;
     let lastDelay = 8;
     const delays = [];
+
+    const clearRegion = (info) => {
+      for (let y = 0; y < info.height; y++) {
+        const row = (info.y + y) * w;
+        for (let x = 0; x < info.width; x++) {
+          const idx = (row + info.x + x) * 4;
+          canvas[idx] = 0; canvas[idx + 1] = 0; canvas[idx + 2] = 0; canvas[idx + 3] = 0;
+        }
+      }
+    };
+    const snapshotRegion = (info) => {
+      const snap = new Uint8Array(info.width * info.height * 4);
+      let o = 0;
+      for (let y = 0; y < info.height; y++) {
+        const row = (info.y + y) * w;
+        for (let x = 0; x < info.width; x++) {
+          const idx = (row + info.x + x) * 4;
+          snap[o++] = canvas[idx]; snap[o++] = canvas[idx + 1]; snap[o++] = canvas[idx + 2]; snap[o++] = canvas[idx + 3];
+        }
+      }
+      return snap;
+    };
+    const restoreRegion = (info, snap) => {
+      let o = 0;
+      for (let y = 0; y < info.height; y++) {
+        const row = (info.y + y) * w;
+        for (let x = 0; x < info.width; x++) {
+          const idx = (row + info.x + x) * 4;
+          canvas[idx] = snap[o++]; canvas[idx + 1] = snap[o++]; canvas[idx + 2] = snap[o++]; canvas[idx + 3] = snap[o++];
+        }
+      }
+    };
+
+    let prevInfo = null;
+    let savedUnder = null;   // snapshot of what's under prevInfo, only kept when disposal===3
     for (let i = 0; i < n; i++) {
+      const info = reader.frameInfo(i);
+
+      // Disposal happens "after" a frame is shown, i.e. right before the next one is
+      // composited — so apply the PREVIOUS frame's disposal now, before blitting this one.
+      if (prevInfo) {
+        if (prevInfo.disposal === 2) clearRegion(prevInfo);
+        else if (prevInfo.disposal === 3 && savedUnder) restoreRegion(prevInfo, savedUnder);
+      }
+      // If this frame itself wants "restore to previous" afterwards, snapshot what's
+      // sitting underneath it right now, before we overwrite it.
+      savedUnder = (info.disposal === 3) ? snapshotRegion(info) : null;
+
       reader.decodeAndBlitFrameRGBA(i, canvas);       // ALWAYS decode, never skip
+      prevInfo = info;
+
       // Keep this frame if it's on the sampling schedule, or if it's the very last one —
       // otherwise the animation visibly stops short of its true end.
       if (i + 1e-9 >= nextKeep || i === n - 1) {
         const png = new PNG({ width: w, height: h });
         png.data = Buffer.from(canvas);
         frames.push('data:image/png;base64,' + PNG.sync.write(png).toString('base64'));
-        try { lastDelay = reader.frameInfo(i).delay || lastDelay; } catch { /* */ }
+        lastDelay = info.delay || lastDelay;
         // when we drop frames, the kept ones must hold longer so timing is preserved
         delays.push(Math.max(2, Math.round(lastDelay * step)));
         nextKeep += step;
