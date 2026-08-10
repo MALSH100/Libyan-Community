@@ -53,6 +53,32 @@ function lastActive(clan) {
   return null;
 }
 
+const ARCHIVE_CATEGORY_NAME = '🗄️ Archived Clans';
+
+/* Finds the archive category if it already exists, or creates it once. Also
+   makes sure it sits at the very bottom of the category list — a channel's
+   raw `position` is only meaningful within its own type (categories sort
+   separately from text channels), so this walks the guild's own categories to
+   find the current max rather than guessing a number. */
+async function ensureArchiveCategory(guild) {
+  let cat = guild.channels.cache.find(c => c.type === 4 && c.name === ARCHIVE_CATEGORY_NAME); // 4 = GuildCategory
+  if (!cat) {
+    try {
+      cat = await guild.channels.create({ name: ARCHIVE_CATEGORY_NAME, type: 4 });
+      console.log(`[clan-upkeep] created "${ARCHIVE_CATEGORY_NAME}" category`);
+    } catch (e) {
+      console.error('[clan-upkeep] could not create archive category:', e.message);
+      return null;
+    }
+  }
+  try {
+    const categories = guild.channels.cache.filter(c => c.type === 4);
+    const maxPos = Math.max(0, ...categories.map(c => c.rawPosition ?? c.position ?? 0));
+    if ((cat.rawPosition ?? cat.position ?? 0) < maxPos) await cat.setPosition(maxPos).catch(() => {});
+  } catch (e) { /* position is cosmetic — never let this block archiving */ }
+  return cat;
+}
+
 async function archiveChannel(guild, name, clan, saveData) {
   const ch = guild.channels.cache.get(clan.channelId) || await guild.channels.fetch(clan.channelId).catch(() => null);
   if (!ch) { clan.channelId = null; saveData(guild.id); return false; }
@@ -63,6 +89,10 @@ async function archiveChannel(guild, name, clan, saveData) {
     }
     if (!ch.name.startsWith(SLEEP_PREFIX))
       await ch.setName(`${SLEEP_PREFIX}${ch.name}`.slice(0, 100)).catch(() => {});
+    // remember where it came from, then tuck it away at the bottom out of sight
+    clan.chOriginalParentId = ch.parentId || null;
+    const cat = await ensureArchiveCategory(guild);
+    if (cat) await ch.setParent(cat.id, { lockPermissions: false }).catch(e => console.error('[clan-upkeep] setParent failed:', e.message));
     clan.chArchived = true;
     saveData(guild.id);
     console.log(`[clan-upkeep] archived #${ch.name} for clan "${name}"`);
@@ -82,6 +112,15 @@ async function restoreChannel(guild, name, clan, saveData) {
     }
     if (ch.name.startsWith(SLEEP_PREFIX))
       await ch.setName(ch.name.slice(SLEEP_PREFIX.length)).catch(() => {});
+    // put it back where it came from — a category that's since been deleted just
+    // means "no parent" rather than failing the whole restore
+    if (clan.chOriginalParentId) {
+      const target = guild.channels.cache.get(clan.chOriginalParentId);
+      await ch.setParent(target ? target.id : null, { lockPermissions: false }).catch(() => {});
+    } else {
+      await ch.setParent(null, { lockPermissions: false }).catch(() => {});
+    }
+    clan.chOriginalParentId = null;
     clan.chArchived = false;
     clan.chLastActive = Date.now();
     clan.chWarnedAt = null;
