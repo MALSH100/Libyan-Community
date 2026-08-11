@@ -929,7 +929,7 @@ const { getGachaCommands, initGacha, awardDinar, isAtDinarCap, dinarDailyCap, ge
 const { CLAN_CREATE_COST, CLAN_JOIN_COST, CLAN_CHANNEL_COST } = require('./clanfns');
 const { getBattleCardsCommands, initBattleCards } = require('./battlecards');
 const { getDiyarCommands, initDiyar } = require('./diyar');
-const { getClanChannelCommands, initClanChannels } = require('./clan-channels');
+const { getClanChannelCommands, initClanChannels, isArchived: isClanChannelArchived, restoreChannel: restoreClanChannel, KEEP_COST: ClanChannelKeepCost } = require('./clan-channels');
 // Football Manager — DISABLED (football.js is not deployed). Requiring a missing
 // module throws at startup and crash-loops the whole bot, so this stays commented
 // out until football.js and fm-render.js are actually in the repo.
@@ -2790,6 +2790,34 @@ async function handleCommand(interaction, commandName, user, guild) {
   if (commandName === 'clan-channel-create') {
     const result = getUserClan(guild.id, user.id);
     if (!result) return safeReply(interaction, { content: '❌ You are not in a clan.', flags: 64 });
+
+    // The channel was archived, not deleted — it still exists, hidden. Route
+    // this to a restore instead of either blocking with a link to an invisible
+    // channel, or silently making a second, empty one. Restoring (unlike
+    // creating) is open to any clan member, matching /clan-channel-restore.
+    if (result.clan.channelId && isClanChannelArchived(result.clan)) {
+      const existing = guild.channels.cache.get(result.clan.channelId);
+      if (existing) {
+        if (getDinar(db, guild.id, user.id) < ClanChannelKeepCost)
+          return safeReply(interaction, {
+            content: `📦 **${result.name}**'s channel is archived, not gone — restoring it costs **${ClanChannelKeepCost.toLocaleString()} Dinar** `
+              + `(you have **${getDinar(db, guild.id, user.id).toLocaleString()}**). Any member of the clan can pay.\n`
+              + `You can also use \`/clan-channel-restore\`.`,
+            flags: 64,
+          });
+        await safeDefer(interaction);
+        if (!spendDinar(db, guild.id, user.id, ClanChannelKeepCost, saveData))
+          return safeReply(interaction, { content: '❌ Payment failed — try again.', flags: 64 });
+        const restored = await restoreClanChannel(guild, result.name, result.clan, saveData);
+        if (!restored) {
+          awardDinar(db, guild.id, user.id, ClanChannelKeepCost, saveData, 'clan-channel-restore-refund');
+          return safeReply(interaction, { content: '⚠️ Could not restore the channel — check my Manage Channels permission. Refunded.', flags: 64 });
+        }
+        return safeReply(interaction, { content: `✅ **${existing}** is back! Paid **${ClanChannelKeepCost.toLocaleString()} Dinar**.` });
+      }
+      result.clan.channelId = null; saveData();   // the archived channel is gone somehow — fall through to a fresh one
+    }
+
     if (result.clan.leader !== user.id) return safeReply(interaction, { content: '❌ Only the Leader can create the clan channel.', flags: 64 });
     if (result.clan.channelId) {
       const existing = guild.channels.cache.get(result.clan.channelId);
@@ -2989,7 +3017,7 @@ try {
 initLotto({ client, db, saveData });
 const { initProfiles } = require('./profiles');
 const profileApi = initProfiles({ db, saveData, gachaApi: gachaApi && gachaApi.hubApi, getDinar, spendDinar, ensureImages });
-initShop({ client, db, saveData, runFlip: gachaApi && gachaApi.runFlip, warApi: hubWarApi, gachaApi: gachaApi && gachaApi.hubApi, exchangeView: initBlackMarketExchange.getHubView, profileApi });
+initShop({ client, db, saveData, runFlip: gachaApi && gachaApi.runFlip, warApi: hubWarApi, gachaApi: gachaApi && gachaApi.hubApi, exchangeView: initBlackMarketExchange.getHubView, profileApi, isClanChannelArchived, restoreClanChannel, clanChannelKeepCost: ClanChannelKeepCost });
 
 // Translator (reaction-based Arabic → English)
 //initTranslator(client, db, saveData);

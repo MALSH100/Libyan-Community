@@ -456,7 +456,7 @@ function getShopCommands() {
   ];
 }
 
-function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeView, profileApi }) {
+function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeView, profileApi, isClanChannelArchived, restoreClanChannel, clanChannelKeepCost }) {
   const stateOf = (gid) => shopState(db, gid);
 
   // Post a clan alert. Prefers the dedicated alerts channel; falls back to the clan's own
@@ -2902,7 +2902,26 @@ if (interaction.isButton() && interaction.customId === 'prof:upload') {
       // channel create / view / delete
       if (interaction.isButton() && interaction.customId === 'clan:channel') {
         const mine = clans.userClan(db, gid, uid);
-        if (!mine || mine.clan.leader !== uid) return interaction.reply({ content: 'Only the Leader can manage the channel.', flags: 64 });
+        if (!mine) return interaction.reply({ content: 'You are not in a clan.', flags: 64 });
+
+        // Archived means hidden, not deleted. Route this to a restore instead of
+        // either the old "already has a channel" dead end, or — worse — showing a
+        // Delete Channel button for a channel the leader can no longer even see,
+        // which risked destroying it and its whole history by mistake.
+        // Restoring, like /clan-channel-restore, is open to ANY clan member.
+        if (mine.clan.channelId && isClanChannelArchived && isClanChannelArchived(mine.clan)) {
+          const cost = clanChannelKeepCost || 300;
+          const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId('clan:channelRestore').setLabel(`Restore Channel — ${fmt(cost)} Dinar`).setEmoji('📦').setStyle(ButtonStyle.Success),
+            new ButtonBuilder().setCustomId('hub:clan').setLabel('← Back to Clan').setStyle(ButtonStyle.Secondary));
+          return interaction.update({
+            content: `📦 **${esc(mine.name)}**'s channel went quiet and is now archived — hidden, but nothing was deleted. `
+              + `Any member can bring it back for **${fmt(cost)} Dinar**.`,
+            embeds: [], components: [row], files: [], attachments: [],
+          });
+        }
+
+        if (mine.clan.leader !== uid) return interaction.reply({ content: 'Only the Leader can manage the channel.', flags: 64 });
         if (mine.clan.channelId) {
           const row = new ActionRowBuilder().addComponents(
             new ButtonBuilder().setCustomId('clan:channelDelete').setLabel('Delete Channel').setEmoji('🗑️').setStyle(ButtonStyle.Danger),
@@ -2917,6 +2936,25 @@ if (interaction.isButton() && interaction.customId === 'prof:upload') {
         spendDinar(db, gid, uid, clans.CLAN_CHANNEL_COST, saveData);
         setAction(uid, `📢 Created a clan channel (${fmt(clans.CLAN_CHANNEL_COST)} Dinar).`);
         return interaction.editReply(Object.assign(clanDashboard(gid, uid), { content: `✅ Channel ${res.channel} created! Paid **${fmt(clans.CLAN_CHANNEL_COST)} Dinar**.` }));
+      }
+      if (interaction.isButton() && interaction.customId === 'clan:channelRestore') {
+        const mine = clans.userClan(db, gid, uid);
+        if (!mine) return interaction.reply({ content: 'You are not in a clan.', flags: 64 });
+        if (!mine.clan.channelId || !isClanChannelArchived || !isClanChannelArchived(mine.clan))
+          return interaction.reply({ content: 'There is nothing to restore.', flags: 64 });
+        const cost = clanChannelKeepCost || 300;
+        if (getDinar(db, gid, uid) < cost)
+          return interaction.reply({ content: `💰 Restoring costs **${fmt(cost)} Dinar** — you have **${fmt(getDinar(db, gid, uid))}**. Any other member of the clan can pay instead.`, flags: 64 });
+        await interaction.deferUpdate();
+        if (!spendDinar(db, gid, uid, cost, saveData))
+          return interaction.editReply(Object.assign(clanDashboard(gid, uid), { content: '⚠️ Payment failed — try again.' }));
+        const ok = restoreClanChannel ? await restoreClanChannel(interaction.guild, mine.name, mine.clan, saveData) : false;
+        if (!ok) {
+          awardDinar(db, gid, uid, cost, saveData, 'clan-channel-restore-refund');
+          return interaction.editReply(Object.assign(clanDashboard(gid, uid), { content: '⚠️ Could not restore the channel — check my Manage Channels permission. Refunded.' }));
+        }
+        setAction(uid, `📦 Restored the clan channel (${fmt(cost)} Dinar).`);
+        return interaction.editReply(Object.assign(clanDashboard(gid, uid), { content: `✅ <#${mine.clan.channelId}> is back — full history intact! Paid **${fmt(cost)} Dinar**.` }));
       }
       if (interaction.isButton() && interaction.customId === 'clan:channelDelete') {
         await interaction.deferUpdate();

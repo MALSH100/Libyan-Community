@@ -368,9 +368,17 @@ function getClanChannelCommands() {
   ];
 }
 
+// Is this clan's channel currently archived? A plain boolean check other modules
+// (the Hub button, /clan-channel-create) can use to route around the trap of
+// treating a hidden-but-still-existing channel as "already has one."
+function isArchived(clan) {
+  return !!(clan && clan.chArchived);
+}
+
 module.exports = {
   initClanChannels, getClanChannelCommands,
   KEEP_COST, WARN_AFTER, ARCHIVE_AFTER,
+  isArchived, restoreChannel,
   // exported for tests
   _internals: { findClanByChannel, inClan, lastActive, archiveChannel, restoreChannel },
 };
