@@ -1005,21 +1005,83 @@ function decodeGifFrames(dataUri) {
     // be decoded in order or the canvas is left half-composed (which showed up as
     // overlapping, smeared, "fuzzy" animation). We decode all of them and only choose
     // which ones to KEEP, rather than skipping the decode itself.
+    //
+    // decodeAndBlitFrameRGBA on its own only PAINTS a frame's own pixels onto the
+    // canvas — it never clears or restores anything. Per the GIF spec, each frame
+    // also carries a "disposal method" that says what to do with that frame's
+    // region *after* it's been shown, before the next one is drawn:
+    //   0/1 = leave it as-is (fine — this is what we were already doing)
+    //   2   = restore that region to background/transparent (sparkle/particle-style
+    //         GIFs — like the sparkles/hearts in this card — rely on this to "erase"
+    //         themselves each frame)
+    //   3   = restore that region to whatever was underneath it before this frame
+    // Skipping disposal is exactly what causes the ghosting/overlap: pixels from a
+    // frame that was supposed to clear itself just stay on the canvas forever, so
+    // every subsequent frame gets drawn on top of an ever-growing smear of old ones.
     const canvas = new Uint8Array(w * h * 4);
-    const MAX = 34;                                   // cap on frames we keep (matches the card's frame cap)
+    const MAX = 28;                                   // cap on frames we keep (matches the card's frame cap)
     const step = n > MAX ? n / MAX : 1;               // fractional: spreads evenly, keeps the end
     let nextKeep = 0;
     let lastDelay = 8;
     const delays = [];
+
+    const clearRegion = (info) => {
+      for (let y = 0; y < info.height; y++) {
+        const row = (info.y + y) * w;
+        for (let x = 0; x < info.width; x++) {
+          const idx = (row + info.x + x) * 4;
+          canvas[idx] = 0; canvas[idx + 1] = 0; canvas[idx + 2] = 0; canvas[idx + 3] = 0;
+        }
+      }
+    };
+    const snapshotRegion = (info) => {
+      const snap = new Uint8Array(info.width * info.height * 4);
+      let o = 0;
+      for (let y = 0; y < info.height; y++) {
+        const row = (info.y + y) * w;
+        for (let x = 0; x < info.width; x++) {
+          const idx = (row + info.x + x) * 4;
+          snap[o++] = canvas[idx]; snap[o++] = canvas[idx + 1]; snap[o++] = canvas[idx + 2]; snap[o++] = canvas[idx + 3];
+        }
+      }
+      return snap;
+    };
+    const restoreRegion = (info, snap) => {
+      let o = 0;
+      for (let y = 0; y < info.height; y++) {
+        const row = (info.y + y) * w;
+        for (let x = 0; x < info.width; x++) {
+          const idx = (row + info.x + x) * 4;
+          canvas[idx] = snap[o++]; canvas[idx + 1] = snap[o++]; canvas[idx + 2] = snap[o++]; canvas[idx + 3] = snap[o++];
+        }
+      }
+    };
+
+    let prevInfo = null;
+    let savedUnder = null;   // snapshot of what's under prevInfo, only kept when disposal===3
     for (let i = 0; i < n; i++) {
+      const info = reader.frameInfo(i);
+
+      // Disposal happens "after" a frame is shown, i.e. right before the next one is
+      // composited — so apply the PREVIOUS frame's disposal now, before blitting this one.
+      if (prevInfo) {
+        if (prevInfo.disposal === 2) clearRegion(prevInfo);
+        else if (prevInfo.disposal === 3 && savedUnder) restoreRegion(prevInfo, savedUnder);
+      }
+      // If this frame itself wants "restore to previous" afterwards, snapshot what's
+      // sitting underneath it right now, before we overwrite it.
+      savedUnder = (info.disposal === 3) ? snapshotRegion(info) : null;
+
       reader.decodeAndBlitFrameRGBA(i, canvas);       // ALWAYS decode, never skip
+      prevInfo = info;
+
       // Keep this frame if it's on the sampling schedule, or if it's the very last one —
       // otherwise the animation visibly stops short of its true end.
       if (i + 1e-9 >= nextKeep || i === n - 1) {
         const png = new PNG({ width: w, height: h });
         png.data = Buffer.from(canvas);
         frames.push('data:image/png;base64,' + PNG.sync.write(png).toString('base64'));
-        try { lastDelay = reader.frameInfo(i).delay || lastDelay; } catch { /* */ }
+        lastDelay = info.delay || lastDelay;
         // when we drop frames, the kept ones must hold longer so timing is preserved
         delays.push(Math.max(2, Math.round(lastDelay * step)));
         nextKeep += step;
@@ -1160,13 +1222,10 @@ async function renderCard(ctx, gid, member, opts = {}) {
   // but roughly halves the bytes of the old 20-30 frame cards.
   // gifsicle roughly halves the finished file, which buys back the smoothness we
   // previously had to trade away for bandwidth.
-  // Enough frames that an uploaded GIF plays through to its end and looks smooth,
-  // capped so a single card can't tie up the CPU for too long. Measured: worst-case
-  // block on OTHER users' interactions stays ~450-500ms up to 34 frames (well under
-  // Discord's 3s deadline) thanks to yielding every 3 frames below. Total render time
-  // (~3s at 34) is fine since every render happens after deferReply, which gives 15
-  // minutes — the per-tick block, not total time, is what protects other users.
-  const FRAMES_N = Math.min(34, Math.max(16, gifFrames));
+  // Enough frames that an uploaded GIF plays through to its end (the old 22 cap cut
+  // animations short), but capped so a single card can't tie up the CPU for 12s.
+  // 28 lands at roughly 8s worst case, and gifsicle keeps the file size down.
+  const FRAMES_N = Math.min(28, Math.max(16, gifFrames));
   // Match the uploaded GIF's own timing where we know it (omggif delays are in
   // hundredths of a second); otherwise fall back to a smooth default.
   const DELAY = srcDelay ? Math.min(200, Math.max(40, Math.round(srcDelay * 10))) : 80;
@@ -1190,42 +1249,22 @@ async function renderCard(ctx, gid, member, opts = {}) {
   }
   // Build a representative sample by combining pixels across frames (subsampled for speed),
   // so the shared palette covers colours that appear in any frame.
-  // quantize() is a single synchronous library call with no yield points we can add
-  // inside it — measured at 3.8s on a 10.5MB sample (roughly 7 full-resolution frames).
-  // That one call was the actual multi-second block, not the frame-render loop. Frame
-  // count alone doesn't fix this — a bigger card or a busier sticker hits the same wall
-  // at a lower frame count. So the sample is capped by BYTES, not just frame count:
-  // pick ~6 frames as before for colour coverage over time, then also subsample pixels
-  // within each of those frames so the total never exceeds SAMPLE_BUDGET regardless of
-  // canvas size. Palette quality is unaffected in practice — 256 colours don't need
-  // every pixel to be represented, just a good spread of them.
-  const SAMPLE_BUDGET = 1_500_000; // bytes — keeps quantize() well under ~500ms
   const sampleStride = Math.max(1, Math.floor(rgbaFrames.length / 6));  // ~6 frames sampled
   let sample;
   if (rgbaFrames.length === 1) {
-    sample = rgbaFrames[0].length > SAMPLE_BUDGET ? _pixelSubsample(rgbaFrames[0], SAMPLE_BUDGET) : rgbaFrames[0];
+    sample = rgbaFrames[0];
   } else {
     const chunks = [];
     for (let i = 0; i < rgbaFrames.length; i += sampleStride) chunks.push(rgbaFrames[i]);
-    const estTotal = chunks.reduce((s, c) => s + c.length, 0);
-    const pixelStride = estTotal > SAMPLE_BUDGET ? Math.ceil(estTotal / SAMPLE_BUDGET) : 1;
-    const parts = pixelStride > 1 ? chunks.map(c => _pixelSubsample(c, Infinity, pixelStride)) : chunks;
-    const totalLen = parts.reduce((s, c) => s + c.length, 0);
+    const totalLen = chunks.reduce((s, c) => s + c.length, 0);
     sample = new Uint8Array(totalLen);
     let off = 0;
-    for (const c of parts) { sample.set(c, off); off += c.length; }
+    for (const c of chunks) { sample.set(c, off); off += c.length; }
   }
   const palette = quantize(sample, 256);
-  // This loop does real per-pixel work (palette matching + LZW encoding) for every
-  // frame and previously had NO yield point at all — for a large uploaded sticker at
-  // higher frame counts this alone produced a multi-second uninterrupted block (measured:
-  // 5.2s on a 34-frame card with a big composited GIF), which is exactly the kind of
-  // stall that makes other people's unrelated button presses fail. Yielding here closes
-  // that gap the same way the decode loop above already does.
   for (let f = 0; f < FRAMES_N; f++) {
     const index = applyPalette(rgbaFrames[f], palette);
     enc.writeFrame(index, W, H, { palette, delay: DELAY, first: f === 0 });
-    if (f % 3 === 2) await new Promise(r => setImmediate(r));
   }
   enc.finish();
   const raw = Buffer.from(enc.bytes());
@@ -1234,25 +1273,6 @@ async function renderCard(ctx, gid, member, opts = {}) {
 }
 
 // decode a PNG buffer to raw RGBA for gifenc
-// Takes every Nth RGBA pixel from a frame buffer. Used to keep the sample fed to
-// quantize() small regardless of card size — a random or even spread of pixels
-// represents the colour palette just as well as every pixel does, for the purpose
-// of picking 256 representative colours.
-function _pixelSubsample(rgba, targetBytes, forcedStride) {
-  const pixelCount = rgba.length / 4;
-  const stride = forcedStride || Math.max(1, Math.ceil(rgba.length / Math.max(4, targetBytes)));
-  if (stride <= 1) return rgba;
-  const outCount = Math.ceil(pixelCount / stride);
-  const out = new Uint8Array(outCount * 4);
-  let o = 0;
-  for (let p = 0; p < pixelCount; p += stride) {
-    const i = p * 4;
-    out[o] = rgba[i]; out[o + 1] = rgba[i + 1]; out[o + 2] = rgba[i + 2]; out[o + 3] = rgba[i + 3];
-    o += 4;
-  }
-  return out;
-}
-
 function pngToRGBA(pngBuf) {
   // resvg output is PNG; use pngjs-free path via Resvg? Simpler: use 'upng-js' style not available.
   // Use the built-in: sharp isn't guaranteed. Decode via pngjs.
