@@ -341,6 +341,44 @@ function nextLibyaMidnightMs(nowMs) {
 function streakReward(count) {
   return Math.min(STREAK_CAP, STREAK_BASE + STREAK_PER_DAY * count);
 }
+
+// Milestone tiers, keyed by exact streak-day count. The daily reward caps out at
+// day 16 (STREAK_BASE + STREAK_PER_DAY*16 = 100), so without these there'd be
+// nothing new to look forward to past that point — these are what keeps a long
+// streak feeling like it's still going somewhere, and give the check-in moment
+// an actual "achievement" beat instead of the same flat message every day.
+const STREAK_MILESTONES = [
+  { days: 3,   bonus: 30,   title: '🔥 3-Day Spark',      tagline: "You're building a habit!" },
+  { days: 7,   bonus: 75,   title: '🏆 Week Streak!',      tagline: 'A full week — nice consistency.' },
+  { days: 14,  bonus: 150,  title: '⚡ Two Weeks Strong!',  tagline: "You're properly in the groove now." },
+  { days: 30,  bonus: 400,  title: '👑 Monthly Legend!',    tagline: 'A whole month without missing a day.' },
+  { days: 50,  bonus: 700,  title: '💎 50 Days!',           tagline: 'Genuinely elite dedication.' },
+  { days: 100, bonus: 1500, title: '🌟 CENTURY STREAK!',    tagline: '100 days. Absolutely unstoppable.' },
+  { days: 200, bonus: 3000, title: '🚀 200 DAYS!',          tagline: 'Practically a way of life at this point.' },
+  { days: 365, bonus: 6000, title: '🎆 ONE FULL YEAR!',     tagline: 'A full year. Legendary.' },
+];
+const findMilestone = (count) => STREAK_MILESTONES.find(m => m.days === count) || null;
+const nextMilestone = (count) => STREAK_MILESTONES.find(m => m.days > count) || null;
+
+// A 10-segment bar showing progress from the last milestone passed to the next
+// one coming up. Returns null once every tier has been cleared — at that point
+// there's nothing left to count down to, and the milestone message itself says so.
+function milestoneProgressBar(count) {
+  const next = nextMilestone(count);
+  if (!next) return null;
+  const prev = [...STREAK_MILESTONES].reverse().find(m => m.days < count);
+  const floor = prev ? prev.days : 0;
+  const span = Math.max(1, next.days - floor);
+  const done = Math.max(0, count - floor);
+  const BAR_LEN = 10;
+  const filled = Math.max(0, Math.min(BAR_LEN, Math.round((done / span) * BAR_LEN)));
+  return {
+    bar: '🔥'.repeat(filled) + '⬛'.repeat(BAR_LEN - filled),
+    remain: next.days - count,
+    target: next.days,
+    title: next.title,
+  };
+}
 // returns the current status without mutating: 'ready' | 'done_today' | would-reset info
 function streakStatus(rec, nowMs) {
   const today = libyaDayNumber(nowMs);
@@ -365,8 +403,10 @@ function doCheckIn(state, db, guildId, saveData, userId, name, awardDinar, nowMs
   if (rec.count > (rec.best || 0)) rec.best = rec.count;
   const reward = streakReward(rec.count);
   awardDinar(db, guildId, userId, reward, saveData);
+  const milestone = findMilestone(rec.count);
+  if (milestone) awardDinar(db, guildId, userId, milestone.bonus, saveData);
   if (saveData) saveData(guildId);
-  return { count: rec.count, reward, continues, wasReset, best: rec.best, nextAt: nextLibyaMidnightMs(nowMs) };
+  return { count: rec.count, reward, continues, wasReset, best: rec.best, nextAt: nextLibyaMidnightMs(nowMs), milestone };
 }
 function streakLeaderboard(state, nowMs) {
   const today = libyaDayNumber(nowMs);
@@ -956,11 +996,17 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
       canCheck = true;
     }
 
+    const bar = milestoneProgressBar(st.count);
+    const progressLine = bar
+      ? `${bar.bar}  **${bar.remain}** day${bar.remain === 1 ? '' : 's'} to **${bar.title}**\n\n`
+      : (st.count > 0 ? `🏅 *You've cleared every milestone — a true legend.*\n\n` : '');
+
     const embed = new EmbedBuilder().setColor(0xFF6B35).setTitle('🔥 Daily Streak')
       .setDescription(
         `Check in **once a day** to keep your streak alive and earn a growing Dinar reward.\n` +
         `💰 Reward: **${STREAK_BASE} + ${STREAK_PER_DAY} per day**, up to **${STREAK_CAP} Dinar**. Miss a day and it resets.\n\n` +
         `${statusLine}\n\n` +
+        progressLine +
         `**🏆 Streak Leaderboard**\n${boardLines}`);
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId('hub:checkin').setLabel(canCheck ? 'Check in today ✅' : 'Already checked in').setEmoji('🔥').setStyle(ButtonStyle.Success).setDisabled(!canCheck),
@@ -2308,18 +2354,63 @@ function initShop({ client, db, saveData, runFlip, warApi, gachaApi, exchangeVie
 
       if (interaction.isButton() && interaction.customId === 'hub:checkin') {
         const state = stateOf(gid);
-        const res = doCheckIn(state, db, gid, saveData, uid, name, awardDinar, Date.now());
+        const now = Date.now();
+        // captured BEFORE doCheckIn mutates state, so we can tell whether this
+        // check-in actually moved them up the board — not just show it every time
+        const beforeBoard = streakLeaderboard(state, now);
+        const beforeRank = beforeBoard.findIndex(r => r.uid === uid);
+
+        const res = doCheckIn(state, db, gid, saveData, uid, name, awardDinar, now);
         if (res.already) {
           return interaction.reply({ content: `✅ You've already checked in today! Come back <t:${Math.round(res.nextAt / 1000)}:R>.`, flags: 64 });
         }
-        // refresh the streak panel, and send a short private confirmation
+        // refresh the streak panel, and send a private confirmation
         await interaction.update({ ...streakView(gid, uid, name), files: [], attachments: [] });
-        const msg = res.wasReset
+
+        // did this check-in move them up the leaderboard? Only worth mentioning on
+        // an actual improvement — not every day for someone already sitting at #1.
+        const afterBoard = streakLeaderboard(state, now);
+        const afterRank = afterBoard.findIndex(r => r.uid === uid);
+        let nudge = '';
+        if (afterRank !== -1 && (beforeRank === -1 || afterRank < beforeRank)) {
+          if (beforeRank === -1) {
+            nudge = `\n📈 You just entered the **Top 10** at **#${afterRank + 1}**!`;
+          } else {
+            const passed = beforeBoard[afterRank];
+            if (passed && passed.uid !== uid) nudge = `\n📈 You just passed **${esc(passed.name)}** for **#${afterRank + 1}**!`;
+          }
+        }
+
+        setAction(uid, `🔥 Checked in — ${res.wasReset ? 'started a new streak' : `day ${res.count}`} (+${fmt(res.reward)} Dinar).`);
+
+        // milestone day: a distinctly bigger, louder celebration instead of the
+        // usual one-liner, plus a bonus on top of the normal daily reward
+        if (res.milestone) {
+          const m = res.milestone;
+          const bar = milestoneProgressBar(res.count);
+          const nextLine = bar
+            ? `\n\n${bar.bar}  **${bar.remain}** day${bar.remain === 1 ? '' : 's'} to **${bar.title}**`
+            : `\n\n🏅 You've now cleared every milestone — a true legend.`;
+          const embed = new EmbedBuilder().setColor(0xFFD700).setTitle(m.title)
+            .setDescription(
+              `${m.tagline}\n\n` +
+              `🔥 **${res.count}-day streak!**\n` +
+              `💰 **+${fmt(res.reward)}** daily **+ ${fmt(m.bonus)}** milestone bonus = **${fmt(res.reward + m.bonus)} Dinar**` +
+              nextLine + nudge
+            );
+          return interaction.followUp({ embeds: [embed], flags: 64 }).catch(() => {});
+        }
+
+        // ordinary day: the existing lightweight confirmation, now with a nudge
+        // toward the next milestone so the "almost there" pull is always visible
+        const bar = milestoneProgressBar(res.count);
+        const progressLine = bar ? `\n${bar.bar}  **${bar.remain}** day${bar.remain === 1 ? '' : 's'} to **${bar.title}**` : '';
+        const msg = (res.wasReset
           ? `🔥 Fresh start! Day **1** of a new streak — **+${fmt(res.reward)} Dinar**.`
           : res.continues
             ? `🔥 Streak extended to **${res.count} days**! **+${fmt(res.reward)} Dinar**${res.reward >= STREAK_CAP ? ' (max reward!)' : ''}. Best: ${res.best}.`
-            : `🔥 Day **1** — **+${fmt(res.reward)} Dinar**. Come back tomorrow!`;
-        setAction(uid, `🔥 Checked in — ${res.wasReset ? 'started a new streak' : `day ${res.count}`} (+${fmt(res.reward)} Dinar).`);
+            : `🔥 Day **1** — **+${fmt(res.reward)} Dinar**. Come back tomorrow!`
+        ) + progressLine + nudge;
         return interaction.followUp({ content: msg, flags: 64 }).catch(() => {});
       }
 
@@ -3080,6 +3171,7 @@ if (interaction.isButton() && interaction.customId === 'prof:upload') {
     renderSwatch, SOLID_COLORS, SOLID_BRIGHT, SOLID_SOFT, GRADIENTS, solidByKey, gradByKey,
     PRICE_SOLID, PRICE_GRADIENT, ROLE_LIFETIME_MS, ICON_PRICE, fetchIconBuffer, startIconFlow, iconSessions,
     doCheckIn, streakStatus, streakLeaderboard, streakReward, streakView, libyaDayNumber, parseHex, helpPages, helpRow,
+    STREAK_MILESTONES, findMilestone, nextMilestone, milestoneProgressBar,
   } };
 }
 
