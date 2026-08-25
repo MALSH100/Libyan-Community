@@ -31,7 +31,7 @@ const MATCH_BAND          = 3.0;                   // can't punch down: target s
 const LOOT_BY_LEVEL       = [0, 50, 80, 120];       // minted raid loot by city level (defender loses nothing)
 const INCOME_BY_LEVEL     = [0, 15, 20, 40];       // Dinar/hour by city level (small/med/big)
 const INCOME_CAP_HRS      = 12;                    // accrual caps at 12h, so you must collect
-const COLLECT_COOLDOWN_MS = 2 * 24 * 60 * 60 * 1000; // can only collect once per 2 days
+const COLLECT_COOLDOWN_MS = 1 * 24 * 60 * 60 * 1000; // can only collect once per day
 const UPG_MAX             = 10;
 const UPG_BASE            = { mil: 240, for: 200, eco: 180 };   // cost = base × (level+1)
 const TRIBUTE_BASE        = 40;                    // daily login reward (capped mint, async-friendly)
