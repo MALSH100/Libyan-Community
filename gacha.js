@@ -295,6 +295,7 @@ function getGachaCommands() {
         .addUserOption(o => o.setName('user').setDescription('The member (leave empty for everyone)').setRequired(false)))
       .addSubcommand(sc => sc.setName('resetraid').setDescription('Reset raid cooldowns + clear all card protections (for testing)')
         .addUserOption(o => o.setName('user').setDescription('The member (leave empty for everyone)').setRequired(false)))
+      .addSubcommand(sc => sc.setName('season-reset').setDescription('End the season — release ALL claimed cards back into the pool'))
       .addSubcommand(sc => sc.setName('override').setDescription('Override a member\'s rarity and/or Dinar value')
         .addUserOption(o => o.setName('user').setDescription('The member').setRequired(true))
         .addStringOption(o => o.setName('rarity').setDescription('Force a rarity (or clear)').setRequired(false).addChoices(...TIERS.map(t => ({ name: t, value: t })), { name: 'clear override', value: 'clear' }))
@@ -1048,6 +1049,42 @@ function initGacha({ client, db, saveData }) {
       await interaction.update({ components: [] }).catch(() => {});
       return interaction.followUp({ content: `✅ Trade complete! <@${trade.from}> ⇄ <@${trade.to}>.` }).catch(() => {});
     }
+
+    if (action === 'gacha_season_cancel') {
+      return interaction.update({ content: '✅ Cancelled — no changes made.', components: [] }).catch(() => {});
+    }
+
+    if (action === 'gacha_season_confirm') {
+      if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
+        return interaction.reply(eph('🚫 Admins only.'));
+      }
+      const gid = interaction.guild.id;
+      const releasedCount = Object.keys(s.owners).length;
+
+      // Raid fees are moot once ownership resets — refund them.
+      for (const r of Object.values(s.raids || {})) addDinar(s, r.raider, r.fee);
+
+      s.owners = {};
+      s.raids = {};
+      s.trades = {};
+      s.raidUserCd = {};
+      s.raidCardCd = {};
+      for (const uid of Object.keys(s.cooldowns)) {
+        delete s.cooldowns[uid].roll;
+        delete s.cooldowns[uid].claim;
+      }
+      recomputeRarities(db, gid);
+      saveData(gid);
+
+      await interaction.update({
+        content:
+          `🔄 **Season reset!** Released **${fmt(releasedCount)}** card${releasedCount === 1 ? '' : 's'} back into the pool.\n` +
+          `Pending trades/raids were cancelled (fees refunded), and roll/claim cooldowns + raid protections were cleared.\n` +
+          `Everyone's free to start claiming again!`,
+        components: [],
+      }).catch(() => {});
+      return;
+    }
   }
 
   // ── Admin ──────────────────────────────────────────────────────────────────
@@ -1127,6 +1164,25 @@ function initGacha({ client, db, saveData }) {
       const u = interaction.options.getUser('user');
       dissolveMember(s, u.id); recomputeRarities(db, gid); saveData(gid);
       return interaction.reply(eph(`✅ Removed <@${u.id}> from the game and dissolved all claims/wishlists of them.`));
+    }
+    if (sub === 'season-reset') {
+      const owned = Object.keys(s.owners).length;
+      if (!owned) return interaction.reply(eph('Nobody currently owns any cards — nothing to reset.'));
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('gacha_season_confirm').setLabel('Yes, end the season').setStyle(ButtonStyle.Danger),
+        new ButtonBuilder().setCustomId('gacha_season_cancel').setLabel('Cancel').setStyle(ButtonStyle.Secondary));
+      return interaction.reply({
+        flags: 64,
+        content:
+          `⚠️ **End the season and reset all cards?**\n\n` +
+          `This will:\n` +
+          `• Release **${fmt(owned)}** claimed card${owned === 1 ? '' : 's'} back into the pool — everyone becomes claimable again.\n` +
+          `• Cancel any pending trade offers and active raids (raid fees are refunded).\n` +
+          `• Clear roll/claim cooldowns and raid protections so people can jump straight back in.\n` +
+          `• Dinar balances, opted-in members, and rarity overrides are **not** affected.\n\n` +
+          `This can't be undone. Proceed?`,
+        components: [row],
+      });
     }
     if (sub === 'recompute') { recomputeRarities(db, gid); saveData(gid); return interaction.reply(eph('✅ Rarities recomputed from current stats.')); }
   }
