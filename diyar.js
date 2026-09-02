@@ -28,6 +28,7 @@ const REINFORCE_MULT      = 2.0;                // defence boost if the defender
 const LOOT_PCT            = 0.20;                  // share of a defender's Dinar stolen on a win (transfer, not minted)
 const CAPTURE_RATIO       = 1.4;                   // must out-power a PLAYER city this much to seize it
 const MATCH_BAND          = 3.0;                   // can't punch down: target strength must be ≥ yours / band
+const MATCH_BAND_EXEMPT_RANK = 3;                   // top-N rulers (by the leaderboard's own city-count-then-strength order) are always raidable — hoarding land while staying weak shouldn't buy permanent immunity
 const LOOT_BY_LEVEL       = [0, 50, 80, 120];       // minted raid loot by city level (defender loses nothing)
 const INCOME_BY_LEVEL     = [0, 15, 20, 40];       // Dinar/hour by city level (small/med/big)
 const INCOME_CAP_HRS      = 12;                    // accrual caps at 12h, so you must collect
@@ -42,6 +43,16 @@ const ARMOURY_MAX_TIER    = 3;                     // shop caps here; tiers 4–
 // cost to forge the NEXT tier from `tier`; doubles once you're past tier 2
 const armouryCost = (tier) => ARMOURY_BASE * (tier + 1) * (tier >= 2 ? 2 : 1);
 const upgCost = (track, lvl) => UPG_BASE[track] * (lvl + 1) * (lvl >= 3 ? 2 : 1);   // steeper past level 3
+
+// ─── Troop Transfer ───────────────────────────────────────────────────────────
+// moving garrison troops between your own cities — no Dinar cost, travel time is the cost.
+// distance uses the same plain lon/lat hypot already used for the map projection and the
+// Wanted hunt's "nearest city" clue — no need for real-world geographic precision here.
+const TRANSFER_BASE_MS       = 2 * 60 * 1000;   // 2 min flat, even for next-door moves
+const TRANSFER_PER_DEGREE_MS = 3 * 60 * 1000;   // +3 min per degree of lon/lat distance
+const TRANSFER_MIN_MS        = 3 * 60 * 1000;   // floor: never faster than 3 min
+const TRANSFER_MAX_MS        = 60 * 60 * 1000;  // ceiling: never slower than 1 hour (opposite corners of the map)
+const TRANSFER_TICK_MS       = 15 * 1000;       // live progress-bar edit cadence
 
 // ─── Boss ───────────────────────────────────────────────────────────────────
 const BOSS_DURATION_MS    = 20 * 60 * 1000;       // the siege lasts 20 minutes
@@ -459,6 +470,12 @@ function troopCost(state, userId) {
   return 3;                   // 3+ cities — expensive
 }
 
+// how long a convoy takes between two cities — distance-scaled, clamped both ends
+function travelTime(fromCity, toCity) {
+  const d = Math.hypot(toCity.lon - fromCity.lon, toCity.lat - fromCity.lat);
+  return clamp(TRANSFER_BASE_MS + d * TRANSFER_PER_DEGREE_MS, TRANSFER_MIN_MS, TRANSFER_MAX_MS);
+}
+
 function recruit(state, db, guildId, saveData, userId, n) {
   const p = state.players[userId];
   const cost = Math.round(n * troopCost(state, userId));
@@ -492,6 +509,57 @@ function reinforce(state, saveData, guildId, userId, cityId, amt) {
   p.army -= amt; city.garrison += amt;
   saveData(guildId);
   return { ok: true, moved: amt, garrison: city.garrison, capped: city.garrison >= GARRISON_CAP };
+}
+
+// validate a troop transfer and lock the committed troops out of the source garrison
+// immediately (same "committed on send" pattern as startRaid); returns {error} or {pending}
+function startTransfer(state, saveData, guildId, userId, fromCityId, toCityId, pct) {
+  const p = state.players[userId];
+  const from = state.cities[fromCityId], to = state.cities[toCityId];
+  if (!p || !from || !to) return { error: 'Not found.' };
+  if (from.ownerId !== userId || to.ownerId !== userId) return { error: 'You can only transfer troops between your own cities.' };
+  if (fromCityId === toCityId) return { error: 'Pick two different cities.' };
+  // no evacuating a city to dodge losses: block withdrawal while it's actively being fought over
+  if (state.pendingRaids && Object.values(state.pendingRaids).some(r => r.cityId === fromCityId))
+    return { error: `${from.name} is under attack right now — you can't withdraw its garrison mid-raid.` };
+  if (state.boss && (state.boss.targets || []).some(t => t.cityId === fromCityId && !t.done))
+    return { error: `${from.name} is under siege by ${state.boss.name} — its garrison can't leave until the threat passes.` };
+  if (state.pendingMoves && Object.values(state.pendingMoves).some(m => m.fromCityId === fromCityId))
+    return { error: `A convoy has already left ${from.name} — wait for it to arrive before sending another.` };
+  const amount = Math.floor(from.garrison * pct);
+  if (amount < 1) return { error: `${from.name} has no troops to send.` };
+  from.garrison -= amount;   // committed the instant the convoy departs — can't be recalled
+  const ms = travelTime(from, to);
+  const now = Date.now();
+  const pending = {
+    playerId: userId, playerName: p.name, fromCityId, fromCityName: from.name, toCityId, toCityName: to.name,
+    amount, startedAt: now, endsAt: now + ms, channelId: state.channelId, messageId: null,
+  };
+  saveData(guildId);
+  return { pending, ms };
+}
+
+// resolve an arrived convoy: normal arrival (capped at GARRISON_CAP, overflow refunded to
+// reserve — a full destination shouldn't just delete troops), or a recall to reserve if the
+// destination city was lost or vanished while the convoy was en route
+function resolveTransfer(state, saveData, guildId, move) {
+  const p = state.players[move.playerId];
+  if (!p) return null;
+  const to = state.cities[move.toCityId];
+  const result = { ...move };
+  if (!to || to.ownerId !== move.playerId) {
+    p.army += move.amount;
+    result.recalled = true;
+  } else {
+    const room = Math.max(0, GARRISON_CAP - to.garrison);
+    const arrived = Math.min(move.amount, room);
+    const overflow = move.amount - arrived;
+    to.garrison += arrived;
+    if (overflow > 0) p.army += overflow;
+    result.arrived = arrived; result.overflow = overflow; result.newGarrison = to.garrison;
+  }
+  saveData(guildId);
+  return result;
 }
 
 function collectIncome(state, db, guildId, saveData, userId) {
@@ -557,7 +625,7 @@ function startRaid(state, db, guildId, saveData, attackerId, cityId, sendPct) {
   const owner = city.ownerId ? state.players[city.ownerId] : null;
   if (owner) {
     if (owner.shieldUntil > now) return { error: `${owner.name} is under truce for ${msLeft(owner.shieldUntil)}.` };
-    if (playerStrength(state, owner) * MATCH_BAND < playerStrength(state, attacker))
+    if (!isTopRanked(state, city.ownerId) && playerStrength(state, owner) * MATCH_BAND < playerStrength(state, attacker))
       return { error: `${owner.name} is far weaker than you — no honour in that raid. Pick someone your size (neutral militias are always fair game).` };
   }
 
@@ -703,6 +771,29 @@ function reinforceRow(raidId) {
     new ButtonBuilder().setCustomId(`dy:reinf:${raidId}`).setLabel('🛡 Send Reinforcements').setStyle(ButtonStyle.Success));
 }
 
+// ─── Troop Transfer (live convoy) UI — distinct blue bar, same shape as the raid/threat bars ──
+const moveBar = (frac) => { const n = Math.max(0, Math.min(12, Math.round(frac * 12))); return '🟦'.repeat(n) + '⬛'.repeat(12 - n); };
+
+function transferLiveEmbed(move) {
+  const total = Math.max(1, move.endsAt - move.startedAt);
+  const frac = clamp((Date.now() - move.startedAt) / total, 0, 1);
+  const desc =
+    `**${esc(move.playerName)}** is marching **${fmt(move.amount)}** troops from **${esc(move.fromCityName)}** to **${esc(move.toCityName)}**.\n\n` +
+    `🚚 En route\n\`${moveBar(frac)}\`\n\n` +
+    `⏳ **${msLeft(move.endsAt)}** left` + inviteLine();
+  return new EmbedBuilder().setColor(COLOR.blue).setTitle('🚚 Troop Movement').setDescription(desc);
+}
+
+function transferArrivedEmbed(r) {
+  if (r.recalled) {
+    return new EmbedBuilder().setColor(COLOR.grey).setTitle('🚚 Convoy recalled')
+      .setDescription(`**${esc(r.playerName)}**'s convoy reached **${esc(r.toCityName)}** to find it was no longer theirs to hold. The **${fmt(r.amount)}** troops turned back and rejoined the reserve army.`);
+  }
+  const overflowLine = r.overflow > 0 ? `\n🪖 **${fmt(r.overflow)}** couldn't fit in the garrison (at the ${fmt(GARRISON_CAP)} cap) and returned to reserve.` : '';
+  return new EmbedBuilder().setColor(COLOR.green).setTitle('🚚 Convoy arrived')
+    .setDescription(`**${esc(r.playerName)}**'s convoy reached **${esc(r.toCityName)}** from **${esc(r.fromCityName)}** — **${fmt(r.arrived)}** troops join the garrison (now **${fmt(r.newGarrison)}**).${overflowLine}`);
+}
+
 // ─── Threat (live siege) UI — text-based, distinct purple bar for the threat ──
 const threatBar = (frac) => { const n = Math.max(0, Math.min(12, Math.round(frac * 12))); return '🟪'.repeat(n) + '⬛'.repeat(12 - n); };
 
@@ -767,6 +858,15 @@ function rankPlayers(state) {
     .map(([id, p]) => ({ id, p, str: playerStrength(state, p), c: p.cities.length }))
     .filter(r => r.c > 0)
     .sort((a, b) => b.c - a.c || b.str - a.str);
+}
+
+// true if playerId sits in the top N of the leaderboard's own ranking (city count, then
+// strength). Podium rulers have already out-competed the field by land or power, so the
+// MATCH_BAND weakness shield — meant to protect genuinely weak players — doesn't apply to
+// them: it would otherwise let someone hoard cities without ever building an army and stay
+// permanently un-raidable while still sitting on the leaderboard.
+function isTopRanked(state, playerId, n = MATCH_BAND_EXEMPT_RANK) {
+  return rankPlayers(state).slice(0, n).some(r => r.id === playerId);
 }
 
 function spawnBoss(state, saveData, guildId) {
@@ -1288,11 +1388,17 @@ function dashboard(state, db, guildId, userId) {
 function cityView(state, db, guildId, userId) {
   const cities = ownedCities(state, userId);
   const lines = cities.map(c => `**${c.name}** — Lv ${c.level} • 🛡 ${fmt(c.garrison)} garrison • 💰 ${fmt(pendingIncome(state, c))} ready`);
+  const outbound = Object.values(state.pendingMoves || {}).filter(m => m.playerId === userId);
+  const outLines = outbound.map(m => `🚚 **${fmt(m.amount)}** troops: **${esc(m.fromCityName)}** → **${esc(m.toCityName)}** — arrives in **${msLeft(m.endsAt)}**`);
+  const desc = (lines.join('\n') || 'You hold no cities right now — reopen the game to be resettled.')
+    + (outLines.length ? `\n\n**🚚 Convoys en route**\n${outLines.join('\n')}` : '');
   const embed = new EmbedBuilder().setColor(COLOR.blue)
     .setTitle('🏰 My Cities')
-    .setDescription(lines.join('\n') || 'You hold no cities right now — reopen the game to be resettled.')
-    .setFooter({ text: 'Reinforce moves army troops into a city to defend it' });
-  return { embeds: [embed], components: [backRow()] };
+    .setDescription(desc)
+    .setFooter({ text: 'Reinforce moves reserve army into a city • Transfer moves garrison troops between your own cities' });
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('dy:transfer').setLabel('🚚 Transfer Troops').setStyle(ButtonStyle.Primary).setDisabled(cities.length < 2));
+  return { embeds: [embed], components: [row, backRow()] };
 }
 
 function armyView(state, db, guildId, userId) {
@@ -1362,7 +1468,7 @@ function targetSelect(state, userId) {
     let note;
     if (!owner) note = `Militia • Lv ${city.level} • 🛡${fmt(effectiveDefence(state, city))} def`;
     else if (owner.shieldUntil > Date.now()) continue;                       // shielded → hide
-    else if (playerStrength(state, owner) * MATCH_BAND < myStr) continue;     // too weak → hide
+    else if (!isTopRanked(state, city.ownerId) && playerStrength(state, owner) * MATCH_BAND < myStr) continue;     // too weak → hide (podium rulers are exempt)
     else note = `${owner.name} • Lv ${city.level} • 🛡${fmt(effectiveDefence(state, city))} def`;
     opts.push({ label: city.name, description: note, value: c.id });
   }
@@ -1430,6 +1536,57 @@ function reinforceAmount(state, userId, cityId) {
   return { embeds: [new EmbedBuilder().setColor(COLOR.blue).setTitle(`🛡 Reinforce ${esc(city.name)}`)
     .setDescription(`**${esc(city.name)}** — Lv ${city.level} • garrison **🛡${fmt(city.garrison)} / ${fmt(GARRISON_CAP)}**\nReserve army: **${fmt(p.army)}** troops.\n\nChoose how many to station here.${note}`)],
     components: [amtRow, navRow] };
+}
+
+// ─── Troop Transfer UI — pick source, pick destination, pick amount, confirm ──
+function transferFromSelect(state, userId) {
+  const cities = ownedCities(state, userId);
+  if (cities.length < 2) {
+    return { embeds: [new EmbedBuilder().setColor(COLOR.grey).setTitle('🚚 Transfer Troops')
+      .setDescription('You need at least **2 cities** to transfer troops between them.')], components: [backRow()] };
+  }
+  const blockedRaid = new Set(Object.values(state.pendingRaids || {}).map(r => r.cityId));
+  const blockedSiege = new Set((state.boss?.targets || []).filter(t => !t.done).map(t => t.cityId));
+  const blockedMoving = new Set(Object.values(state.pendingMoves || {}).map(m => m.fromCityId));
+  const opts = cities
+    .filter(c => c.garrison > 0 && !blockedRaid.has(c.id) && !blockedSiege.has(c.id) && !blockedMoving.has(c.id))
+    .map(c => ({ label: c.name, description: `Lv ${c.level} • 🛡${fmt(c.garrison)} garrison`, value: c.id }));
+  if (!opts.length) {
+    return { embeds: [new EmbedBuilder().setColor(COLOR.grey).setTitle('🚚 Transfer Troops')
+      .setDescription('No eligible source city right now — a city can\'t send out troops while under raid, under siege, or already mid-transfer.')], components: [backRow()] };
+  }
+  const menu = new StringSelectMenuBuilder().setCustomId('dy:tf_from').setPlaceholder('Choose a city to send troops FROM…').addOptions(opts.slice(0, 25));
+  return { embeds: [new EmbedBuilder().setColor(COLOR.blue).setTitle('🚚 Transfer Troops')
+    .setDescription('Pick the city you want to send troops **from**. Convoys travel at a speed based on distance and **can\'t be recalled** once they set out — the war room will show them en route.')],
+    components: [new ActionRowBuilder().addComponents(menu), backRow()] };
+}
+
+function transferToSelect(state, userId, fromCityId) {
+  const from = state.cities[fromCityId];
+  if (!from || from.ownerId !== userId) return transferFromSelect(state, userId);
+  const opts = ownedCities(state, userId)
+    .filter(c => c.id !== fromCityId)
+    .map(c => ({ label: c.name, description: `Lv ${c.level} • 🛡${fmt(c.garrison)} • ~${msLeft(Date.now() + travelTime(from, c))} travel`, value: c.id }));
+  const menu = new StringSelectMenuBuilder().setCustomId(`dy:tf_to:${fromCityId}`).setPlaceholder('Choose a city to send troops TO…').addOptions(opts.slice(0, 25));
+  return { embeds: [new EmbedBuilder().setColor(COLOR.blue).setTitle(`🚚 Transfer from ${esc(from.name)}`)
+    .setDescription(`Sending from **${esc(from.name)}** (🛡${fmt(from.garrison)} garrison). Pick the destination.`)],
+    components: [new ActionRowBuilder().addComponents(menu), backRow()] };
+}
+
+function transferAmount(state, userId, fromCityId, toCityId) {
+  const from = state.cities[fromCityId], to = state.cities[toCityId];
+  if (!from || !to || from.ownerId !== userId || to.ownerId !== userId) return transferFromSelect(state, userId);
+  const half = Math.floor(from.garrison * 0.5);
+  const ms = travelTime(from, to);
+  const embed = new EmbedBuilder().setColor(COLOR.blue).setTitle(`🚚 Send troops to ${esc(to.name)}?`)
+    .setDescription(
+      `From **${esc(from.name)}** (🛡${fmt(from.garrison)}) → **${esc(to.name)}** (🛡${fmt(to.garrison)}/${fmt(GARRISON_CAP)})\n\n` +
+      `Travel time: **${msLeft(Date.now() + ms)}**\n\n` +
+      `How many troops do you send? *Committed once sent — the convoy can't be recalled or cancelled.*`);
+  return { embeds: [embed], components: [new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`dy:tf:${fromCityId}:${toCityId}:50`).setLabel(`Send Half (${fmt(half)})`).setStyle(ButtonStyle.Primary).setDisabled(half < 1),
+    new ButtonBuilder().setCustomId(`dy:tf:${fromCityId}:${toCityId}:100`).setLabel(`Send All (${fmt(from.garrison)})`).setStyle(ButtonStyle.Primary).setDisabled(from.garrison < 1),
+  ), backRow()] };
 }
 
 
@@ -1503,8 +1660,10 @@ function leaderboard(state, viewerId) {
   const lines = rows.map((r, i) => {
     const s = r.p.stats;
     // fairness shield: the match-band protects rulers far weaker than the viewer — it applies
-    // to the ruler, so it covers every city they hold
-    const shielded = !!viewer && r.id !== viewerId && r.str * MATCH_BAND < vStr;
+    // to the ruler, so it covers every city they hold. Podium rulers (top MATCH_BAND_EXEMPT_RANK,
+    // same order as this list) are exempt — they've already out-competed the field and shouldn't
+    // get to hide behind a low strength score.
+    const shielded = !!viewer && r.id !== viewerId && i >= MATCH_BAND_EXEMPT_RANK && r.str * MATCH_BAND < vStr;
     if (shielded) anyShield = true;
     const cityList = r.p.cities.map(cid => {
       const c = state.cities[cid];
@@ -1932,6 +2091,54 @@ function initDiyar({ client, db, saveData, awardLP }) {
       else await ch.send({ embeds: [raidResultEmbed(result)] });
     } catch (e) { console.error('[diyar raid finish]', e.message); }
   }
+  // ----- troop transfers -----
+  const moveTimers = {};   // in-memory progress-edit intervals per move (not persisted)
+  async function launchTransfer(guildId, moveId) {
+    const state = stateOf(guildId);
+    const move = state.pendingMoves && state.pendingMoves[moveId];
+    if (!move || !move.channelId) return;
+    let msg = null;
+    try {
+      const ch = await client.channels.fetch(move.channelId);
+      msg = await ch.send({ embeds: [transferLiveEmbed(move)] });
+      move.messageId = msg.id; saveData(guildId);
+    } catch (e) { console.error('[diyar transfer post]', e.message); }
+    startTransferLoop(guildId, moveId);
+  }
+  function startTransferLoop(guildId, moveId) {
+    if (moveTimers[moveId]) clearInterval(moveTimers[moveId]);
+    moveTimers[moveId] = setInterval(() => transferTick(guildId, moveId).catch(e => console.error('[diyar transfer tick]', e.message)), TRANSFER_TICK_MS);
+  }
+  async function transferTick(guildId, moveId) {
+    const state = stateOf(guildId);
+    const move = state.pendingMoves && state.pendingMoves[moveId];
+    if (!move) { clearInterval(moveTimers[moveId]); delete moveTimers[moveId]; return; }
+    if (Date.now() >= move.endsAt) { clearInterval(moveTimers[moveId]); delete moveTimers[moveId]; await finishTransfer(guildId, moveId); return; }
+    if (move.channelId && move.messageId) {
+      try {
+        const ch = await client.channels.fetch(move.channelId);
+        const msg = await ch.messages.fetch(move.messageId);
+        await msg.edit({ embeds: [transferLiveEmbed(move)] });
+      } catch { /* message gone — the convoy still arrives on schedule */ }
+    }
+  }
+  async function finishTransfer(guildId, moveId) {
+    const state = stateOf(guildId);
+    const move = state.pendingMoves && state.pendingMoves[moveId];
+    if (!move) return;
+    delete state.pendingMoves[moveId];
+    if (moveTimers[moveId]) { clearInterval(moveTimers[moveId]); delete moveTimers[moveId]; }
+    const result = resolveTransfer(state, saveData, guildId, move);
+    saveData(guildId);
+    if (!result) return;
+    const finale = transferArrivedEmbed(result);
+    try {
+      const ch = await client.channels.fetch(move.channelId);
+      const m = move.messageId ? await ch.messages.fetch(move.messageId).catch(() => null) : null;
+      if (m) await m.edit({ embeds: [finale] });
+      else await ch.send({ embeds: [finale] });
+    } catch (e) { console.error('[diyar transfer finish]', e.message); }
+  }
   async function tick() {
     const now = Date.now();
     for (const guild of client.guilds.cache.values()) {
@@ -2000,6 +2207,13 @@ function initDiyar({ client, db, saveData, awardLP }) {
       // resolve any live raid whose window elapsed but whose timer was lost (e.g. a redeploy)
       for (const rid of Object.keys(state.pendingRaids || {})) {
         if (now > state.pendingRaids[rid].endsAt && !raidTimers[rid]) await finishRaid(guild.id, rid);
+      }
+      // troop convoys: settle any that arrived while their timer was lost (e.g. a redeploy),
+      // and reattach the live progress-bar loop for any still in flight
+      for (const mid of Object.keys(state.pendingMoves || {})) {
+        const mv = state.pendingMoves[mid];
+        if (now >= mv.endsAt) { if (!moveTimers[mid]) await finishTransfer(guild.id, mid); }
+        else if (!moveTimers[mid]) startTransferLoop(guild.id, mid);
       }
     }
   }
@@ -2264,6 +2478,21 @@ function initDiyar({ client, db, saveData, awardLP }) {
         }
         return interaction.update(reinforceAmount(state, uid, cityId));
       }
+      if (action === 'transfer')  return interaction.update(transferFromSelect(state, uid));
+      if (action === 'tf_from')   return interaction.update(transferToSelect(state, uid, interaction.values[0]));
+      if (action === 'tf_to')     return interaction.update(transferAmount(state, uid, parts[2], interaction.values[0]));
+      if (action === 'tf') {
+        const fromCityId = parts[2], toCityId = parts[3], pct = parts[4] === '50' ? 0.5 : 1.0;
+        const start = startTransfer(state, saveData, gid, uid, fromCityId, toCityId, pct);
+        if (start.error) return interaction.update({ embeds: [new EmbedBuilder().setColor(COLOR.grey).setTitle('🚚 Transfer blocked').setDescription(start.error)], components: [backRow()], files: [] });
+        const moveId = 'm' + Date.now().toString(36) + Math.floor(Math.random() * 1000);
+        state.pendingMoves = state.pendingMoves || {};
+        state.pendingMoves[moveId] = { ...start.pending, id: moveId };
+        saveData(gid);
+        launchTransfer(gid, moveId).catch(e => console.error('[diyar transfer]', e.message));
+        return interaction.update({ embeds: [new EmbedBuilder().setColor(COLOR.blue).setTitle('🚚 Convoy departed!')
+          .setDescription(`**${fmt(start.pending.amount)}** troops set out from **${esc(start.pending.fromCityName)}** toward **${esc(start.pending.toCityName)}**. Travel time: **${msLeft(Date.now() + start.ms)}**. Watch the war room for the convoy's progress.`)], components: [backRow()], files: [] });
+      }
       if (action === 'atk') {
         const cityId = parts[2], pct = parts[3] === '50' ? 0.5 : 1.0;
         const start = startRaid(state, db, gid, saveData, uid, cityId, pct);
@@ -2306,11 +2535,12 @@ function initDiyar({ client, db, saveData, awardLP }) {
     _test: {
       getState: () => stateOf, ensurePlayer, resolveAttack, recruit, upgrade, reinforce, collectIncome, tick,
       spawnBoss, strikeBoss, resolveBossDefeat, resolveBossExpire, playerStrength, ensureBossSched,
-      pendingIncome, renderMap, renderBoss, renderBattle, pickTimes, reseedIfLanded, rankPlayers, threatEmbed, threatSiegeLines, threatBar,
+      pendingIncome, renderMap, renderBoss, renderBattle, pickTimes, reseedIfLanded, rankPlayers, isTopRanked, threatEmbed, threatSiegeLines, threatBar,
       postWanted, repostWanted, wantedFace, finishWanted,
       spawnWanted, guessWanted, escapeWanted, ensureWantedSched, wantedClue, wantedPosterEmbed, wantedRow, cityRegion,
       spawnCaravan, claimCaravan, ensureCaravanSched, caravanOfferEmbed, caravanFrameEmbed, caravanFinalEmbed, caravanExpireEmbed, caravanRow,
       claimTribute, buyWeapon, armouryView, profileView, leaderboard, resetSeason, targetSelect, reinforceSelect, effectiveDefence, effectiveAttack, startRaid, resolveRaid, troopCost, raidLiveEmbed, raidResultEmbed, threatTick, finishThreat, inviteLine, postNudge, threatDefeatEmbed, threatWithdrawEmbed, strikeBoss,
+      travelTime, startTransfer, resolveTransfer, transferFromSelect, transferToSelect, transferAmount, transferLiveEmbed, transferArrivedEmbed, moveBar, launchTransfer, finishTransfer, transferTick, cityView,
     },
   };
 }
