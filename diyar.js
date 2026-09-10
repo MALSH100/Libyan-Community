@@ -54,6 +54,44 @@ const TRANSFER_MIN_MS        = 3 * 60 * 1000;   // floor: never faster than 3 mi
 const TRANSFER_MAX_MS        = 60 * 60 * 1000;  // ceiling: never slower than 1 hour (opposite corners of the map)
 const TRANSFER_TICK_MS       = 15 * 1000;       // live progress-bar edit cadence
 
+// ─── Expeditions ────────────────────────────────────────────────────────────
+// a second use for your reserve army that never depends on another player being online,
+// weak, or unshielded — send troops into the empty desert between your cities for loot.
+// tracked on its OWN cooldown, entirely separate from ATTACK_COOLDOWN_MS, so raiding and
+// expeditioning never compete for the same turn. travel reuses travelTime() unmodified —
+// zones are just points with lon/lat, same as cities.
+const EXPEDITION_COOLDOWN_MS      = 45 * 60 * 1000;  // per player, independent of raid cooldown
+const EXPEDITION_TICK_MS          = 10 * 1000;       // live progress-bar edit cadence
+const EXPEDITION_WEAPON_MAX_TIER  = 5;               // like boss kills, expeditions can push past the armoury's shop cap (3)
+const EXPEDITION_DISASTER_CONSOLATION = 15;          // flat Dinar even on a Disaster — never a total wash
+
+// outcome tiers, checked in order (first ratio match wins) — casualties never reach 100%,
+// someone always makes it back with a story, same philosophy as raids and boss sieges
+const EXPEDITION_TIERS = [
+  { id: 'great',    label: '🏆 Great Success', minRatio: 1.6, cas: [0.05, 0.10], lootPct: 1.0, weaponRoll: true  },
+  { id: 'success',  label: '✅ Success',        minRatio: 1.0, cas: [0.15, 0.30], lootPct: 1.0, weaponRoll: true  },
+  { id: 'costly',   label: '⚠️ Costly Retreat', minRatio: 0.6, cas: [0.40, 0.55], lootPct: 0.4, weaponRoll: false },
+  { id: 'disaster', label: '💀 Disaster',       minRatio: 0,   cas: [0.60, 0.75], lootPct: 0,   weaponRoll: false },
+];
+// (EXPEDITION_TIER_COLOR is defined further down, once COLOR itself exists)
+
+// six frontier zones spread across the empty space on the real map — riskier and richer the
+// further out they sit. Coordinates are real anchor points, so geography stays meaningful:
+// a southern empire has a natural edge reaching Fezzan/Kufra, a coastal one reaches Jifara/Nafusa cheaply.
+const EXPEDITION_ZONES = [
+  { id: 'jifara', name: 'The Jifara Approach',    lon: 12.5, lat: 32.3, hint: '🟢 Low',      tag: 'Scrubland past the coastal farms',        dangerMin: 40,  dangerMax: 90,  weaponChance: 0.02, dinar: [40, 90],   recruits: [20, 45] },
+  { id: 'nafusa', name: 'The Nafusa Fringe',      lon: 11.5, lat: 31.3, hint: '🟡 Moderate', tag: 'Rocky foothills, occasional raiders',     dangerMin: 70,  dangerMax: 140, weaponChance: 0.05, dinar: [70, 140],  recruits: [30, 65] },
+  { id: 'sirte',  name: 'The Sirte Hinterland',   lon: 17.5, lat: 30.0, hint: '🟠 High',     tag: 'Empty coastal desert, old wartime wrecks', dangerMin: 130, dangerMax: 240, weaponChance: 0.09, dinar: [120, 220], recruits: [50, 100] },
+  { id: 'akhdar', name: 'The Jebel Akhdar Wilds', lon: 21.5, lat: 31.5, hint: '🟠 High',     tag: 'Green Mountain backcountry, bandit country', dangerMin: 160, dangerMax: 280, weaponChance: 0.13, dinar: [160, 280], recruits: [60, 120] },
+  { id: 'fezzan', name: 'The Fezzan Deep',        lon: 13.0, lat: 24.5, hint: '🔴 Severe',   tag: 'Deep desert, old caravan routes',          dangerMin: 240, dangerMax: 420, weaponChance: 0.18, dinar: [240, 420], recruits: [90, 170] },
+  { id: 'kufra',  name: 'The Kufra Depths',       lon: 23.0, lat: 22.5, hint: '⚫ Extreme',  tag: 'The far edge of the map',                  dangerMin: 340, dangerMax: 600, weaponChance: 0.25, dinar: [340, 600], recruits: [130, 240] },
+];
+const EXPEDITION_ZONE_BY_ID = Object.fromEntries(EXPEDITION_ZONES.map(z => [z.id, z]));
+function expeditionTier(ratio) {
+  for (const t of EXPEDITION_TIERS) if (ratio >= t.minRatio) return t;
+  return EXPEDITION_TIERS[EXPEDITION_TIERS.length - 1];
+}
+
 // ─── Boss ───────────────────────────────────────────────────────────────────
 const BOSS_DURATION_MS    = 20 * 60 * 1000;       // the siege lasts 20 minutes
 const BOSS_STRIKE_CD_MS   = 3 * 1000;             // per-player strike cooldown (3s)
@@ -562,6 +600,72 @@ function resolveTransfer(state, saveData, guildId, move) {
   return result;
 }
 
+// validate an expedition launch and lock the committed troops out of the reserve army
+// immediately (same "committed on send" pattern as raids and transfers); returns {error} or {pending}
+function startExpedition(state, saveData, guildId, userId, fromCityId, zoneId, pct) {
+  const p = state.players[userId];
+  const from = state.cities[fromCityId];
+  const zone = EXPEDITION_ZONE_BY_ID[zoneId];
+  if (!p || !from || !zone) return { error: 'Not found.' };
+  if (from.ownerId !== userId) return { error: 'You can only launch an expedition from your own city.' };
+  const now = Date.now();
+  if (now - (p.lastExpeditionAt || 0) < EXPEDITION_COOLDOWN_MS)
+    return { error: `Your expedition force hasn't finished resting. Ready in ${msLeft((p.lastExpeditionAt || 0) + EXPEDITION_COOLDOWN_MS)}.` };
+  if (state.pendingExpeditions && Object.values(state.pendingExpeditions).some(e => e.playerId === userId))
+    return { error: 'You already have an expedition underway — wait for it to return.' };
+  const send = Math.floor(p.army * pct);
+  if (send < 1) return { error: 'You have no reserve army to send. Recruit troops first.' };
+  p.army -= send;              // committed the instant they march — can't be recalled
+  p.lastExpeditionAt = now;    // cooldown starts at launch, independent of the raid cooldown
+  const ms = travelTime(from, zone);   // zones are just points with lon/lat, same as cities
+  const pending = {
+    playerId: userId, playerName: p.name, fromCityId, fromCityName: from.name,
+    zoneId, zoneName: zone.name, send, startedAt: now, endsAt: now + ms,
+    channelId: state.channelId, messageId: null,
+  };
+  saveData(guildId);
+  return { pending, ms };
+}
+
+// resolve a returning expedition against its zone's danger roll; casualties never reach
+// 100% (someone always makes it back), loot and a shot at a top-tier weapon scale with
+// how decisively the expedition won — same tiered-outcome shape as the boss loot table
+function resolveExpedition(state, db, guildId, saveData, exp) {
+  const p = state.players[exp.playerId];
+  if (!p) return null;
+  const zone = EXPEDITION_ZONE_BY_ID[exp.zoneId];
+  const power = exp.send * (1 + p.weaponTier * 0.15 + p.upg.mil * 0.12) * rnd(0.85, 1.15);
+  const danger = randInt(zone.dangerMin, zone.dangerMax);
+  const ratio = power / danger;
+  const tier = expeditionTier(ratio);
+  const cas = Math.round(exp.send * rnd(tier.cas[0], tier.cas[1]));
+  const survivors = exp.send - cas;
+  p.army += survivors;
+
+  let dinar = 0, recruits = 0, weapon = false;
+  if (tier.lootPct > 0) {
+    dinar = Math.round(randInt(zone.dinar[0], zone.dinar[1]) * tier.lootPct);
+    recruits = Math.round(randInt(zone.recruits[0], zone.recruits[1]) * tier.lootPct);
+    if (tier.weaponRoll && p.weaponTier < EXPEDITION_WEAPON_MAX_TIER && Math.random() < zone.weaponChance) {
+      p.weaponTier++; weapon = true;
+    }
+  } else {
+    dinar = EXPEDITION_DISASTER_CONSOLATION;   // never a total wash, same spirit as caravan repel payouts
+  }
+  if (dinar > 0) awardDinar(db, guildId, exp.playerId, dinar, saveData);
+  if (recruits > 0) p.army += recruits;
+
+  p.stats = p.stats || {};
+  p.stats.expeditions = (p.stats.expeditions || 0) + 1;
+  if (tier.id === 'great' || tier.id === 'success') p.stats.expeditionWins = (p.stats.expeditionWins || 0) + 1;
+
+  saveData(guildId);
+  return {
+    ...exp, tier: tier.id, tierLabel: tier.label, power: Math.round(power), danger,
+    cas, survivors, dinar, recruits, weapon, newWeaponTier: p.weaponTier,
+  };
+}
+
 function collectIncome(state, db, guildId, saveData, userId) {
   let total = 0;
   for (const city of ownedCities(state, userId)) {
@@ -792,6 +896,36 @@ function transferArrivedEmbed(r) {
   const overflowLine = r.overflow > 0 ? `\n🪖 **${fmt(r.overflow)}** couldn't fit in the garrison (at the ${fmt(GARRISON_CAP)} cap) and returned to reserve.` : '';
   return new EmbedBuilder().setColor(COLOR.green).setTitle('🚚 Convoy arrived')
     .setDescription(`**${esc(r.playerName)}**'s convoy reached **${esc(r.toCityName)}** from **${esc(r.fromCityName)}** — **${fmt(r.arrived)}** troops join the garrison (now **${fmt(r.newGarrison)}**).${overflowLine}`);
+}
+
+// ─── Expedition (live frontier run) UI — distinct orange bar ──
+const expeditionBar = (frac) => { const n = Math.max(0, Math.min(12, Math.round(frac * 12))); return '🟧'.repeat(n) + '⬛'.repeat(12 - n); };
+const EXPEDITION_TIER_COLOR = { great: COLOR.green, success: COLOR.green, costly: COLOR.gold, disaster: COLOR.red };
+
+function expeditionLiveEmbed(exp) {
+  const zone = EXPEDITION_ZONE_BY_ID[exp.zoneId];
+  const total = Math.max(1, exp.endsAt - exp.startedAt);
+  const frac = clamp((Date.now() - exp.startedAt) / total, 0, 1);
+  const desc =
+    `**${esc(exp.playerName)}** marches **${fmt(exp.send)}** troops from **${esc(exp.fromCityName)}** into **${esc(zone.name)}**.\n\n` +
+    `*${esc(zone.tag)}* — danger ${zone.hint}\n\n` +
+    `🏜 En route\n\`${expeditionBar(frac)}\`\n\n` +
+    `⏳ **${msLeft(exp.endsAt)}** left` + inviteLine();
+  return new EmbedBuilder().setColor(COLOR.gold).setTitle('🏜 Expedition Underway').setDescription(desc);
+}
+
+function expeditionResultEmbed(r) {
+  const zone = EXPEDITION_ZONE_BY_ID[r.zoneId];
+  const lines = [
+    `Power **${fmt(r.power)}** vs danger **${fmt(r.danger)}**`,
+    `Troops lost: **${fmt(r.cas)}**  •  Returned: **${fmt(r.survivors)}**`,
+  ];
+  if (r.dinar > 0) lines.push(`💰 Found **${fmt(r.dinar)}** Dinar`);
+  if (r.recruits > 0) lines.push(`🪖 **${fmt(r.recruits)}** recruits joined on the way back`);
+  if (r.weapon) lines.push(`🗡 A cache of arms! Weapon tier now **${r.newWeaponTier}**`);
+  return new EmbedBuilder().setColor(EXPEDITION_TIER_COLOR[r.tier])
+    .setTitle(`${r.tierLabel} — ${esc(zone.name)}`)
+    .setDescription(`**${esc(r.playerName)}**'s expedition into **${esc(zone.name)}** returns.\n\n${lines.join('\n')}` + inviteLine());
 }
 
 // ─── Threat (live siege) UI — text-based, distinct purple bar for the threat ──
@@ -1346,7 +1480,7 @@ function navButtons() {
     new ButtonBuilder().setCustomId('dy:city').setLabel('🏰 My Cities').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('dy:attack').setLabel('⚔ Attack').setStyle(ButtonStyle.Danger),
     new ButtonBuilder().setCustomId('dy:army').setLabel('🪖 Army').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('dy:collect').setLabel('💰 Collect').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('dy:expedition').setLabel('🏜 Expedition').setStyle(ButtonStyle.Success),
   );
 }
 const backRow = () => new ActionRowBuilder().addComponents(
@@ -1364,19 +1498,22 @@ function dashboard(state, db, guildId, userId) {
     ? `\n\n🐪 **${state.caravan.name}** is on the road to **${state.caravan.toName}** — first ruler to act in the war room takes it!` : '';
   const wtd = (state.wanted && !state.wanted.caughtBy)
     ? `\n\n🪧 A **${fmt(state.wanted.bounty)} Dinar bounty** is live — someone's hiding out there. Check the war room for clues.` : '';
+  const myExp = Object.values(state.pendingExpeditions || {}).find(e => e.playerId === userId);
+  const expLine = myExp ? `\n\n🏜 Your expedition returns from **${esc(myExp.zoneName)}** in **${msLeft(myExp.endsAt)}**.` : '';
   const embed = new EmbedBuilder().setColor(COLOR.gold)
     .setTitle(`⚔ Diyar — ${p.name}`)
     .setDescription(
       `**${cities.length}** cit${cities.length === 1 ? 'y' : 'ies'} • **${fmt(dinar)}** Dinar\n` +
       `🪖 Army: **${fmt(p.army)}**  •  🏰 Garrisons: **${fmt(garr)}**\n` +
       `🗡 Weapon tier **${p.weaponTier}**  •  Military **${p.upg.mil}** / Walls **${p.upg.for}** / Economy **${p.upg.eco}**\n` +
-      `💰 Uncollected income: **${fmt(income)}**${shield}` + boss + cvn + wtd)
-    .setFooter({ text: 'Raids steal Dinar from rivals • capture cities to grow' });
+      `💰 Uncollected income: **${fmt(income)}**${shield}` + boss + cvn + wtd + expLine)
+    .setFooter({ text: 'Raids steal Dinar from rivals • capture cities to grow • Expeditions put idle army to work' });
   const row2 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('dy:upgrade').setLabel('⬆ Upgrades').setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId('dy:armoury').setLabel('🗡 Armoury').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('dy:reinforce').setLabel('🛡 Reinforce').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('dy:leaderboard').setLabel('🏆 Ranks').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('dy:collect').setLabel('💰 Collect').setStyle(ButtonStyle.Success),
   );
   const row3 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('dy:profile').setLabel('📜 Profile').setStyle(ButtonStyle.Secondary),
@@ -1589,6 +1726,70 @@ function transferAmount(state, userId, fromCityId, toCityId) {
   ), backRow()] };
 }
 
+// ─── Expedition UI — pick launch city (if >1), pick zone, pick commitment, confirm ──
+function expeditionCitySelect(state, userId) {
+  const p = state.players[userId];
+  const cities = ownedCities(state, userId);
+  if (!cities.length) {
+    return { embeds: [new EmbedBuilder().setColor(COLOR.grey).setTitle('🏜 Expedition')
+      .setDescription('You hold no cities to launch an expedition from.')], components: [backRow()] };
+  }
+  if (p.army < 1) {
+    return { embeds: [new EmbedBuilder().setColor(COLOR.grey).setTitle('🏜 Expedition')
+      .setDescription('No reserve army to send — recruit troops first.')], components: [backRow()] };
+  }
+  const now = Date.now();
+  const cdEnd = (p.lastExpeditionAt || 0) + EXPEDITION_COOLDOWN_MS;
+  if (now < cdEnd) {
+    return { embeds: [new EmbedBuilder().setColor(COLOR.grey).setTitle('🏜 Expedition')
+      .setDescription(`Your expedition force hasn't finished resting. Ready in **${msLeft(cdEnd)}**.`)], components: [backRow()] };
+  }
+  if (state.pendingExpeditions && Object.values(state.pendingExpeditions).some(e => e.playerId === userId)) {
+    return { embeds: [new EmbedBuilder().setColor(COLOR.grey).setTitle('🏜 Expedition')
+      .setDescription('You already have an expedition underway — check the war room for its return.')], components: [backRow()] };
+  }
+  if (cities.length === 1) return expeditionZoneSelect(state, userId, cities[0].id);
+  const menu = new StringSelectMenuBuilder().setCustomId('dy:ex_from').setPlaceholder('Launch from which city?')
+    .addOptions(cities.slice(0, 25).map(c => ({ label: c.name, description: `Lv ${c.level}`, value: c.id })));
+  return { embeds: [new EmbedBuilder().setColor(COLOR.gold).setTitle('🏜 Expedition')
+    .setDescription(`Reserve army: **${fmt(p.army)}**. Pick the city to launch from — closer cities reach nearby zones faster.`)],
+    components: [new ActionRowBuilder().addComponents(menu), backRow()] };
+}
+
+function expeditionZoneSelect(state, userId, fromCityId) {
+  const from = state.cities[fromCityId];
+  if (!from || from.ownerId !== userId) return expeditionCitySelect(state, userId);
+  const opts = EXPEDITION_ZONES.map(z => ({
+    label: z.name,
+    description: `${z.hint} • ~${msLeft(Date.now() + travelTime(from, z))} travel`,
+    value: z.id,
+  }));
+  const menu = new StringSelectMenuBuilder().setCustomId(`dy:ex_zone:${fromCityId}`).setPlaceholder('Choose a frontier zone…').addOptions(opts);
+  return { embeds: [new EmbedBuilder().setColor(COLOR.gold).setTitle('🏜 Choose a Frontier Zone')
+    .setDescription(`Launching from **${esc(from.name)}**. Further zones are riskier — and richer.`)],
+    components: [new ActionRowBuilder().addComponents(menu), backRow()] };
+}
+
+function expeditionAmount(state, userId, fromCityId, zoneId) {
+  const p = state.players[userId];
+  const from = state.cities[fromCityId];
+  const zone = EXPEDITION_ZONE_BY_ID[zoneId];
+  if (!from || from.ownerId !== userId || !zone) return expeditionCitySelect(state, userId);
+  const ms = travelTime(from, zone);
+  const q = Math.floor(p.army * 0.25), half = Math.floor(p.army * 0.5);
+  const embed = new EmbedBuilder().setColor(COLOR.gold).setTitle(`🏜 Launch expedition to ${esc(zone.name)}?`)
+    .setDescription(
+      `*${esc(zone.tag)}* — danger ${zone.hint}\n\n` +
+      `From **${esc(from.name)}** • Reserve army: **${fmt(p.army)}**\n\n` +
+      `Travel time: **${msLeft(Date.now() + ms)}**\n\n` +
+      `How many troops do you send? *Committed once launched — the expedition can't be recalled or cancelled.*`);
+  return { embeds: [embed], components: [new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`dy:ex:${fromCityId}:${zoneId}:25`).setLabel(`Send Some (${fmt(q)})`).setStyle(ButtonStyle.Primary).setDisabled(q < 1),
+    new ButtonBuilder().setCustomId(`dy:ex:${fromCityId}:${zoneId}:50`).setLabel(`Send Half (${fmt(half)})`).setStyle(ButtonStyle.Primary).setDisabled(half < 1),
+    new ButtonBuilder().setCustomId(`dy:ex:${fromCityId}:${zoneId}:100`).setLabel(`Send All (${fmt(p.army)})`).setStyle(ButtonStyle.Danger).setDisabled(p.army < 1),
+  ), backRow()] };
+}
+
 
 // ─── Wanted UI ──────────────────────────────────────────────────────────────
 const TIER_TINT = { Common: 0x95A5A6, Rare: 0x3498DB, Epic: 0x9B59B6, Legendary: 0xF1C40F, Mythic: 0xE74C3C };
@@ -1725,7 +1926,8 @@ function profileView(state, db, guildId, userId) {
       `🏰 Captured **${s.captured}**  •  lost **${s.lost}**\n` +
       `👹 Boss kills **${s.bossKills}**  •  total boss damage **${fmt(s.bossDmg)}**\n` +
       `🐪 Caravans raided **${s.caravansRaided || 0}**  •  welcomed **${s.caravansJoined || 0}**\n` +
-      `⛓ Bounties claimed **${s.bountiesClaimed || 0}**`)
+      `⛓ Bounties claimed **${s.bountiesClaimed || 0}**\n` +
+      `🏜 Expeditions **${s.expeditions || 0}** (${s.expeditionWins || 0} returned with loot)`)
     .setFooter({ text: `Ruling since ${new Date(p.joinedAt).toISOString().slice(0, 10)}` });
   return { embeds: [embed], components: [backRow()] };
 }
@@ -2139,6 +2341,54 @@ function initDiyar({ client, db, saveData, awardLP }) {
       else await ch.send({ embeds: [finale] });
     } catch (e) { console.error('[diyar transfer finish]', e.message); }
   }
+  // ----- expeditions -----
+  const expeditionTimers = {};   // in-memory progress-edit intervals per expedition (not persisted)
+  async function launchExpedition(guildId, expId) {
+    const state = stateOf(guildId);
+    const exp = state.pendingExpeditions && state.pendingExpeditions[expId];
+    if (!exp || !exp.channelId) return;
+    let msg = null;
+    try {
+      const ch = await client.channels.fetch(exp.channelId);
+      msg = await ch.send({ embeds: [expeditionLiveEmbed(exp)] });
+      exp.messageId = msg.id; saveData(guildId);
+    } catch (e) { console.error('[diyar expedition post]', e.message); }
+    startExpeditionLoop(guildId, expId);
+  }
+  function startExpeditionLoop(guildId, expId) {
+    if (expeditionTimers[expId]) clearInterval(expeditionTimers[expId]);
+    expeditionTimers[expId] = setInterval(() => expeditionTick(guildId, expId).catch(e => console.error('[diyar expedition tick]', e.message)), EXPEDITION_TICK_MS);
+  }
+  async function expeditionTick(guildId, expId) {
+    const state = stateOf(guildId);
+    const exp = state.pendingExpeditions && state.pendingExpeditions[expId];
+    if (!exp) { clearInterval(expeditionTimers[expId]); delete expeditionTimers[expId]; return; }
+    if (Date.now() >= exp.endsAt) { clearInterval(expeditionTimers[expId]); delete expeditionTimers[expId]; await finishExpedition(guildId, expId); return; }
+    if (exp.channelId && exp.messageId) {
+      try {
+        const ch = await client.channels.fetch(exp.channelId);
+        const msg = await ch.messages.fetch(exp.messageId);
+        await msg.edit({ embeds: [expeditionLiveEmbed(exp)] });
+      } catch { /* message gone — it still resolves on schedule */ }
+    }
+  }
+  async function finishExpedition(guildId, expId) {
+    const state = stateOf(guildId);
+    const exp = state.pendingExpeditions && state.pendingExpeditions[expId];
+    if (!exp) return;
+    delete state.pendingExpeditions[expId];
+    if (expeditionTimers[expId]) { clearInterval(expeditionTimers[expId]); delete expeditionTimers[expId]; }
+    const result = resolveExpedition(state, db, guildId, saveData, exp);
+    saveData(guildId);
+    if (!result) return;
+    const finale = expeditionResultEmbed(result);
+    try {
+      const ch = await client.channels.fetch(exp.channelId);
+      const m = exp.messageId ? await ch.messages.fetch(exp.messageId).catch(() => null) : null;
+      if (m) await m.edit({ embeds: [finale] });
+      else await ch.send({ embeds: [finale] });
+    } catch (e) { console.error('[diyar expedition finish]', e.message); }
+  }
   async function tick() {
     const now = Date.now();
     for (const guild of client.guilds.cache.values()) {
@@ -2214,6 +2464,13 @@ function initDiyar({ client, db, saveData, awardLP }) {
         const mv = state.pendingMoves[mid];
         if (now >= mv.endsAt) { if (!moveTimers[mid]) await finishTransfer(guild.id, mid); }
         else if (!moveTimers[mid]) startTransferLoop(guild.id, mid);
+      }
+      // expeditions: same recovery — settle anything that returned while the timer was lost,
+      // reattach the live loop for anything still out in the field
+      for (const eid of Object.keys(state.pendingExpeditions || {})) {
+        const ex = state.pendingExpeditions[eid];
+        if (now >= ex.endsAt) { if (!expeditionTimers[eid]) await finishExpedition(guild.id, eid); }
+        else if (!expeditionTimers[eid]) startExpeditionLoop(guild.id, eid);
       }
     }
   }
@@ -2493,6 +2750,22 @@ function initDiyar({ client, db, saveData, awardLP }) {
         return interaction.update({ embeds: [new EmbedBuilder().setColor(COLOR.blue).setTitle('🚚 Convoy departed!')
           .setDescription(`**${fmt(start.pending.amount)}** troops set out from **${esc(start.pending.fromCityName)}** toward **${esc(start.pending.toCityName)}**. Travel time: **${msLeft(Date.now() + start.ms)}**. Watch the war room for the convoy's progress.`)], components: [backRow()], files: [] });
       }
+      if (action === 'expedition') return interaction.update(expeditionCitySelect(state, uid));
+      if (action === 'ex_from')    return interaction.update(expeditionZoneSelect(state, uid, interaction.values[0]));
+      if (action === 'ex_zone')    return interaction.update(expeditionAmount(state, uid, parts[2], interaction.values[0]));
+      if (action === 'ex') {
+        const fromCityId = parts[2], zoneId = parts[3];
+        const pct = parts[4] === '25' ? 0.25 : parts[4] === '50' ? 0.5 : 1.0;
+        const start = startExpedition(state, saveData, gid, uid, fromCityId, zoneId, pct);
+        if (start.error) return interaction.update({ embeds: [new EmbedBuilder().setColor(COLOR.grey).setTitle('🏜 Expedition blocked').setDescription(start.error)], components: [backRow()], files: [] });
+        const expId = 'e' + Date.now().toString(36) + Math.floor(Math.random() * 1000);
+        state.pendingExpeditions = state.pendingExpeditions || {};
+        state.pendingExpeditions[expId] = { ...start.pending, id: expId };
+        saveData(gid);
+        launchExpedition(gid, expId).catch(e => console.error('[diyar expedition]', e.message));
+        return interaction.update({ embeds: [new EmbedBuilder().setColor(COLOR.gold).setTitle('🏜 Expedition launched!')
+          .setDescription(`**${fmt(start.pending.send)}** troops march from **${esc(start.pending.fromCityName)}** into **${esc(start.pending.zoneName)}**. Return in: **${msLeft(Date.now() + start.ms)}**. Watch the war room for how it goes.`)], components: [backRow()], files: [] });
+      }
       if (action === 'atk') {
         const cityId = parts[2], pct = parts[3] === '50' ? 0.5 : 1.0;
         const start = startRaid(state, db, gid, saveData, uid, cityId, pct);
@@ -2541,6 +2814,7 @@ function initDiyar({ client, db, saveData, awardLP }) {
       spawnCaravan, claimCaravan, ensureCaravanSched, caravanOfferEmbed, caravanFrameEmbed, caravanFinalEmbed, caravanExpireEmbed, caravanRow,
       claimTribute, buyWeapon, armouryView, profileView, leaderboard, resetSeason, targetSelect, reinforceSelect, effectiveDefence, effectiveAttack, startRaid, resolveRaid, troopCost, raidLiveEmbed, raidResultEmbed, threatTick, finishThreat, inviteLine, postNudge, threatDefeatEmbed, threatWithdrawEmbed, strikeBoss,
       travelTime, startTransfer, resolveTransfer, transferFromSelect, transferToSelect, transferAmount, transferLiveEmbed, transferArrivedEmbed, moveBar, launchTransfer, finishTransfer, transferTick, cityView,
+      startExpedition, resolveExpedition, expeditionTier, expeditionCitySelect, expeditionZoneSelect, expeditionAmount, expeditionLiveEmbed, expeditionResultEmbed, expeditionBar, launchExpedition, finishExpedition, expeditionTick, dashboard, navButtons, profileView,
     },
   };
 }
