@@ -60,7 +60,7 @@ const TRANSFER_TICK_MS       = 15 * 1000;       // live progress-bar edit cadenc
 // tracked on its OWN cooldown, entirely separate from ATTACK_COOLDOWN_MS, so raiding and
 // expeditioning never compete for the same turn. travel reuses travelTime() unmodified —
 // zones are just points with lon/lat, same as cities.
-const EXPEDITION_COOLDOWN_MS      = 45 * 60 * 1000;  // per player, independent of raid cooldown
+const EXPEDITION_COOLDOWN_MS = 6 * 60 * 60 * 1000;  // per player, independent of raid cooldown
 const EXPEDITION_TICK_MS          = 10 * 1000;       // live progress-bar edit cadence
 const EXPEDITION_WEAPON_MAX_TIER  = 5;               // like boss kills, expeditions can push past the armoury's shop cap (3)
 const EXPEDITION_DISASTER_CONSOLATION = 15;          // flat Dinar even on a Disaster — never a total wash
