@@ -43,6 +43,9 @@ const ARMOURY_MAX_TIER    = 3;                     // shop caps here; tiers 4–
 // cost to forge the NEXT tier from `tier`; doubles once you're past tier 2
 const armouryCost = (tier) => ARMOURY_BASE * (tier + 1) * (tier >= 2 ? 2 : 1);
 const upgCost = (track, lvl) => UPG_BASE[track] * (lvl + 1) * (lvl >= 3 ? 2 : 1);   // steeper past level 3
+// flavor names for weapon tiers — index matches p.weaponTier directly (0-5)
+const WEAPON_TIER_NAMES = ['Bare Hands', 'Rusted Blades', 'Tempered Steel', 'Desert Ironwork', "The Corsair's Edge", "The Kingmaker's Edge"];
+const weaponTierName = (tier) => WEAPON_TIER_NAMES[clamp(tier, 0, WEAPON_TIER_NAMES.length - 1)];
 
 // ─── Troop Transfer ───────────────────────────────────────────────────────────
 // moving garrison troops between your own cities — no Dinar cost, travel time is the cost.
@@ -60,31 +63,51 @@ const TRANSFER_TICK_MS       = 15 * 1000;       // live progress-bar edit cadenc
 // tracked on its OWN cooldown, entirely separate from ATTACK_COOLDOWN_MS, so raiding and
 // expeditioning never compete for the same turn. travel reuses travelTime() unmodified —
 // zones are just points with lon/lat, same as cities.
-const EXPEDITION_COOLDOWN_MS = 6 * 60 * 60 * 1000;  // per player, independent of raid cooldown
+const EXPEDITION_COOLDOWN_MS      = 6 * 60 * 60 * 1000;  // 6 hours, per player, independent of raid cooldown
 const EXPEDITION_TICK_MS          = 10 * 1000;       // live progress-bar edit cadence
 const EXPEDITION_WEAPON_MAX_TIER  = 5;               // like boss kills, expeditions can push past the armoury's shop cap (3)
 const EXPEDITION_DISASTER_CONSOLATION = 15;          // flat Dinar even on a Disaster — never a total wash
+// danger scales with how many troops you commit — the wilderness throws more at a bigger
+// force, not just a fixed amount. Without this, `power` grows linearly with `send` while
+// `danger` stays capped, so recruiting enough troops trivially guarantees a win regardless
+// of zone — cheap troops turning into a deterministic money+soldier grab. With it, the max
+// achievable ratio converges to a ceiling no matter how many troops you throw at it.
+const EXPEDITION_DANGER_SCALE     = 0.95;
+// The SAME logic applies to gear/upgrades, not just raw troop count: weaponTier and upg.mil
+// directly multiply `power` with nothing on the danger side responding, so a maxed-out
+// player could stack bonuses into a risk-free ride regardless of army size — expeditions
+// favoring whoever's already strongest, on top of raiding already doing that. This factor
+// makes danger scale up too, just at a slightly gentler rate than power does, so investment
+// still meaningfully improves your odds (a real reward for progressing) without ever
+// removing risk entirely — even a fully maxed veteran keeps a genuine chance of stumbling.
+const EXPEDITION_VETERAN_WEAPON_SCALE = 0.10;   // per weapon tier (power's own rate is 0.15)
+const EXPEDITION_VETERAN_MIL_SCALE    = 0.08;   // per military upgrade level (power's own rate is 0.12)
 
 // outcome tiers, checked in order (first ratio match wins) — casualties never reach 100%,
-// someone always makes it back with a story, same philosophy as raids and boss sieges
+// someone always makes it back with a story, same philosophy as raids and boss sieges.
+// Success pays out less than Great Success (0.65 vs full) so merely clearing 1.0 isn't as
+// good as a decisive win, and casualties bite harder across the board than a first draft —
+// this is meant to feel like a real gamble, not a grind you can force with numbers alone.
 const EXPEDITION_TIERS = [
-  { id: 'great',    label: '🏆 Great Success', minRatio: 1.6, cas: [0.05, 0.10], lootPct: 1.0, weaponRoll: true  },
-  { id: 'success',  label: '✅ Success',        minRatio: 1.0, cas: [0.15, 0.30], lootPct: 1.0, weaponRoll: true  },
-  { id: 'costly',   label: '⚠️ Costly Retreat', minRatio: 0.6, cas: [0.40, 0.55], lootPct: 0.4, weaponRoll: false },
-  { id: 'disaster', label: '💀 Disaster',       minRatio: 0,   cas: [0.60, 0.75], lootPct: 0,   weaponRoll: false },
+  { id: 'great',    label: '🏆 Great Success', minRatio: 1.6, cas: [0.08, 0.15], lootPct: 1.0,  weaponRoll: true  },
+  { id: 'success',  label: '✅ Success',        minRatio: 1.0, cas: [0.20, 0.35], lootPct: 0.65, weaponRoll: true  },
+  { id: 'costly',   label: '⚠️ Costly Retreat', minRatio: 0.6, cas: [0.45, 0.60], lootPct: 0.3,  weaponRoll: false },
+  { id: 'disaster', label: '💀 Disaster',       minRatio: 0,   cas: [0.65, 0.80], lootPct: 0,    weaponRoll: false },
 ];
 // (EXPEDITION_TIER_COLOR is defined further down, once COLOR itself exists)
 
 // six frontier zones spread across the empty space on the real map — riskier and richer the
 // further out they sit. Coordinates are real anchor points, so geography stays meaningful:
 // a southern empire has a natural edge reaching Fezzan/Kufra, a coastal one reaches Jifara/Nafusa cheaply.
+// Recruit ranges are cut harder than Dinar ranges — free troops skip the Dinar recruitment
+// sink entirely, so they're the bigger balance risk of the two rewards.
 const EXPEDITION_ZONES = [
-  { id: 'jifara', name: 'The Jifara Approach',    lon: 12.5, lat: 32.3, hint: '🟢 Low',      tag: 'Scrubland past the coastal farms',        dangerMin: 40,  dangerMax: 90,  weaponChance: 0.02, dinar: [40, 90],   recruits: [20, 45] },
-  { id: 'nafusa', name: 'The Nafusa Fringe',      lon: 11.5, lat: 31.3, hint: '🟡 Moderate', tag: 'Rocky foothills, occasional raiders',     dangerMin: 70,  dangerMax: 140, weaponChance: 0.05, dinar: [70, 140],  recruits: [30, 65] },
-  { id: 'sirte',  name: 'The Sirte Hinterland',   lon: 17.5, lat: 30.0, hint: '🟠 High',     tag: 'Empty coastal desert, old wartime wrecks', dangerMin: 130, dangerMax: 240, weaponChance: 0.09, dinar: [120, 220], recruits: [50, 100] },
-  { id: 'akhdar', name: 'The Jebel Akhdar Wilds', lon: 21.5, lat: 31.5, hint: '🟠 High',     tag: 'Green Mountain backcountry, bandit country', dangerMin: 160, dangerMax: 280, weaponChance: 0.13, dinar: [160, 280], recruits: [60, 120] },
-  { id: 'fezzan', name: 'The Fezzan Deep',        lon: 13.0, lat: 24.5, hint: '🔴 Severe',   tag: 'Deep desert, old caravan routes',          dangerMin: 240, dangerMax: 420, weaponChance: 0.18, dinar: [240, 420], recruits: [90, 170] },
-  { id: 'kufra',  name: 'The Kufra Depths',       lon: 23.0, lat: 22.5, hint: '⚫ Extreme',  tag: 'The far edge of the map',                  dangerMin: 340, dangerMax: 600, weaponChance: 0.25, dinar: [340, 600], recruits: [130, 240] },
+  { id: 'jifara', name: 'The Jifara Approach',    lon: 12.5, lat: 32.3, hint: '🟢 Low',      tag: 'Scrubland past the coastal farms',        dangerMin: 40,  dangerMax: 90,  weaponChance: 0.02, dinar: [35, 80],  recruits: [12, 28] },
+  { id: 'nafusa', name: 'The Nafusa Fringe',      lon: 11.5, lat: 31.3, hint: '🟡 Moderate', tag: 'Rocky foothills, occasional raiders',     dangerMin: 70,  dangerMax: 140, weaponChance: 0.05, dinar: [60, 125], recruits: [18, 40] },
+  { id: 'sirte',  name: 'The Sirte Hinterland',   lon: 17.5, lat: 30.0, hint: '🟠 High',     tag: 'Empty coastal desert, old wartime wrecks', dangerMin: 130, dangerMax: 240, weaponChance: 0.09, dinar: [105, 195], recruits: [30, 60] },
+  { id: 'akhdar', name: 'The Jebel Akhdar Wilds', lon: 21.5, lat: 31.5, hint: '🟠 High',     tag: 'Green Mountain backcountry, bandit country', dangerMin: 160, dangerMax: 280, weaponChance: 0.13, dinar: [140, 250], recruits: [36, 72] },
+  { id: 'fezzan', name: 'The Fezzan Deep',        lon: 13.0, lat: 24.5, hint: '🔴 Severe',   tag: 'Deep desert, old caravan routes',          dangerMin: 240, dangerMax: 420, weaponChance: 0.18, dinar: [210, 375], recruits: [54, 100] },
+  { id: 'kufra',  name: 'The Kufra Depths',       lon: 23.0, lat: 22.5, hint: '⚫ Extreme',  tag: 'The far edge of the map',                  dangerMin: 340, dangerMax: 600, weaponChance: 0.25, dinar: [300, 535], recruits: [78, 145] },
 ];
 const EXPEDITION_ZONE_BY_ID = Object.fromEntries(EXPEDITION_ZONES.map(z => [z.id, z]));
 function expeditionTier(ratio) {
@@ -295,11 +318,50 @@ function svgToPng(svg) {
 // ════════════════════════════════════════════════════════════════════════════
 //  IMAGE RENDERERS
 // ════════════════════════════════════════════════════════════════════════════
+// Small reusable badge shapes drawn on the public map — real vector paths, not text glyphs.
+// DejaVu Sans (the only font resvg has to work with) has no color-emoji glyphs, so a trophy
+// or flag written as text renders as a blank box; these are drawn instead, so they render
+// correctly regardless of font/emoji support.
+function capitalBadgeSvg(x, y) {
+  return `<g transform="translate(${x.toFixed(0)},${y.toFixed(0)})">
+    <line x1="0" y1="2" x2="0" y2="-11" stroke="#f5e9c8" stroke-width="1.4"/>
+    <polygon points="0,-11 9,-8 0,-5" fill="#e8c9a0" stroke="#6b5a3a" stroke-width="0.7"/>
+  </g>`;
+}
+function relicBadgeSvg(x, y, count) {
+  let s = `<g transform="translate(${x.toFixed(0)},${y.toFixed(0)})">
+    <polygon points="0,-9 2.6,-3 9,-3 3.8,1 5.6,8 0,4 -5.6,8 -3.8,1 -9,-3 -2.6,-3" fill="#f1c40f" stroke="#8a6d3b" stroke-width="0.8"/>`;
+  if (count > 1) s += `<circle cx="7" cy="-8" r="5.5" fill="#c0392b" stroke="#ffffff" stroke-width="0.8"/><text x="7" y="-5.3" font-size="7.5" fill="#ffffff" text-anchor="middle">${count}</text>`;
+  s += `</g>`;
+  return s;
+}
+function mvpBadgeSvg(x, y) {
+  return `<g transform="translate(${x.toFixed(0)},${y.toFixed(0)})">
+    <path d="M0,-8 L6,-5 L6,2 L0,8 L-6,2 L-6,-5 Z" fill="#95a5a6" stroke="#5c6366" stroke-width="0.8"/>
+  </g>`;
+}
+
 function renderMap(state, viewerId) {
   const W = MAP_W + MAP_PAD * 2;
   const poly = BORDER.map(([lo, la]) => `${projX(lo).toFixed(0)},${(projY(la) + 40).toFixed(0)}`).join(' ');
 
-  let mine = 0, rival = 0, neutral = 0, nodes = '';
+  // capital / relic / boss-MVP badge data — public map only, so the private "Your Realm"
+  // view stays focused on the simple you-vs-rivals coloring
+  const capitalCityIds = new Set();
+  const relicCounts = {};
+  let mvpCityId = null;
+  if (!viewerId) {
+    for (const p of Object.values(state.players)) if (p.capitalCityId) capitalCityIds.add(p.capitalCityId);
+    for (const rid of Object.keys(state.relics || {})) {
+      const holderId = state.relics[rid].holderId;
+      if (!holderId) continue;
+      const cap = getCapitalCity(state, holderId);
+      if (cap) relicCounts[cap.id] = (relicCounts[cap.id] || 0) + 1;
+    }
+    if (state.bossMvp) mvpCityId = getCapitalCity(state, state.bossMvp.userId)?.id || null;
+  }
+
+  let mine = 0, rival = 0, neutral = 0, nodes = '', badges = '';
   for (const c of CITY_DEFS) {
     const city = state.cities[c.id];
     const owner = city.ownerId ? state.players[city.ownerId] : null;
@@ -317,6 +379,18 @@ function renderMap(state, viewerId) {
     const lyy = (below ? y + r + 14 : y - r - 7) + (LABEL_DY[c.id] || 0);
     const lxx = x + (LABEL_DX[c.id] || 0);
     nodes += `<text x="${lxx.toFixed(0)}" y="${lyy.toFixed(0)}" font-size="14" fill="#f5e9c8" text-anchor="middle">${esc(c.name)}</text>`;
+
+    // stack any badges for this city just above-right of its dot
+    const cityBadges = [];
+    if (capitalCityIds.has(c.id)) cityBadges.push('capital');
+    if (relicCounts[c.id]) cityBadges.push(['relic', relicCounts[c.id]]);
+    if (mvpCityId === c.id) cityBadges.push('mvp');
+    cityBadges.forEach((b, i) => {
+      const bx = x + r + 6 + i * 15, by = y - r - 2;
+      if (b === 'capital') badges += capitalBadgeSvg(bx, by);
+      else if (b === 'mvp') badges += mvpBadgeSvg(bx, by);
+      else badges += relicBadgeSvg(bx, by, b[1]);
+    });
   }
 
   // legend — wraps onto stacked rows so many owners never run off the edge
@@ -328,6 +402,9 @@ function renderMap(state, viewerId) {
     const owners = Object.entries(state.players).map(([id, p]) => ({ p, n: p.cities.length }))
       .filter(o => o.n > 0).sort((a, b) => b.n - a.n);
     for (const o of owners.slice(0, 20)) items.push([o.p.color, `${o.p.name} (${o.n})`]);
+    if (capitalCityIds.size) items.push([null, 'Capital', capitalBadgeSvg]);
+    if (Object.keys(relicCounts).length) items.push([null, 'Relic', (x, y) => relicBadgeSvg(x, y, 1)]);
+    if (mvpCityId) items.push([null, 'Boss MVP', mvpBadgeSvg]);
   }
   const wOf = (label) => 34 + String(label).length * 7.8;
   const maxRowW = MAP_W - 8;
@@ -343,8 +420,10 @@ function renderMap(state, viewerId) {
   let legend = `<text x="${MAP_PAD}" y="30" font-size="20" fill="#f1c40f">${viewerId ? 'Diyar — Your Realm' : 'Diyar — Map of Libya'}</text>`;
   rows.forEach((row, ri) => {
     let lx = MAP_PAD; const ly = legendTopY + ri * rowH;
-    for (const [color, label] of row) {
-      legend += `<rect x="${lx}" y="${ly - 11}" width="13" height="13" rx="2" fill="${color}"/><text x="${lx + 18}" y="${ly}" font-size="13" fill="#cbd3da">${esc(label)}</text>`;
+    for (const [color, label, iconFn] of row) {
+      if (iconFn) legend += iconFn(lx + 6, ly - 1);
+      else legend += `<rect x="${lx}" y="${ly - 11}" width="13" height="13" rx="2" fill="${color}"/>`;
+      legend += `<text x="${lx + 18}" y="${ly}" font-size="13" fill="#cbd3da">${esc(label)}</text>`;
       lx += wOf(label);
     }
   });
@@ -353,6 +432,7 @@ function renderMap(state, viewerId) {
     <rect width="${W}" height="${H}" fill="#10243a"/>
     <polygon points="${poly}" fill="#cbb074" stroke="#8a6d3b" stroke-width="3"/>
     ${nodes}
+    ${badges}
     ${legend}
   </svg>`;
   return new AttachmentBuilder(svgToPng(svg), { name: 'diyar-map.png' });
@@ -416,8 +496,19 @@ function getState(db, guildId, saveData) {
   const data = db[guildId] || (db[guildId] = {});
   let dirty = false;
   if (!data.__diyar) {
-    data.__diyar = { players: {}, cities: {}, boss: null, bossSched: null, caravan: null, caravanSched: null, wanted: null, wantedSched: null, channelId: null };
+    data.__diyar = { players: {}, cities: {}, boss: null, bossSched: null, caravan: null, caravanSched: null, wanted: null, wantedSched: null, channelId: null,
+      hallOfFame: { seasons: [], records: {}, lifetime: {} } };
     dirty = true;
+  }
+  // backfill hallOfFame for guilds that started playing before it existed — deliberately NOT
+  // touched by resetSeason, so records and season history survive every wipe
+  if (!data.__diyar.hallOfFame) { data.__diyar.hallOfFame = { seasons: [], records: {}, lifetime: {} }; dirty = true; }
+  // seed (first run) or backfill (relics added later) the relic pool — all unclaimed at start
+  if (!data.__diyar.relics) {
+    data.__diyar.relics = Object.fromEntries(RELICS.map(r => [r.id, { holderId: null }]));
+    dirty = true;
+  } else {
+    for (const r of RELICS) if (!data.__diyar.relics[r.id]) { data.__diyar.relics[r.id] = { holderId: null }; dirty = true; }
   }
   // seed (first run) or backfill (new cities added later) any CITY_DEFS not yet in state
   for (const c of CITY_DEFS) {
@@ -458,7 +549,7 @@ function ensurePlayer(state, userId, name, saveData, guildId) {
   p = {
     name, color, cities: start ? [start.id] : [], army: STARTER_ARMY, weaponTier: 0,
     upg: { mil: 0, for: 0, eco: 0 }, shieldUntil: Date.now() + SHIELD_MS, lastAttackAt: 0,
-    lastStrikeAt: 0, joinedAt: Date.now(), lastTributeDay: '',
+    lastStrikeAt: 0, joinedAt: Date.now(), lastTributeDay: '', capitalCityId: start ? start.id : null,
     stats: { raidsWon: 0, raidsLost: 0, defended: 0, captured: 0, lost: 0, bossKills: 0, bossDmg: 0 },
   };
   if (start) { start.ownerId = userId; start.npc = false; start.garrison = 25; start.lastIncomeAt = Date.now(); }
@@ -475,11 +566,31 @@ function reseedIfLanded(state, userId) {
   const start = free[0];
   if (!start) return null;
   start.ownerId = userId; start.npc = false; start.garrison = 25; start.lastIncomeAt = Date.now();
-  p.cities.push(start.id); p.shieldUntil = Date.now() + SHIELD_MS;
+  p.cities.push(start.id); p.shieldUntil = Date.now() + SHIELD_MS; p.capitalCityId = start.id;
   return start;
 }
 
 const ownedCities = (state, userId) => state.players[userId]?.cities.map(id => state.cities[id]).filter(Boolean) || [];
+
+// resolves a player's capital city, self-healing if unset or lost — falls back to their
+// first currently-held city, so old saves (from before capitals existed) and capital-loss
+// both degrade gracefully instead of the map/relics having nothing to point to
+function getCapitalCity(state, userId) {
+  const p = state.players[userId];
+  if (!p) return null;
+  if (p.capitalCityId && state.cities[p.capitalCityId]?.ownerId === userId) return state.cities[p.capitalCityId];
+  const fallback = ownedCities(state, userId)[0] || null;
+  p.capitalCityId = fallback ? fallback.id : null;   // self-heal for next lookup
+  return fallback;
+}
+
+// records a new "biggest ever" entry if it beats the current one. Lives in
+// state.hallOfFame.records, which resetSeason() never touches, so these survive every wipe.
+function maybeRecordHighScore(state, key, value, entry) {
+  const hof = state.hallOfFame; if (!hof) return;
+  const cur = hof.records[key];
+  if (!cur || value > cur.value) hof.records[key] = { value, ...entry, at: Date.now() };
+}
 
 function playerStrength(state, p) {
   if (!p) return 0;
@@ -492,7 +603,8 @@ const findId = (state, p) => Object.keys(state.players).find(id => state.players
 function pendingIncome(state, city) {
   if (!city.ownerId) return 0;
   const owner = state.players[city.ownerId];
-  const rate = INCOME_BY_LEVEL[city.level] * (1 + (owner ? owner.upg.eco * 0.12 : 0)); // per hour
+  const relicBonus = relicBonusPct(state, city.ownerId, 'income');
+  const rate = INCOME_BY_LEVEL[city.level] * (1 + (owner ? owner.upg.eco * 0.12 : 0) + relicBonus); // per hour
   const hrs = clamp((Date.now() - city.lastIncomeAt) / 3600000, 0, INCOME_CAP_HRS);
   return Math.floor(rate * hrs);
 }
@@ -629,13 +741,19 @@ function startExpedition(state, saveData, guildId, userId, fromCityId, zoneId, p
 
 // resolve a returning expedition against its zone's danger roll; casualties never reach
 // 100% (someone always makes it back), loot and a shot at a top-tier weapon scale with
-// how decisively the expedition won — same tiered-outcome shape as the boss loot table
+// how decisively the expedition won — same tiered-outcome shape as the boss loot table.
+// Danger scales with BOTH how many troops were sent (EXPEDITION_DANGER_SCALE) and how
+// geared/upgraded the player is (EXPEDITION_VETERAN_*_SCALE) — the same two things that
+// inflate `power` also inflate `danger`, just at a gentler rate, so neither raw numbers nor
+// stacked progression alone can make the outcome certain. A real gamble at any army size or
+// power level, not a threshold anyone can brute-force past.
 function resolveExpedition(state, db, guildId, saveData, exp) {
   const p = state.players[exp.playerId];
   if (!p) return null;
   const zone = EXPEDITION_ZONE_BY_ID[exp.zoneId];
-  const power = exp.send * (1 + p.weaponTier * 0.15 + p.upg.mil * 0.12) * rnd(0.85, 1.15);
-  const danger = randInt(zone.dangerMin, zone.dangerMax);
+  const power = exp.send * (1 + p.weaponTier * 0.15 + p.upg.mil * 0.12) * rnd(0.75, 1.25);
+  const veteranFactor = 1 + p.weaponTier * EXPEDITION_VETERAN_WEAPON_SCALE + p.upg.mil * EXPEDITION_VETERAN_MIL_SCALE;
+  const danger = (randInt(zone.dangerMin, zone.dangerMax) + exp.send * EXPEDITION_DANGER_SCALE) * veteranFactor;
   const ratio = power / danger;
   const tier = expeditionTier(ratio);
   const cas = Math.round(exp.send * rnd(tier.cas[0], tier.cas[1]));
@@ -655,14 +773,23 @@ function resolveExpedition(state, db, guildId, saveData, exp) {
   if (dinar > 0) awardDinar(db, guildId, exp.playerId, dinar, saveData);
   if (recruits > 0) p.army += recruits;
 
+  // a shot at a relic — only the deepest, most dangerous zones, only on a decisive win,
+  // and still a small roll even then. These are meant to be rare finds, not routine loot.
+  let relic = null;
+  if (tier.id === 'great' && RELIC_EXPEDITION_ZONES.includes(exp.zoneId) && Math.random() < RELIC_EXPEDITION_CHANCE) {
+    const rid = unclaimedRelicId(state);
+    if (rid) relic = grantRelic(state, exp.playerId, rid);
+  }
+
   p.stats = p.stats || {};
   p.stats.expeditions = (p.stats.expeditions || 0) + 1;
   if (tier.id === 'great' || tier.id === 'success') p.stats.expeditionWins = (p.stats.expeditionWins || 0) + 1;
+  if (dinar > 0) maybeRecordHighScore(state, 'biggestExpeditionHaul', dinar, { name: p.name, zoneName: zone.name });
 
   saveData(guildId);
   return {
     ...exp, tier: tier.id, tierLabel: tier.label, power: Math.round(power), danger,
-    cas, survivors, dinar, recruits, weapon, newWeaponTier: p.weaponTier,
+    cas, survivors, dinar, recruits, weapon, newWeaponTier: p.weaponTier, relic,
   };
 }
 
@@ -705,13 +832,15 @@ function buyWeapon(state, db, guildId, saveData, userId) {
 // the dropdown, the confirm and the result all agree instead of the old raw-garrison number
 function effectiveDefence(state, city, reinforceMult) {
   const owner = city.ownerId ? state.players[city.ownerId] : null;
-  const dMultBase = 1 + (owner ? owner.upg.for * 0.15 : 0) + city.level * 0.1;
+  const relicBonus = relicBonusPct(state, city.ownerId, 'defense');
+  const dMultBase = 1 + (owner ? owner.upg.for * 0.15 : 0) + city.level * 0.1 + relicBonus;
   const lastStand = (owner && owner.cities.length === 1) ? 1.5 : 1.0;
   return Math.round((city.garrison * dMultBase * lastStand + city.level * 8) * (reinforceMult || 1));
 }
-// the real attack strength of a force (troops + weapon tier + military upgrades)
-function effectiveAttack(attacker, send) {
-  return Math.round(send * (1 + attacker.weaponTier * 0.15 + attacker.upg.mil * 0.12));
+// the real attack strength of a force (troops + weapon tier + military upgrades + attack relics)
+function effectiveAttack(state, attacker, attackerId, send) {
+  const relicBonus = relicBonusPct(state, attackerId, 'attack');
+  return Math.round(send * (1 + attacker.weaponTier * 0.15 + attacker.upg.mil * 0.12 + relicBonus));
 }
 
 // validate a raid and lock the committed troops; returns {error} or {pending}
@@ -756,9 +885,9 @@ function resolveRaid(state, db, guildId, saveData, pending, reinforceMult) {
   const garrisonBefore = city.garrison;
   const rMult = reinforceMult || 1;
 
-  const aMult = 1 + attacker.weaponTier * 0.15 + attacker.upg.mil * 0.12;
+  const aMult = 1 + attacker.weaponTier * 0.15 + attacker.upg.mil * 0.12 + relicBonusPct(state, pending.attackerId, 'attack');
   const aPow = send * aMult * rnd(0.85, 1.15);
-  const dMultBase = 1 + (owner ? owner.upg.for * 0.15 : 0) + city.level * 0.1;
+  const dMultBase = 1 + (owner ? owner.upg.for * 0.15 : 0) + city.level * 0.1 + relicBonusPct(state, city.ownerId, 'defense');
   const lastStand = (owner && owner.cities.length === 1) ? 1.5 : 1.0;
   const dPow = (city.garrison * dMultBase * lastStand + city.level * 8) * rMult * rnd(0.85, 1.15);
   const win = aPow > dPow;
@@ -767,7 +896,7 @@ function resolveRaid(state, db, guildId, saveData, pending, reinforceMult) {
     attackerId: pending.attackerId, attackerName: pending.attackerName, cityId: city.id, cityName: city.name,
     defenderId: city.ownerId, defenderName: owner ? owner.name : (pending.defenderName || null),
     send, win, reinforced: rMult > 1,
-    defShown: effectiveDefence(state, city, rMult), atkShown: effectiveAttack(attacker, send),
+    defShown: effectiveDefence(state, city, rMult), atkShown: effectiveAttack(state, attacker, pending.attackerId, send),
     cas: 0, survivors: 0, stolen: 0, captured: false,
   };
 
@@ -778,12 +907,30 @@ function resolveRaid(state, db, guildId, saveData, pending, reinforceMult) {
     awardDinar(db, guildId, pending.attackerId, stolen, saveData);
     result.stolen = stolen;
     if (owner) { owner.cities = owner.cities.filter(id => id !== city.id); owner.stats.lost++; }
+    // if this was the defender's CAPITAL specifically, any relics they hold transfer with
+    // it — the map marker IS the target, so taking the marked city is what it takes to
+    // take the relic. Losing any other city never touches a relic.
+    if (owner && owner.capitalCityId === city.id && state.relics) {
+      const stolenRelics = [];
+      for (const rid of Object.keys(state.relics)) {
+        if (state.relics[rid].holderId === result.defenderId) {
+          state.relics[rid].holderId = pending.attackerId;
+          stolenRelics.push(RELIC_BY_ID[rid].name);
+        }
+      }
+      if (stolenRelics.length) result.relicsStolen = stolenRelics;
+    }
     city.ownerId = pending.attackerId; city.npc = false;
     attacker.cities.push(city.id);
+    if (!attacker.capitalCityId || state.cities[attacker.capitalCityId]?.ownerId !== pending.attackerId) {
+      attacker.capitalCityId = city.id;   // no valid capital left (landless, or lost it) — this conquest becomes the new seat of power
+    }
     const g = Math.round(survivors * 0.35);
     city.garrison = g; survivors -= g; city.lastIncomeAt = now;
     attacker.stats.captured++; result.captured = true;
     result.defLoss = garrisonBefore;   // defender lost the whole garrison with the city
+    maybeRecordHighScore(state, 'biggestConquest', garrisonBefore, { name: attacker.name, cityName: city.name });
+    maybeRecordHighScore(state, 'mostCitiesEver', attacker.cities.length, { name: attacker.name });
     attacker.army += survivors;
     attacker.stats.raidsWon++;
     result.cas = cas; result.survivors = survivors;
@@ -815,7 +962,7 @@ const raidBar = (val, max) => { const n = Math.max(0, Math.min(12, Math.round(va
 function raidLiveEmbed(state, raid, secsLeft) {
   const city = state.cities[raid.cityId];
   const attacker = state.players[raid.attackerId] || { weaponTier: 0, upg: { mil: 0 } };
-  const aPow = effectiveAttack(attacker, raid.send);
+  const aPow = effectiveAttack(state, attacker, raid.attackerId, raid.send);
   const dPow = effectiveDefence(state, city, raid.reinforced ? REINFORCE_MULT : 1);
   // who's winning the clash, and by how much (-1 defender-dominant … +1 attacker-dominant)
   const margin = (aPow - dPow) / Math.max(1, aPow + dPow);
@@ -847,6 +994,9 @@ function raidResultEmbed(r) {
   const subtitle = won
     ? (r.captured ? `**${r.attackerName}** captured **${r.cityName}**!` : `**${r.attackerName}** raided **${r.cityName}** and pulled back.`)
     : `**${r.defenderName || 'The militia'}** held **${r.cityName}**!`;
+  const relicLine = r.relicsStolen?.length
+    ? `\n\n✨ **${esc(r.cityName)}** was a capital — ${r.relicsStolen.map(n => `**${esc(n)}**`).join(', ')} passed to **${r.attackerName}**!`
+    : '';
   const atkField = [
     `Troops sent: **${fmt(r.send)}**`,
     `Attack power: **${fmt(r.atkShown)}**`,
@@ -863,7 +1013,7 @@ function raidResultEmbed(r) {
   return new EmbedBuilder()
     .setColor(won ? COLOR.green : COLOR.red)
     .setTitle(title)
-    .setDescription(subtitle)
+    .setDescription(subtitle + relicLine)
     .addFields(
       { name: `⚔ Attacker · ${r.attackerName}`, value: atkField, inline: true },
       { name: `🛡 Defender · ${r.defenderName || 'Militia'}`, value: defField, inline: true },
@@ -922,7 +1072,8 @@ function expeditionResultEmbed(r) {
   ];
   if (r.dinar > 0) lines.push(`💰 Found **${fmt(r.dinar)}** Dinar`);
   if (r.recruits > 0) lines.push(`🪖 **${fmt(r.recruits)}** recruits joined on the way back`);
-  if (r.weapon) lines.push(`🗡 A cache of arms! Weapon tier now **${r.newWeaponTier}**`);
+  if (r.weapon) lines.push(`🗡 A cache of arms! Weapon now **${weaponTierName(r.newWeaponTier)}** (tier ${r.newWeaponTier})`);
+  if (r.relic) lines.push(`✨ **A RELIC!** ${esc(r.playerName)} unearthed **${esc(r.relic.name)}** — *${esc(r.relic.tag)}*. It now flies over their capital for all to see.`);
   return new EmbedBuilder().setColor(EXPEDITION_TIER_COLOR[r.tier])
     .setTitle(`${r.tierLabel} — ${esc(zone.name)}`)
     .setDescription(`**${esc(r.playerName)}**'s expedition into **${esc(zone.name)}** returns.\n\n${lines.join('\n')}` + inviteLine());
@@ -971,11 +1122,13 @@ function threatStrikeRow() {
 }
 
 function threatDefeatEmbed(state, b, rewards) {
-  const lines = rewards.slice(0, 5).map((w, i) => `${['🥇','🥈','🥉'][i] || `**${i + 1}.**`} ${esc(w.name)} — ${fmt(w.dmg)} dmg → +${fmt(w.dinar)}💰${w.lp ? ` +${w.lp}LP` : ''}${w.weapon ? ' 🗡 weapon up!' : ''}`);
+  const lines = rewards.slice(0, 5).map((w, i) => `${['🥇','🥈','🥉'][i] || `**${i + 1}.**`} ${esc(w.name)} — ${fmt(w.dmg)} dmg → +${fmt(w.dinar)}💰${w.lp ? ` +${w.lp}LP` : ''}${w.weapon ? ` 🗡 now wielding **${weaponTierName(w.newWeaponTier)}**!` : ''}`);
   const siege = (b.targets || []).filter(t => t.dmg > 0)
     .map(t => `🏙 ${esc(state.cities[t.cityId]?.name || t.cityId)} — lost **${fmt(t.dmg)}** troops to the siege`).join('\n');
+  const mvpLine = rewards[0] ? `\n\n🏅 **${esc(rewards[0].name)}**'s banner now flies over their capital on the map — until the next threat rises.` : '';
+  const relicLine = rewards[0]?.relic ? `\n\n✨ **A RELIC!** ${esc(rewards[0].name)} claimed **${esc(rewards[0].relic.name)}** — *${esc(rewards[0].relic.tag)}*. It now shows over their capital too.` : '';
   return new EmbedBuilder().setColor(COLOR.green).setTitle(`💀 ${b.name} — DEFEATED`)
-    .setDescription(`The realm rallied and struck it down!\n\n**Spoils**\n${lines.join('\n') || '—'}${siege ? `\n\n**Siege toll**\n${siege}` : ''}${inviteLine()}`);
+    .setDescription(`The realm rallied and struck it down!\n\n**Spoils**\n${lines.join('\n') || '—'}${mvpLine}${relicLine}${siege ? `\n\n**Siege toll**\n${siege}` : ''}${inviteLine()}`);
 }
 
 function threatWithdrawEmbed(res) {
@@ -1005,6 +1158,7 @@ function isTopRanked(state, playerId, n = MATCH_BAND_EXEMPT_RANK) {
 
 function spawnBoss(state, saveData, guildId) {
   if (state.boss) return null;
+  state.bossMvp = null;   // clear the last kill's MVP marker — a fresh siege means a fresh contest
   const def = BOSS_DEFS[Math.floor(Math.random() * BOSS_DEFS.length)];
   const ranked = rankPlayers(state);
   const taken = new Set();
@@ -1084,14 +1238,21 @@ function resolveBossDefeat(state, db, guildId, saveData) {
   // still feel it (top-to-bottom ~3.5× gap rather than 6×+). Tune these four values freely.
   ranked.forEach(([uid, dmg], i) => {
     const p = state.players[uid]; if (!p) return;
-    let dinar = 0, lp = 0, weapon = false;
-    if (i === 0)      { dinar = 350; lp = 22; weapon = p.weaponTier < 5; p.stats.bossKills++; }
+    let dinar = 0, lp = 0, weapon = false, relic = null;
+    if (i === 0) {
+      dinar = 350; lp = 22; weapon = p.weaponTier < 5; p.stats.bossKills++;
+      state.bossMvp = { userId: uid, name: p.name, setAt: Date.now() };   // shows on the public map until the next threat spawns
+      if (Math.random() < RELIC_BOSS_MVP_CHANCE) {
+        const rid = unclaimedRelicId(state);
+        if (rid) relic = grantRelic(state, uid, rid);
+      }
+    }
     else if (i === 1) { dinar = 220; lp = 15; }
     else if (i === 2) { dinar = 130; lp = 10; }
     else              { dinar = 60;  lp = 5;  }
     if (weapon) p.weaponTier++;
     awardDinar(db, guildId, uid, dinar, saveData);
-    rewards.push({ uid, name: p.name, dmg, dinar, lp, weapon });
+    rewards.push({ uid, name: p.name, dmg, dinar, lp, weapon, newWeaponTier: p.weaponTier, relic });
   });
   state.boss = null;
   if (saveData) saveData(guildId);
@@ -1267,7 +1428,7 @@ function caravanFinalEmbed(c) {
     const r = c.result;
     const short = r.loss < c.roll.guard
       ? `\n\n*They had barely enough men to press the attack — only **${fmt(r.loss)}** rode out, and none came back.*` : '';
-    const prize = r.weapon ? `\n🗡 Seized weapons — **weapon tier ${r.tier}**!` : '';
+    const prize = r.weapon ? `\n🗡 Seized weapons — now wielding **${weaponTierName(r.tier)}** (tier ${r.tier})!` : '';
     return new EmbedBuilder().setColor(r.repelled ? COLOR.grey : COLOR.red)
       .setTitle(r.repelled ? `🛡 ${esc(c.name)} — escort held` : `🗡️ ${esc(c.name)} — plundered`)
       .setDescription(
@@ -1304,6 +1465,55 @@ function ensureCaravanSched(state, saveData, guildId, nowMs) {
     if (saveData) saveData(guildId);
   }
   return state.caravanSched;
+}
+
+// ─── Relics ─────────────────────────────────────────────────────────────────
+// unique, one-of-a-kind items — only one instance of each ever exists at a time. Found
+// through the highest-risk content (a deep-frontier Expedition, or being #1 on a boss kill),
+// shown permanently on the PUBLIC map over the holder's capital city, and transferred
+// automatically to whoever captures that specific capital in a raid. The marker itself is
+// the target — knowing where a relic sits is knowing exactly which city to go take it from.
+const RELICS = [
+  { id: 'corsair_standard', name: "The Corsair's Standard", tag: 'Raised over the ports the corsairs once ruled',      bonus: 'attack',  pct: 0.05 },
+  { id: 'fezzan_crown',     name: 'The Fezzan Crown',        tag: 'Said to have crowned desert kings',                  bonus: 'income',  pct: 0.10 },
+  { id: 'warlord_seal',     name: "The Warlord's Seal",      tag: 'Sealed the pacts of a warlord long dead',            bonus: 'defense', pct: 0.06 },
+  { id: 'kingmaker_blade',  name: "The Kingmaker's Blade",   tag: 'Every ruler who held it, held Libya',                bonus: 'attack',  pct: 0.08 },
+  { id: 'oasis_scepter',    name: 'The Oasis Scepter',       tag: 'Carried water and command in the same hand',        bonus: 'income',  pct: 0.15 },
+  { id: 'iron_diadem',      name: 'The Iron Diadem',         tag: "Forged from a caravan's broken chains",             bonus: 'defense', pct: 0.08 },
+];
+const RELIC_BY_ID = Object.fromEntries(RELICS.map(r => [r.id, r]));
+// a relic is found from the deepest/riskiest expedition zones and top boss damage — always
+// low-percentage, since these are meant to be rare, not a routine drop
+const RELIC_EXPEDITION_ZONES = ['fezzan', 'kufra'];
+const RELIC_EXPEDITION_CHANCE = 0.04;   // per Great Success roll, deepest two zones only
+const RELIC_BOSS_MVP_CHANCE = 0.08;     // per boss kill, #1 damage dealer only
+
+// total % bonus of a given type currently held by a player, summed across every relic they
+// hold (multiple relics of the same bonus type stack additively)
+function relicBonusPct(state, userId, bonusType) {
+  if (!state.relics || !userId) return 0;
+  let total = 0;
+  for (const rid of Object.keys(state.relics)) {
+    if (state.relics[rid].holderId === userId) {
+      const def = RELIC_BY_ID[rid];
+      if (def && def.bonus === bonusType) total += def.pct;
+    }
+  }
+  return total;
+}
+// picks a random relic nobody currently holds, or null if every relic is already claimed
+function unclaimedRelicId(state) {
+  if (!state.relics) return null;
+  const free = Object.keys(state.relics).filter(rid => !state.relics[rid].holderId);
+  return free.length ? free[Math.floor(Math.random() * free.length)] : null;
+}
+// grants a relic to a player, attaching it to their capital — the city that shows the
+// marker on the public map and the one a rival needs to capture to take it back
+function grantRelic(state, userId, relicId) {
+  if (!state.relics || !state.relics[relicId]) return null;
+  state.relics[relicId].holderId = userId;
+  getCapitalCity(state, userId);   // make sure capitalCityId is resolved/self-healed before this shows on the map
+  return RELIC_BY_ID[relicId];
 }
 
 
@@ -1505,7 +1715,7 @@ function dashboard(state, db, guildId, userId) {
     .setDescription(
       `**${cities.length}** cit${cities.length === 1 ? 'y' : 'ies'} • **${fmt(dinar)}** Dinar\n` +
       `🪖 Army: **${fmt(p.army)}**  •  🏰 Garrisons: **${fmt(garr)}**\n` +
-      `🗡 Weapon tier **${p.weaponTier}**  •  Military **${p.upg.mil}** / Walls **${p.upg.for}** / Economy **${p.upg.eco}**\n` +
+      `🗡 Weapon: **${weaponTierName(p.weaponTier)}** (tier ${p.weaponTier})  •  Military **${p.upg.mil}** / Walls **${p.upg.for}** / Economy **${p.upg.eco}**\n` +
       `💰 Uncollected income: **${fmt(income)}**${shield}` + boss + cvn + wtd + expLine)
     .setFooter({ text: 'Raids steal Dinar from rivals • capture cities to grow • Expeditions put idle army to work' });
   const row2 = new ActionRowBuilder().addComponents(
@@ -1517,6 +1727,7 @@ function dashboard(state, db, guildId, userId) {
   );
   const row3 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('dy:profile').setLabel('📜 Profile').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('dy:halloffame').setLabel('📖 Hall of Fame').setStyle(ButtonStyle.Secondary),
     ...(state.boss ? [new ButtonBuilder().setCustomId('dy:boss').setLabel('👹 Boss').setStyle(ButtonStyle.Danger)] : []),
   );
   return { embeds: [embed], components: [navButtons(), row2, row3] };
@@ -1582,11 +1793,11 @@ function armouryView(state, db, guildId, userId) {
   const embed = new EmbedBuilder().setColor(COLOR.gold).setTitle('🗡 Armoury')
     .setDescription(
       `Dinar: **${fmt(dinar)}**\n\n` +
-      `Current weapon: **tier ${p.weaponTier}** (${bonus(p.weaponTier)})\n\n` +
+      `Current weapon: **${weaponTierName(p.weaponTier)}** — tier ${p.weaponTier} (${bonus(p.weaponTier)})\n\n` +
       (atShopMax
-        ? `The smiths have done all they can — **tiers ${ARMOURY_MAX_TIER + 1}–5** are forged only from the spoils of slain bosses.`
-        : `Forge **tier ${p.weaponTier + 1}** (${bonus(p.weaponTier + 1)}) for **${fmt(cost)}💰**.`))
-    .setFooter({ text: 'Better weapons raise both raid power and boss damage' });
+        ? `The smiths have done all they can — **${weaponTierName(4)}** and **${weaponTierName(5)}** (tiers 4–5) are only won from slain bosses or the deepest frontier expeditions.`
+        : `Forge **${weaponTierName(p.weaponTier + 1)}** — tier ${p.weaponTier + 1} (${bonus(p.weaponTier + 1)}) for **${fmt(cost)}💰**.`))
+    .setFooter({ text: 'Better weapons raise both raid power and boss/expedition damage' });
   const buy = new ButtonBuilder().setCustomId('dy:buyweapon')
     .setLabel(atShopMax ? `Maxed (tier ${ARMOURY_MAX_TIER})` : `Forge tier ${p.weaponTier + 1} (${fmt(cost)}💰)`)
     .setStyle(ButtonStyle.Success).setDisabled(atShopMax || dinar < cost);
@@ -1915,12 +2126,14 @@ function profileView(state, db, guildId, userId) {
   const cityLines = cities.map(c =>
     `🏙 **${esc(c.name)}** (L${c.level})${underRaid.has(c.id) ? ' ⚔ *under attack!*' : ''} — 🛡 ${fmt(c.garrison)}/${fmt(GARRISON_CAP)} • 💰 ${fmt(Math.round(INCOME_BY_LEVEL[c.level] * ecoMult))}/hr • def power **${fmt(effectiveDefence(state, c))}**`
   ).join('\n') || '*Landless — raid a city to claim a home.*';
+  const myRelics = Object.keys(state.relics || {}).filter(rid => state.relics[rid].holderId === userId).map(rid => RELIC_BY_ID[rid]);
+  const relicsLine = myRelics.length ? `\n\n**✨ Relics (${myRelics.length})**\n${myRelics.map(r => `${esc(r.name)} — +${Math.round(r.pct * 100)}% ${r.bonus}`).join('\n')}` : '';
   const embed = new EmbedBuilder().setColor(COLOR.gold).setTitle(`📜 ${p.name} — War Record`)
     .setDescription(
       `Rank **#${rank}** of ${ranked.length}  •  **${fmt(str)}** power\n\n` +
       `**💰 Wealth**\nDinar **${fmt(dinar)}**  •  income **${fmt(Math.round(incomeHr))}/hr**  •  uncollected **${fmt(Math.floor(pending))}**  •  collect ${collectStr}\n\n` +
-      `**🪖 Military**\nArmy **${fmt(p.army)}** in reserve  •  🗡 weapon tier **${p.weaponTier}**  •  troop cost **${unit}💰** each\n` +
-      `Upgrades: ⚔ Military **${p.upg.mil}**/${UPG_MAX}  •  🧱 Fortifications **${p.upg.for}**/${UPG_MAX}  •  💰 Economy **${p.upg.eco}**/${UPG_MAX}\n\n` +
+      `**🪖 Military**\nArmy **${fmt(p.army)}** in reserve  •  🗡 weapon **${weaponTierName(p.weaponTier)}** (tier ${p.weaponTier})  •  troop cost **${unit}💰** each\n` +
+      `Upgrades: ⚔ Military **${p.upg.mil}**/${UPG_MAX}  •  🧱 Fortifications **${p.upg.for}**/${UPG_MAX}  •  💰 Economy **${p.upg.eco}**/${UPG_MAX}${relicsLine}\n\n` +
       `**🏙 Cities (${cities.length})**\n${cityLines}\n\n` +
       `**⚔ War Record**\nRaids **${s.raidsWon}W / ${s.raidsLost}L** (${winRate}% win rate)  •  🛡 **${s.defended}** defended\n` +
       `🏰 Captured **${s.captured}**  •  lost **${s.lost}**\n` +
@@ -1932,9 +2145,44 @@ function profileView(state, db, guildId, userId) {
   return { embeds: [embed], components: [backRow()] };
 }
 
+// records here survive every /diyar-reset — the one thing a season wipe can't erase
+function hallOfFameView(state) {
+  const hof = state.hallOfFame;
+  const seasons = hof.seasons.slice(-5).reverse();
+  const seasonLines = seasons.map(s => `**Season ${s.season}** — ${esc(s.winnerName)} (${s.winnerCities} cities, ${fmt(s.winnerStrength)} power)`);
+  const champs = Object.values(hof.lifetime).sort((a, b) => b.seasonsWon - a.seasonsWon).slice(0, 5);
+  const champLines = champs.map((c, i) => `${['🥇', '🥈', '🥉'][i] || `${i + 1}.`} ${esc(c.name)} — **${c.seasonsWon}** season${c.seasonsWon === 1 ? '' : 's'} won`);
+  const r = hof.records;
+  const recLines = [];
+  if (r.mostCitiesEver) recLines.push(`🏰 Most cities held at once: **${esc(r.mostCitiesEver.name)}** — **${r.mostCitiesEver.value}**`);
+  if (r.biggestConquest) recLines.push(`⚔ Biggest conquest: **${esc(r.biggestConquest.name)}** — shattered **${fmt(r.biggestConquest.value)}** troops taking **${esc(r.biggestConquest.cityName)}**`);
+  if (r.biggestExpeditionHaul) recLines.push(`🏜 Biggest expedition haul: **${esc(r.biggestExpeditionHaul.name)}** — **${fmt(r.biggestExpeditionHaul.value)}** Dinar from **${esc(r.biggestExpeditionHaul.zoneName)}**`);
+  const embed = new EmbedBuilder().setColor(COLOR.gold).setTitle('📖 Hall of Fame')
+    .setDescription(
+      `*A season reset can wipe the map — it can't touch this.*\n\n` +
+      `**🏆 Champions**\n${champLines.join('\n') || '*No seasons completed yet.*'}\n\n` +
+      `**📜 Season History**\n${seasonLines.join('\n') || '*No seasons completed yet.*'}\n\n` +
+      `**🌟 All-Time Records**\n${recLines.join('\n') || '*Nothing recorded yet — go make history.*'}`);
+  return { embeds: [embed], components: [backRow()] };
+}
+
 // wipe a season: clears players/boss/schedule, reseeds the map; keeps the home channel.
 // Player Dinar balances live in the shared economy and are intentionally NOT touched.
 function resetSeason(state, saveData, guildId) {
+  // snapshot the season's champion into the Hall of Fame BEFORE wiping — this is the one
+  // thing a reset should never be able to erase. hallOfFame itself is untouched below.
+  const ranked = rankPlayers(state);
+  if (ranked.length) {
+    const champ = ranked[0];
+    const hof = state.hallOfFame;
+    hof.seasons.push({
+      season: hof.seasons.length + 1, endedAt: Date.now(),
+      winnerName: champ.p.name, winnerCities: champ.c, winnerStrength: champ.str,
+    });
+    hof.lifetime[champ.id] = hof.lifetime[champ.id] || { name: champ.p.name, seasonsWon: 0 };
+    hof.lifetime[champ.id].name = champ.p.name;   // keep the display name current
+    hof.lifetime[champ.id].seasonsWon++;
+  }
   const keepChannel = state.channelId;
   state.players = {};
   state.boss = null;
@@ -1943,6 +2191,8 @@ function resetSeason(state, saveData, guildId) {
   state.caravanSched = null;
   state.wanted = null;
   state.wantedSched = null;
+  state.bossMvp = null;
+  if (state.relics) for (const rid of Object.keys(state.relics)) state.relics[rid].holderId = null;   // a new season, nobody's earned them yet
   state.channelId = keepChannel;
   for (const c of CITY_DEFS) {
     state.cities[c.id] = {
@@ -2664,6 +2914,7 @@ function initDiyar({ client, db, saveData, awardLP }) {
       if (action === 'reinforce')   return interaction.update(reinforceSelect(state, uid));
       if (action === 'leaderboard') return interaction.update(leaderboard(state, uid));
       if (action === 'profile')     return interaction.update(profileView(state, db, gid, uid));
+      if (action === 'halloffame')  return interaction.update(hallOfFameView(state));
       if (action === 'boss')        return interaction.update(bossView(state));
 
       if (action === 'map') {
@@ -2815,6 +3066,8 @@ function initDiyar({ client, db, saveData, awardLP }) {
       claimTribute, buyWeapon, armouryView, profileView, leaderboard, resetSeason, targetSelect, reinforceSelect, effectiveDefence, effectiveAttack, startRaid, resolveRaid, troopCost, raidLiveEmbed, raidResultEmbed, threatTick, finishThreat, inviteLine, postNudge, threatDefeatEmbed, threatWithdrawEmbed, strikeBoss,
       travelTime, startTransfer, resolveTransfer, transferFromSelect, transferToSelect, transferAmount, transferLiveEmbed, transferArrivedEmbed, moveBar, launchTransfer, finishTransfer, transferTick, cityView,
       startExpedition, resolveExpedition, expeditionTier, expeditionCitySelect, expeditionZoneSelect, expeditionAmount, expeditionLiveEmbed, expeditionResultEmbed, expeditionBar, launchExpedition, finishExpedition, expeditionTick, dashboard, navButtons, profileView,
+      maybeRecordHighScore, hallOfFameView, getCapitalCity,
+      relicBonusPct, unclaimedRelicId, grantRelic, RELICS, RELIC_BY_ID,
     },
   };
 }
