@@ -72,7 +72,10 @@ const EXPEDITION_DISASTER_CONSOLATION = 15;          // flat Dinar even on a Dis
 // `danger` stays capped, so recruiting enough troops trivially guarantees a win regardless
 // of zone — cheap troops turning into a deterministic money+soldier grab. With it, the max
 // achievable ratio converges to a ceiling no matter how many troops you throw at it.
-const EXPEDITION_DANGER_SCALE     = 0.95;
+// (0.85 specifically: low enough that even a zero-progression player's ceiling clears the
+// Great Success threshold at real investment — earlier values as high as 0.95 made Great
+// Success mathematically unreachable for a fresh player at ANY army size, not just rare.)
+const EXPEDITION_DANGER_SCALE     = 0.85;
 // The SAME logic applies to gear/upgrades, not just raw troop count: weaponTier and upg.mil
 // directly multiply `power` with nothing on the danger side responding, so a maxed-out
 // player could stack bonuses into a risk-free ride regardless of army size — expeditions
@@ -80,8 +83,8 @@ const EXPEDITION_DANGER_SCALE     = 0.95;
 // makes danger scale up too, just at a slightly gentler rate than power does, so investment
 // still meaningfully improves your odds (a real reward for progressing) without ever
 // removing risk entirely — even a fully maxed veteran keeps a genuine chance of stumbling.
-const EXPEDITION_VETERAN_WEAPON_SCALE = 0.10;   // per weapon tier (power's own rate is 0.15)
-const EXPEDITION_VETERAN_MIL_SCALE    = 0.08;   // per military upgrade level (power's own rate is 0.12)
+const EXPEDITION_VETERAN_WEAPON_SCALE = 0.07;   // per weapon tier (power's own rate is 0.15)
+const EXPEDITION_VETERAN_MIL_SCALE    = 0.06;   // per military upgrade level (power's own rate is 0.12)
 
 // outcome tiers, checked in order (first ratio match wins) — casualties never reach 100%,
 // someone always makes it back with a story, same philosophy as raids and boss sieges.
@@ -89,7 +92,7 @@ const EXPEDITION_VETERAN_MIL_SCALE    = 0.08;   // per military upgrade level (p
 // good as a decisive win, and casualties bite harder across the board than a first draft —
 // this is meant to feel like a real gamble, not a grind you can force with numbers alone.
 const EXPEDITION_TIERS = [
-  { id: 'great',    label: '🏆 Great Success', minRatio: 1.6, cas: [0.08, 0.15], lootPct: 1.0,  weaponRoll: true  },
+  { id: 'great',    label: '🏆 Great Success', minRatio: 1.3, cas: [0.08, 0.15], lootPct: 1.0,  weaponRoll: true  },
   { id: 'success',  label: '✅ Success',        minRatio: 1.0, cas: [0.20, 0.35], lootPct: 0.65, weaponRoll: true  },
   { id: 'costly',   label: '⚠️ Costly Retreat', minRatio: 0.6, cas: [0.45, 0.60], lootPct: 0.3,  weaponRoll: false },
   { id: 'disaster', label: '💀 Disaster',       minRatio: 0,   cas: [0.65, 0.80], lootPct: 0,    weaponRoll: false },
