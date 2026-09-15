@@ -85,6 +85,18 @@ const EXPEDITION_DANGER_SCALE     = 0.85;
 // removing risk entirely — even a fully maxed veteran keeps a genuine chance of stumbling.
 const EXPEDITION_VETERAN_WEAPON_SCALE = 0.07;   // per weapon tier (power's own rate is 0.15)
 const EXPEDITION_VETERAN_MIL_SCALE    = 0.06;   // per military upgrade level (power's own rate is 0.12)
+// the zone.dinar/recruits ranges below are a FLAT roll — they don't scale with how many
+// troops you send. Casualties, though, are a % of `send`, so a big expedition (which is
+// the normal case once a player has any real army — committing your whole reserve is the
+// only way to launch one) loses troops in numbers the flat roll was never sized for, and a
+// "Great Success" can still net out as a loss once you price the dead troops in at
+// troopCost(). This rate fixes that: winning tiers additionally pay out Dinar proportional
+// to `send` (and to the player's own troopCost, so bigger empires — who pay more per
+// recruit — get proportionally more back too), scaled by zone.richness so deeper zones
+// stay more lucrative per troop, same relative ladder the old flat ranges implied. Costly
+// Retreat and Disaster deliberately do NOT get this bonus — they should stay a real loss
+// regardless of zone or army size; only the flat roll applies there, same as before.
+const EXPEDITION_ARMY_REWARD_RATE     = 0.5;
 
 // outcome tiers, checked in order (first ratio match wins) — casualties never reach 100%,
 // someone always makes it back with a story, same philosophy as raids and boss sieges.
@@ -104,13 +116,17 @@ const EXPEDITION_TIERS = [
 // a southern empire has a natural edge reaching Fezzan/Kufra, a coastal one reaches Jifara/Nafusa cheaply.
 // Recruit ranges are cut harder than Dinar ranges — free troops skip the Dinar recruitment
 // sink entirely, so they're the bigger balance risk of the two rewards.
+// `richness` sets each zone's share of the army-scaled reward (EXPEDITION_ARMY_REWARD_RATE)
+// on top of the flat dinar/recruits roll — it mirrors the ratio the flat dinar ranges
+// already implied (jifara = 1x baseline, kufra ≈ 7.3x), so deeper zones stay proportionally
+// more lucrative per troop sent, same ladder as before.
 const EXPEDITION_ZONES = [
-  { id: 'jifara', name: 'The Jifara Approach',    lon: 12.5, lat: 32.3, hint: '🟢 Low',      tag: 'Scrubland past the coastal farms',        dangerMin: 40,  dangerMax: 90,  weaponChance: 0.02, dinar: [35, 80],  recruits: [12, 28] },
-  { id: 'nafusa', name: 'The Nafusa Fringe',      lon: 11.5, lat: 31.3, hint: '🟡 Moderate', tag: 'Rocky foothills, occasional raiders',     dangerMin: 70,  dangerMax: 140, weaponChance: 0.05, dinar: [60, 125], recruits: [18, 40] },
-  { id: 'sirte',  name: 'The Sirte Hinterland',   lon: 17.5, lat: 30.0, hint: '🟠 High',     tag: 'Empty coastal desert, old wartime wrecks', dangerMin: 130, dangerMax: 240, weaponChance: 0.09, dinar: [105, 195], recruits: [30, 60] },
-  { id: 'akhdar', name: 'The Jebel Akhdar Wilds', lon: 21.5, lat: 31.5, hint: '🟠 High',     tag: 'Green Mountain backcountry, bandit country', dangerMin: 160, dangerMax: 280, weaponChance: 0.13, dinar: [140, 250], recruits: [36, 72] },
-  { id: 'fezzan', name: 'The Fezzan Deep',        lon: 13.0, lat: 24.5, hint: '🔴 Severe',   tag: 'Deep desert, old caravan routes',          dangerMin: 240, dangerMax: 420, weaponChance: 0.18, dinar: [210, 375], recruits: [54, 100] },
-  { id: 'kufra',  name: 'The Kufra Depths',       lon: 23.0, lat: 22.5, hint: '⚫ Extreme',  tag: 'The far edge of the map',                  dangerMin: 340, dangerMax: 600, weaponChance: 0.25, dinar: [300, 535], recruits: [78, 145] },
+  { id: 'jifara', name: 'The Jifara Approach',    lon: 12.5, lat: 32.3, hint: '🟢 Low',      tag: 'Scrubland past the coastal farms',        dangerMin: 40,  dangerMax: 90,  weaponChance: 0.02, dinar: [35, 80],  recruits: [12, 28], richness: 1.0 },
+  { id: 'nafusa', name: 'The Nafusa Fringe',      lon: 11.5, lat: 31.3, hint: '🟡 Moderate', tag: 'Rocky foothills, occasional raiders',     dangerMin: 70,  dangerMax: 140, weaponChance: 0.05, dinar: [60, 125], recruits: [18, 40], richness: 1.6 },
+  { id: 'sirte',  name: 'The Sirte Hinterland',   lon: 17.5, lat: 30.0, hint: '🟠 High',     tag: 'Empty coastal desert, old wartime wrecks', dangerMin: 130, dangerMax: 240, weaponChance: 0.09, dinar: [105, 195], recruits: [30, 60], richness: 2.6 },
+  { id: 'akhdar', name: 'The Jebel Akhdar Wilds', lon: 21.5, lat: 31.5, hint: '🟠 High',     tag: 'Green Mountain backcountry, bandit country', dangerMin: 160, dangerMax: 280, weaponChance: 0.13, dinar: [140, 250], recruits: [36, 72], richness: 3.4 },
+  { id: 'fezzan', name: 'The Fezzan Deep',        lon: 13.0, lat: 24.5, hint: '🔴 Severe',   tag: 'Deep desert, old caravan routes',          dangerMin: 240, dangerMax: 420, weaponChance: 0.18, dinar: [210, 375], recruits: [54, 100], richness: 5.1 },
+  { id: 'kufra',  name: 'The Kufra Depths',       lon: 23.0, lat: 22.5, hint: '⚫ Extreme',  tag: 'The far edge of the map',                  dangerMin: 340, dangerMax: 600, weaponChance: 0.25, dinar: [300, 535], recruits: [78, 145], richness: 7.3 },
 ];
 const EXPEDITION_ZONE_BY_ID = Object.fromEntries(EXPEDITION_ZONES.map(z => [z.id, z]));
 function expeditionTier(ratio) {
@@ -765,7 +781,17 @@ function resolveExpedition(state, db, guildId, saveData, exp) {
 
   let dinar = 0, recruits = 0, weapon = false;
   if (tier.lootPct > 0) {
-    dinar = Math.round(randInt(zone.dinar[0], zone.dinar[1]) * tier.lootPct);
+    // flat zone roll, same as always — small, doesn't scale with send
+    const baseFind = randInt(zone.dinar[0], zone.dinar[1]);
+    // on a real win, add a Dinar bonus proportional to the army actually committed (and to
+    // the player's own troopCost, so the payout tracks what those troops actually cost to
+    // replace) — this is what keeps a "Great Success" from netting out as a loss once
+    // casualties are priced in. Costly Retreat and Disaster never get this: they're
+    // supposed to hurt regardless of zone or army size.
+    const armyBonus = (tier.id === 'great' || tier.id === 'success')
+      ? zone.richness * EXPEDITION_ARMY_REWARD_RATE * troopCost(state, exp.playerId) * exp.send
+      : 0;
+    dinar = Math.round((baseFind + armyBonus) * tier.lootPct);
     recruits = Math.round(randInt(zone.recruits[0], zone.recruits[1]) * tier.lootPct);
     if (tier.weaponRoll && p.weaponTier < EXPEDITION_WEAPON_MAX_TIER && Math.random() < zone.weaponChance) {
       p.weaponTier++; weapon = true;
