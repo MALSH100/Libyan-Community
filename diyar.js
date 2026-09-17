@@ -83,8 +83,15 @@ const EXPEDITION_DANGER_SCALE     = 0.85;
 // makes danger scale up too, just at a slightly gentler rate than power does, so investment
 // still meaningfully improves your odds (a real reward for progressing) without ever
 // removing risk entirely — even a fully maxed veteran keeps a genuine chance of stumbling.
-const EXPEDITION_VETERAN_WEAPON_SCALE = 0.07;   // per weapon tier (power's own rate is 0.15)
-const EXPEDITION_VETERAN_MIL_SCALE    = 0.06;   // per military upgrade level (power's own rate is 0.12)
+// Recalibrated from 0.07/0.06: at those rates a fully maxed player's WORST possible roll
+// still cleared the Great Success cutoff — i.e. zero chance of ever landing outside the top
+// tier, contradicting the "genuine chance of stumbling" this factor exists for, and (via
+// EXPEDITION_GREAT_MULTIPLIER's payout scaling with army size) letting maxed players out-earn
+// their own city income from expeditions alone. At 0.11/0.095 a maxed veteran still clears
+// Great on a good roll, but a bad one now genuinely lands in Costly Retreat. Only matters at
+// nonzero weaponTier/upg.mil, so this has zero effect on players without that investment yet.
+const EXPEDITION_VETERAN_WEAPON_SCALE = 0.11;   // per weapon tier (power's own rate is 0.15)
+const EXPEDITION_VETERAN_MIL_SCALE    = 0.095;  // per military upgrade level (power's own rate is 0.12)
 // the zone.dinar/recruits ranges below are a FLAT roll — they don't scale with how many
 // troops you send. Casualties, though, are a % of `send`, so a big expedition (which is
 // the normal case once a player has any real army — committing your whole reserve is the
