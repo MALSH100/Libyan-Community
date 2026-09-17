@@ -791,8 +791,12 @@ function resolveExpedition(state, db, guildId, saveData, exp) {
     // size sent, so it can't spiral the way a `send`-based bonus did. Costly Retreat and
     // Disaster never get this: they should stay a real loss regardless of zone or army size.
     const lossValue = cas * troopCost(state, exp.playerId);
+    // richness only sweetens the GREAT payout (a decisive win in a deep zone deserves the
+    // premium) — Success stays a flat, modest margin everywhere. Success x richness was
+    // how a middling win in Fezzan/Kufra ended up paying out near the cost of a top-tier
+    // upgrade despite losing well over a third of the force sent.
     const winBonus = tier.id === 'great'   ? lossValue * EXPEDITION_GREAT_MULTIPLIER * zone.richness
-                    : tier.id === 'success' ? lossValue * EXPEDITION_SUCCESS_MULTIPLIER * zone.richness
+                    : tier.id === 'success' ? lossValue * EXPEDITION_SUCCESS_MULTIPLIER
                     : 0;
     dinar = Math.round(baseFind + winBonus);
     recruits = Math.round(randInt(zone.recruits[0], zone.recruits[1]) * tier.lootPct);
