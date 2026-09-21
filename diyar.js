@@ -107,6 +107,18 @@ const EXPEDITION_VETERAN_MIL_SCALE    = 0.095;  // per military upgrade level (p
 // of zone or army size; only the flat roll (or flat consolation) applies there.
 const EXPEDITION_GREAT_MULTIPLIER     = 2.0;    // Great Success pays ~2x the cost of troops actually lost
 const EXPEDITION_SUCCESS_MULTIPLIER   = 1.1;    // Success pays just above break-even on troops actually lost
+// `cas` (troops actually lost) feeds the win bonus above — fine for a normal army, but once
+// someone snowballs into the thousands, cas scales right along with it and the bonus becomes
+// uncapped free money for having a big number, not for taking a real risk. Below the softcap
+// nothing changes (a normal player never sees this). Above it, each additional troop lost
+// pays out less than the last — bigger armies still earn more, just with real diminishing
+// returns instead of a straight line to infinity.
+const EXPEDITION_CASUALTY_SOFTCAP     = 300;
+const EXPEDITION_CASUALTY_SOFTCAP_EXP = 0.8;
+function expeditionEffectiveCas(cas) {
+  if (cas <= EXPEDITION_CASUALTY_SOFTCAP) return cas;
+  return EXPEDITION_CASUALTY_SOFTCAP + Math.pow(cas - EXPEDITION_CASUALTY_SOFTCAP, EXPEDITION_CASUALTY_SOFTCAP_EXP);
+}
 
 // outcome tiers, checked in order (first ratio match wins) — casualties never reach 100%,
 // someone always makes it back with a story, same philosophy as raids and boss sieges.
@@ -797,7 +809,7 @@ function resolveExpedition(state, db, guildId, saveData, exp) {
     // (`cas`) would cost to replace — bounded by a real number instead of the raw army
     // size sent, so it can't spiral the way a `send`-based bonus did. Costly Retreat and
     // Disaster never get this: they should stay a real loss regardless of zone or army size.
-    const lossValue = cas * troopCost(state, exp.playerId);
+    const lossValue = expeditionEffectiveCas(cas) * troopCost(state, exp.playerId);
     // richness only sweetens the GREAT payout (a decisive win in a deep zone deserves the
     // premium) — Success stays a flat, modest margin everywhere. Success x richness was
     // how a middling win in Fezzan/Kufra ended up paying out near the cost of a top-tier
