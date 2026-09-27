@@ -603,6 +603,16 @@ function getState(db, guildId, saveData) {
       walls: {}, recent: [], recentAt: null, log: [], totals: {},
     };
     dirty = true;
+  } else {
+    // migrate/backfill individual fields on an oilRig object that already existed before this
+    // property was added or renamed — e.g. saves from before the Checkpoint -> Defensive Wall
+    // rename only have the old `checkpoints` field, not `walls`
+    const rig = data.__diyar.oilRig;
+    if (!rig.walls) { rig.walls = rig.checkpoints || {}; delete rig.checkpoints; dirty = true; }
+    if (!Array.isArray(rig.recent)) { rig.recent = []; dirty = true; }
+    if (!rig.totals || typeof rig.totals !== 'object') { rig.totals = {}; dirty = true; }
+    if (!Array.isArray(rig.log)) { rig.log = []; dirty = true; }
+    if (typeof rig.incomeCarry !== 'number') { rig.incomeCarry = 0; dirty = true; }
   }
   // seed (first run) or backfill (relics added later) the relic pool — all unclaimed at start
   if (!data.__diyar.relics) {
