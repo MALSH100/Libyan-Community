@@ -92,6 +92,24 @@ const EXPEDITION_DANGER_SCALE     = 0.85;
 // nonzero weaponTier/upg.mil, so this has zero effect on players without that investment yet.
 const EXPEDITION_VETERAN_WEAPON_SCALE = 0.11;   // per weapon tier (power's own rate is 0.15)
 const EXPEDITION_VETERAN_MIL_SCALE    = 0.095;  // per military upgrade level (power's own rate is 0.12)
+// Previously the ONLY randomness on the danger side was the zone's flat randInt() roll —
+// fine for a small send, but once `send` is in the thousands that flat roll is a rounding
+// error next to `send * EXPEDITION_DANGER_SCALE`, so danger becomes near-deterministic at
+// scale while `power` still gets the full rnd(0.75, 1.25) swing every time. That asymmetry
+// is what let big armies win almost every run regardless of zone. This roll restores real,
+// proportional variance to the troop-scaled part of danger itself, at any army size.
+const EXPEDITION_DANGER_ROLL_MIN  = 0.8;
+const EXPEDITION_DANGER_ROLL_MAX  = 1.3;
+// A second, separate source of luck: a rare chance the expedition stumbles into real
+// trouble no matter how good the odds looked on paper — a big column is harder to hide
+// than a small scouting party, so the chance rises with how many troops were sent, capped
+// so it never becomes a near-certainty even for the biggest possible send. It multiplies
+// danger rather than forcing a specific tier, so a strong enough ratio can still shrug it
+// off (e.g. Great -> Success) — it's a real gut-punch chance, not an auto-loss switch.
+const EXPEDITION_AMBUSH_CHANCE_CAP    = 0.25;    // hard ceiling, even for a massive send
+const EXPEDITION_AMBUSH_SEND_DIVISOR  = 20000;   // chance = min(cap, send / this)
+const EXPEDITION_AMBUSH_MULT_MIN      = 1.4;
+const EXPEDITION_AMBUSH_MULT_MAX      = 2.0;
 // the zone.dinar/recruits ranges below are a FLAT roll — they don't scale with how many
 // troops you send. Casualties, though, are a % of `send`, so a big expedition (which is
 // the normal case once a player has any real army — committing your whole reserve is the
@@ -794,7 +812,17 @@ function resolveExpedition(state, db, guildId, saveData, exp) {
   const zone = EXPEDITION_ZONE_BY_ID[exp.zoneId];
   const power = exp.send * (1 + p.weaponTier * 0.15 + p.upg.mil * 0.12) * rnd(0.75, 1.25);
   const veteranFactor = 1 + p.weaponTier * EXPEDITION_VETERAN_WEAPON_SCALE + p.upg.mil * EXPEDITION_VETERAN_MIL_SCALE;
-  const danger = (randInt(zone.dangerMin, zone.dangerMax) + exp.send * EXPEDITION_DANGER_SCALE) * veteranFactor;
+  // the troop-scaled term now carries its own roll (see EXPEDITION_DANGER_ROLL_* above) so
+  // it keeps real proportional variance at any send size, instead of the fixed zone roll
+  // being the only source of luck and getting diluted away once `send` is large.
+  let danger = (randInt(zone.dangerMin, zone.dangerMax) + exp.send * EXPEDITION_DANGER_SCALE * rnd(EXPEDITION_DANGER_ROLL_MIN, EXPEDITION_DANGER_ROLL_MAX)) * veteranFactor;
+  // ambush: a rare, send-scaled chance of real trouble regardless of how good the ratio
+  // looked going in — bigger columns draw more attention. Capped so it's never a near-sure
+  // thing even for the largest possible send; multiplies danger rather than forcing a
+  // specific outcome, so a strong enough force can still shrug it off.
+  const ambushChance = Math.min(EXPEDITION_AMBUSH_CHANCE_CAP, exp.send / EXPEDITION_AMBUSH_SEND_DIVISOR);
+  const ambushed = Math.random() < ambushChance;
+  if (ambushed) danger *= rnd(EXPEDITION_AMBUSH_MULT_MIN, EXPEDITION_AMBUSH_MULT_MAX);
   const ratio = power / danger;
   const tier = expeditionTier(ratio);
   const cas = Math.round(exp.send * rnd(tier.cas[0], tier.cas[1]));
@@ -844,7 +872,7 @@ function resolveExpedition(state, db, guildId, saveData, exp) {
   saveData(guildId);
   return {
     ...exp, tier: tier.id, tierLabel: tier.label, power: Math.round(power), danger,
-    cas, survivors, dinar, recruits, weapon, newWeaponTier: p.weaponTier, relic,
+    cas, survivors, dinar, recruits, weapon, newWeaponTier: p.weaponTier, relic, ambushed,
   };
 }
 
@@ -1123,8 +1151,9 @@ function expeditionResultEmbed(r) {
   const zone = EXPEDITION_ZONE_BY_ID[r.zoneId];
   const lines = [
     `Power **${fmt(r.power)}** vs danger **${fmt(r.danger)}**`,
-    `Troops lost: **${fmt(r.cas)}**  •  Returned: **${fmt(r.survivors)}**`,
   ];
+  if (r.ambushed) lines.push(`⚔️ **Ambushed!** Bandits fell on the column mid-journey, driving danger up.`);
+  lines.push(`Troops lost: **${fmt(r.cas)}**  •  Returned: **${fmt(r.survivors)}**`);
   if (r.dinar > 0) lines.push(`💰 Found **${fmt(r.dinar)}** Dinar`);
   if (r.recruits > 0) lines.push(`🪖 **${fmt(r.recruits)}** recruits joined on the way back`);
   if (r.weapon) lines.push(`🗡 A cache of arms! Weapon now **${weaponTierName(r.newWeaponTier)}** (tier ${r.newWeaponTier})`);
