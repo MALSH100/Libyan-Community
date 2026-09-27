@@ -257,14 +257,14 @@ const RISK_WORDS  = ['unlikely to hold', 'may hold', 'likely to hold'];
 // ─── The Oil Rig (King of the Hill) ────────────────────────────────────────
 // a single, permanent, always-contestable objective — deliberately NOT another
 // power-comparison system like raids/expeditions. The fight for it is a blind
-// direction guess against up to 2 hidden checkpoints, so a small player has
+// direction guess against up to 2 hidden defensive walls, so a small player has
 // genuinely the same odds as a whale on any single attempt. What separates
 // players here is patience and attention, not army size — which is the point.
 const OILRIG_NAME              = 'The Sarir Rig';
 const OILRIG_CAPTURE_COST      = 200;   // troops committed the instant you attempt a capture (no recall)
-const OILRIG_LOSS_REFUND       = 0.5;   // share of OILRIG_CAPTURE_COST that makes it home if you guess a checkpointed direction
-const OILRIG_CHECKPOINT_COST   = 100;   // troops spent, permanently, to stand up one checkpoint
-const OILRIG_CHECKPOINT_MAX    = 2;     // the holder can never cover more than half the compass
+const OILRIG_LOSS_REFUND       = 0.5;   // share of OILRIG_CAPTURE_COST that makes it home if you guess a walled direction
+const OILRIG_WALL_COST   = 100;   // troops spent, permanently, to stand up one defensive wall
+const OILRIG_WALL_MAX    = 2;     // the holder can never cover more than half the compass
 const OILRIG_DIRECTIONS        = ['north', 'south', 'east', 'west'];
 const OILRIG_DIRECTION_EMOJI   = { north: '⬆️', south: '⬇️', east: '➡️', west: '⬅️' };
 // income decays the longer one player sits on it — holding it forever stops
@@ -355,7 +355,7 @@ function playerColor(i) {
 const NEUTRAL = '#7f8c8d';
 const COL_YOU   = '#3498db';   // your own cities on your private map (blue)
 const COL_RIVAL = '#e74c3c';   // rival cities on your private map (red)
-const COLOR   = { gold: 0xf1c40f, green: 0x2ecc71, red: 0xe74c3c, blue: 0x3498db, grey: 0x95a5a6, oil: 0x1c1c1c };
+const COLOR   = { gold: 0xf1c40f, green: 0x2ecc71, red: 0xe74c3c, blue: 0x3498db, grey: 0x95a5a6, blurple: 0x5865f2 };
 // Look for the font in the likely spots: repo root (where it currently lives),
 // a fonts/ subfolder, and the working directory. First match wins.
 const FONT_CANDIDATES = [
@@ -600,7 +600,7 @@ function getState(db, guildId, saveData) {
   if (!data.__diyar.oilRig) {
     data.__diyar.oilRig = {
       holderId: null, holderName: null, capturedAt: null, lastPayoutAt: null, incomeCarry: 0,
-      checkpoints: {}, recent: [], recentAt: null, log: [], totals: {},
+      walls: {}, recent: [], recentAt: null, log: [], totals: {},
     };
     dirty = true;
   }
@@ -1013,9 +1013,9 @@ function oilRigPushLog(rig, entry) {
   if (rig.log.length > OILRIG_LOG_MAX) rig.log.length = OILRIG_LOG_MAX;
 }
 
-// resolve a capture attempt: a blind direction guess against the holder's hidden checkpoints.
+// resolve a capture attempt: a blind direction guess against the holder's hidden defensive walls.
 // No power comparison anywhere in this — the only thing that decides it is which direction
-// got picked, so it's an equal coin-flip-per-checkpoint regardless of army size on either side.
+// got picked, so it's an equal coin-flip-per-wall regardless of army size on either side.
 function attemptOilRigCapture(state, db, guildId, saveData, userId, direction) {
   const p = state.players[userId];
   const rig = state.oilRig;
@@ -1028,15 +1028,15 @@ function attemptOilRigCapture(state, db, guildId, saveData, userId, direction) {
   if (p.army < OILRIG_CAPTURE_COST) return { error: `You need at least **${OILRIG_CAPTURE_COST}** troops in reserve to attempt this.` };
   p.army -= OILRIG_CAPTURE_COST;   // committed the instant you move — same rule as every other action here
 
-  const blocked = !!rig.checkpoints[direction];
+  const blocked = !!rig.walls[direction];
   if (blocked) {
-    delete rig.checkpoints[direction];   // destroyed either way — the holder must rebuild to defend that way again
+    delete rig.walls[direction];   // destroyed either way — the holder must rebuild to defend that way again
     const survivors = Math.round(OILRIG_CAPTURE_COST * OILRIG_LOSS_REFUND);
     p.army += survivors;
     oilRigTrackLoser(rig, userId, now);
     oilRigPushLog(rig, { at: now, result: 'blocked', direction, attackerName: p.name, holderName: rig.holderName });
     saveData(guildId);
-    return { blocked: true, direction, cas: OILRIG_CAPTURE_COST - survivors, survivors, holderName: rig.holderName };
+    return { blocked: true, direction, cas: OILRIG_CAPTURE_COST - survivors, survivors, holderId: rig.holderId, holderName: rig.holderName };
   }
 
   // clear — settle the outgoing holder's final Dinar, log their finished reign, then hand over
@@ -1050,27 +1050,27 @@ function attemptOilRigCapture(state, db, guildId, saveData, userId, direction) {
     maybeRecordHighScore(state, 'longestOilRigReign', heldMs, { name: prevHolderName });
   }
   rig.holderId = userId; rig.holderName = p.name; rig.capturedAt = now; rig.lastPayoutAt = now; rig.incomeCarry = 0;
-  rig.checkpoints = {};
+  rig.walls = {};
   rig.recent = []; rig.recentAt = null;   // a clean slate — old grudges don't carry into the new reign
   oilRigPushLog(rig, { at: now, result: 'captured', direction, attackerName: p.name, prevHolderName });
   saveData(guildId);
   return { captured: true, direction, prevHolderId, prevHolderName };
 }
 
-function buildOilRigCheckpoint(state, saveData, guildId, userId, direction) {
+function buildOilRigWall(state, saveData, guildId, userId, direction) {
   const p = state.players[userId];
   const rig = state.oilRig;
   if (!p || !rig) return { error: 'Not found.' };
   if (rig.holderId !== userId) return { error: 'You don\'t hold the rig.' };
   if (!OILRIG_DIRECTIONS.includes(direction)) return { error: 'Pick a direction.' };
-  if (rig.checkpoints[direction]) return { error: 'That direction is already checkpointed.' };
-  if (Object.keys(rig.checkpoints).length >= OILRIG_CHECKPOINT_MAX)
-    return { error: `You already have the maximum of **${OILRIG_CHECKPOINT_MAX}** checkpoints up.` };
-  if (p.army < OILRIG_CHECKPOINT_COST) return { error: `You need **${OILRIG_CHECKPOINT_COST}** troops in reserve to build a checkpoint.` };
-  p.army -= OILRIG_CHECKPOINT_COST;
-  rig.checkpoints[direction] = true;
+  if (rig.walls[direction]) return { error: 'That direction already has a defensive wall up.' };
+  if (Object.keys(rig.walls).length >= OILRIG_WALL_MAX)
+    return { error: `You already have the maximum of **${OILRIG_WALL_MAX}** defensive walls up.` };
+  if (p.army < OILRIG_WALL_COST) return { error: `You need **${OILRIG_WALL_COST}** troops in reserve to build a defensive wall.` };
+  p.army -= OILRIG_WALL_COST;
+  rig.walls[direction] = true;
   saveData(guildId);
-  return { ok: true, direction, count: Object.keys(rig.checkpoints).length };
+  return { ok: true, direction, count: Object.keys(rig.walls).length };
 }
 
 // returns {error} or a full battle result for rendering
@@ -1933,7 +1933,7 @@ function msLeft(ts) {
 
 function navButtons() {
   return new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('dy:map').setLabel('🗺 Map').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('dy:map').setLabel('🗺 Map').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('dy:city').setLabel('🏰 My Cities').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('dy:attack').setLabel('⚔ Attack').setStyle(ButtonStyle.Danger),
     new ButtonBuilder().setCustomId('dy:army').setLabel('🪖 Army').setStyle(ButtonStyle.Secondary),
@@ -1959,11 +1959,11 @@ function dashboard(state, db, guildId, userId) {
   const expLine = myExp ? `\n\n🏜 Your expedition returns from **${esc(myExp.zoneName)}** in **${msLeft(myExp.endsAt)}**.` : '';
   const rig = state.oilRig;
   let rigLine;
-  if (!rig.holderId) rigLine = `\n\n🛢 **${OILRIG_NAME}** sits unclaimed — first to seize it starts earning immediately!`;
-  else if (rig.holderId === userId) rigLine = `\n\n🛢 You hold **${OILRIG_NAME}** — **${fmtDuration(Date.now() - rig.capturedAt)}** and counting.`;
+  if (!rig.holderId) rigLine = `\n\n👑 Nobody is **King of the Hill** yet — **${OILRIG_NAME}** sits unclaimed, first to seize it starts earning immediately!`;
+  else if (rig.holderId === userId) rigLine = `\n\n👑 You're **King of the Hill** — holding **${OILRIG_NAME}** for **${fmtDuration(Date.now() - rig.capturedAt)}** and counting.`;
   else {
     const free = Date.now() >= oilRigLockUntil(rig, userId);
-    rigLine = `\n\n🛢 **${esc(rig.holderName)}** holds **${OILRIG_NAME}** (${fmtDuration(Date.now() - rig.capturedAt)})${free ? " — you're free to make a move!" : ''}`;
+    rigLine = `\n\n👑 **${esc(rig.holderName)}** is King of the Hill, holding **${OILRIG_NAME}** (${fmtDuration(Date.now() - rig.capturedAt)})${free ? " — you're free to make a move!" : ''}`;
   }
   const embed = new EmbedBuilder().setColor(COLOR.gold)
     .setTitle(`⚔ Diyar — ${p.name}`)
@@ -1974,7 +1974,7 @@ function dashboard(state, db, guildId, userId) {
       `💰 Uncollected income: **${fmt(income)}**${shield}` + boss + cvn + wtd + expLine + rigLine)
     .setFooter({ text: 'Raids steal Dinar from rivals • capture cities to grow • Expeditions put idle army to work' });
   const row2 = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('dy:upgrade').setLabel('⬆ Upgrades').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('dy:upgrade').setLabel('⬆ Upgrades').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('dy:armoury').setLabel('🗡 Armoury').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('dy:reinforce').setLabel('🛡 Reinforce').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('dy:leaderboard').setLabel('🏆 Ranks').setStyle(ButtonStyle.Secondary),
@@ -1983,7 +1983,7 @@ function dashboard(state, db, guildId, userId) {
   const row3 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('dy:profile').setLabel('📜 Profile').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('dy:halloffame').setLabel('📖 Hall of Fame').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('dy:oilrig').setLabel('🛢 Oil Rig').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('dy:oilrig').setLabel('👑 King of the Hill').setStyle(ButtonStyle.Primary),
     ...(state.boss ? [new ButtonBuilder().setCustomId('dy:boss').setLabel('👹 Boss').setStyle(ButtonStyle.Danger)] : []),
   );
   return { embeds: [embed], components: [navButtons(), row2, row3] };
@@ -2065,7 +2065,7 @@ function oilRigView(state, userId) {
   const rig = state.oilRig;
   const now = Date.now();
   const isHolder = rig.holderId === userId;
-  const cpCount = Object.keys(rig.checkpoints).length;
+  const wallCount = Object.keys(rig.walls).length;
 
   let statusLines;
   if (!rig.holderId) {
@@ -2078,15 +2078,15 @@ function oilRigView(state, userId) {
     statusLines = [
       `👑 Held by **${esc(rig.holderName)}**${isHolder ? ' (you)' : ''} — **${fmtDuration(now - rig.capturedAt)}** and counting.`,
       `💰 Paying **${rate}** Dinar/hour${decayNote}`,
-      `🚧 Checkpoints up: **${cpCount}/${OILRIG_CHECKPOINT_MAX}**`,
+      `🧱 Defensive Walls up: **${wallCount}/${OILRIG_WALL_MAX}**`,
     ];
   }
 
   let actionLine;
   if (isHolder) {
-    actionLine = cpCount >= OILRIG_CHECKPOINT_MAX
-      ? `Both checkpoints are up — you're as covered as you can be.`
-      : `You can still stand up ${OILRIG_CHECKPOINT_MAX - cpCount} more checkpoint${OILRIG_CHECKPOINT_MAX - cpCount === 1 ? '' : 's'}.`;
+    actionLine = wallCount >= OILRIG_WALL_MAX
+      ? `Both defensive walls are up — you're as covered as you can be.`
+      : `You can still stand up ${OILRIG_WALL_MAX - wallCount} more defensive wall${OILRIG_WALL_MAX - wallCount === 1 ? '' : 's'}.`;
   } else {
     const lockUntil = oilRigLockUntil(rig, userId);
     actionLine = now < lockUntil
@@ -2094,18 +2094,18 @@ function oilRigView(state, userId) {
       : `✅ You're free to attempt a capture right now.`;
   }
 
-  const embed = new EmbedBuilder().setColor(COLOR.oil).setTitle(`🛢 ${OILRIG_NAME}`)
+  const embed = new EmbedBuilder().setColor(COLOR.blurple).setTitle('👑 King of the Hill')
     .setDescription(
-      `*A neutral field in the deep desert — whoever holds it taps the wealth, but nobody holds it for free.*\n\n` +
+      `*${OILRIG_NAME} — a neutral oil field in the deep desert. Whoever holds it taps the wealth, but nobody holds it for free.*\n\n` +
       `${statusLines.join('\n')}\n\n${actionLine}`)
-    .setFooter({ text: `Capturing costs ${OILRIG_CAPTURE_COST} troops • a checkpoint costs ${OILRIG_CHECKPOINT_COST} • blind guess, no power comparison` });
+    .setFooter({ text: `Capturing costs ${OILRIG_CAPTURE_COST} troops • a defensive wall costs ${OILRIG_WALL_COST} • blind guess, no power comparison` });
 
   const row1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('dy:oilrig_atk').setLabel('⚔ Attempt Capture').setStyle(ButtonStyle.Danger)
       .setDisabled(isHolder || now < oilRigLockUntil(rig, userId)),
-    // always openable by the holder, even at max checkpoints — it's also how they check
+    // always openable by the holder, even at max walls — it's also how they check
     // which directions they've already covered, not just where they can build a new one
-    new ButtonBuilder().setCustomId('dy:oilrig_cp').setLabel('🚧 Manage Checkpoints').setStyle(ButtonStyle.Primary)
+    new ButtonBuilder().setCustomId('dy:oilrig_wall').setLabel('🧱 Manage Defensive Walls').setStyle(ButtonStyle.Primary)
       .setDisabled(!isHolder),
   );
   const row2 = new ActionRowBuilder().addComponents(
@@ -2123,18 +2123,18 @@ function oilRigCaptureView(state, userId) {
   if (rig.holderId === userId) return oilRigView(state, userId);
   const lockUntil = oilRigLockUntil(rig, userId);
   if (now < lockUntil) {
-    const embed = new EmbedBuilder().setColor(COLOR.grey).setTitle('🛢 Oil Rig — Locked')
+    const embed = new EmbedBuilder().setColor(COLOR.grey).setTitle('👑 King of the Hill — Locked')
       .setDescription(`⏳ You can't attempt a capture for **${msLeft(lockUntil)}**.`);
     return { embeds: [embed], components: [backRow()] };
   }
   const pad = (id) => new ButtonBuilder().setCustomId(`dy:oilrig_pad:${id}`).setLabel('\u200b').setStyle(ButtonStyle.Secondary).setDisabled(true);
   const dir = (d) => new ButtonBuilder().setCustomId(`dy:oilrig_go:${d}`).setLabel(`${OILRIG_DIRECTION_EMOJI[d]} ${d[0].toUpperCase()}${d.slice(1)}`).setStyle(ButtonStyle.Danger);
   const center = new ButtonBuilder().setCustomId('dy:oilrig_pad:c').setLabel('🛢').setStyle(ButtonStyle.Secondary).setDisabled(true);
-  const embed = new EmbedBuilder().setColor(COLOR.oil).setTitle('🛢 Choose your approach')
+  const embed = new EmbedBuilder().setColor(COLOR.blurple).setTitle('👑 Choose your approach')
     .setDescription(
-      `Pick a direction to strike from. The holder may have up to **${OILRIG_CHECKPOINT_MAX}** hidden checkpoints — ` +
+      `Pick a direction to strike from. The holder may have up to **${OILRIG_WALL_MAX}** hidden defensive walls — ` +
       `you won't know which, until it's too late.\n\n` +
-      `Costs **${OILRIG_CAPTURE_COST}** troops. Guess clear and the rig is yours. Guess a checkpoint and you lose **${Math.round(OILRIG_CAPTURE_COST * (1 - OILRIG_LOSS_REFUND))}** of them.`);
+      `Costs **${OILRIG_CAPTURE_COST}** troops. Guess clear and the rig is yours. Guess a wall and you lose **${Math.round(OILRIG_CAPTURE_COST * (1 - OILRIG_LOSS_REFUND))}** of them.`);
   return {
     embeds: [embed],
     components: [
@@ -2146,21 +2146,21 @@ function oilRigCaptureView(state, userId) {
   };
 }
 
-function oilRigCheckpointView(state, userId) {
+function oilRigWallView(state, userId) {
   const rig = state.oilRig;
   if (rig.holderId !== userId) return oilRigView(state, userId);
-  const free = OILRIG_DIRECTIONS.filter(d => !rig.checkpoints[d]);
-  const cpCount = OILRIG_DIRECTIONS.length - free.length;
-  const embed = new EmbedBuilder().setColor(COLOR.oil).setTitle('🚧 Manage Checkpoints')
+  const free = OILRIG_DIRECTIONS.filter(d => !rig.walls[d]);
+  const wallCount = OILRIG_DIRECTIONS.length - free.length;
+  const embed = new EmbedBuilder().setColor(COLOR.blurple).setTitle('🧱 Manage Defensive Walls')
     .setDescription(
-      `Up: ${OILRIG_DIRECTIONS.map(d => rig.checkpoints[d] ? `${OILRIG_DIRECTION_EMOJI[d]} ✅` : `${OILRIG_DIRECTION_EMOJI[d]} —`).join('   ')}\n\n` +
-      (cpCount >= OILRIG_CHECKPOINT_MAX
-        ? `Both checkpoints are already up — nothing more to build until one is broken.`
-        : `Each checkpoint costs **${OILRIG_CHECKPOINT_COST}** troops, spent for good. Pick a direction to cover.`));
-  if (!free.length || cpCount >= OILRIG_CHECKPOINT_MAX) return { embeds: [embed], components: [backRow()] };
-  const menu = new StringSelectMenuBuilder().setCustomId('dy:oilrig_build')
-    .setPlaceholder('Build a checkpoint...')
-    .addOptions(free.map(d => ({ label: `${d[0].toUpperCase()}${d.slice(1)} — ${OILRIG_CHECKPOINT_COST} troops`, value: d, emoji: OILRIG_DIRECTION_EMOJI[d] })));
+      `Up: ${OILRIG_DIRECTIONS.map(d => rig.walls[d] ? `${OILRIG_DIRECTION_EMOJI[d]} ✅` : `${OILRIG_DIRECTION_EMOJI[d]} —`).join('   ')}\n\n` +
+      (wallCount >= OILRIG_WALL_MAX
+        ? `Both defensive walls are already up — nothing more to build until one is broken.`
+        : `Each defensive wall costs **${OILRIG_WALL_COST}** troops, spent for good. Pick a direction to cover.`));
+  if (!free.length || wallCount >= OILRIG_WALL_MAX) return { embeds: [embed], components: [backRow()] };
+  const menu = new StringSelectMenuBuilder().setCustomId('dy:oilrig_buildwall')
+    .setPlaceholder('Build a defensive wall...')
+    .addOptions(free.map(d => ({ label: `${d[0].toUpperCase()}${d.slice(1)} — ${OILRIG_WALL_COST} troops`, value: d, emoji: OILRIG_DIRECTION_EMOJI[d] })));
   return { embeds: [embed], components: [new ActionRowBuilder().addComponents(menu), backRow()] };
 }
 
@@ -2177,7 +2177,7 @@ function oilRigLeaderboardView(state) {
     .sort((a, b) => b.ms - a.ms)
     .slice(0, 10);
   const lines = rows.map((r, i) => `${['🥇', '🥈', '🥉'][i] || `${i + 1}.`} ${esc(r.name)} — **${fmtDuration(r.ms)}**${rig.holderId === r.uid ? ' *(current ruler)*' : ''}`);
-  const embed = new EmbedBuilder().setColor(COLOR.oil).setTitle('👑 Oil Rig — Longest Reigns')
+  const embed = new EmbedBuilder().setColor(COLOR.blurple).setTitle('👑 King of the Hill — Longest Reigns')
     .setDescription(`*Total time held, added up across every reign. Survives season resets.*\n\n${lines.join('\n') || '*Nobody has held it yet — be the first.*'}`);
   return { embeds: [embed], components: [backRow()] };
 }
@@ -2187,9 +2187,9 @@ function oilRigLogView(state) {
   const lines = rig.log.map(e => {
     const ago = fmtDuration(Date.now() - e.at);
     if (e.result === 'captured') return `🏆 **${esc(e.attackerName)}** seized it from **${e.prevHolderName ? esc(e.prevHolderName) : 'no one'}** — ${OILRIG_DIRECTION_EMOJI[e.direction]} ${e.direction} — *${ago} ago*`;
-    return `🚧 **${esc(e.attackerName)}** struck ${OILRIG_DIRECTION_EMOJI[e.direction]} ${e.direction} and hit a checkpoint — driven back — *${ago} ago*`;
+    return `🧱 **${esc(e.attackerName)}** struck ${OILRIG_DIRECTION_EMOJI[e.direction]} ${e.direction} and hit a defensive wall — driven back — *${ago} ago*`;
   });
-  const embed = new EmbedBuilder().setColor(COLOR.oil).setTitle('📜 Oil Rig — Recent Sieges')
+  const embed = new EmbedBuilder().setColor(COLOR.blurple).setTitle('📜 King of the Hill — Recent Sieges')
     .setDescription(lines.join('\n') || '*Nothing has happened here yet.*');
   return { embeds: [embed], components: [backRow()] };
 }
@@ -2547,7 +2547,7 @@ function hallOfFameView(state) {
   if (r.mostCitiesEver) recLines.push(`🏰 Most cities held at once: **${esc(r.mostCitiesEver.name)}** — **${r.mostCitiesEver.value}**`);
   if (r.biggestConquest) recLines.push(`⚔ Biggest conquest: **${esc(r.biggestConquest.name)}** — shattered **${fmt(r.biggestConquest.value)}** troops taking **${esc(r.biggestConquest.cityName)}**`);
   if (r.biggestExpeditionHaul) recLines.push(`🏜 Biggest expedition haul: **${esc(r.biggestExpeditionHaul.name)}** — **${fmt(r.biggestExpeditionHaul.value)}** Dinar from **${esc(r.biggestExpeditionHaul.zoneName)}**`);
-  if (r.longestOilRigReign) recLines.push(`🛢 Longest single Oil Rig reign: **${esc(r.longestOilRigReign.name)}** — **${fmtDuration(r.longestOilRigReign.value)}**`);
+  if (r.longestOilRigReign) recLines.push(`👑 Longest reign as King of the Hill: **${esc(r.longestOilRigReign.name)}** — **${fmtDuration(r.longestOilRigReign.value)}**`);
   const embed = new EmbedBuilder().setColor(COLOR.gold).setTitle('📖 Hall of Fame')
     .setDescription(
       `*A season reset can wipe the map — it can't touch this.*\n\n` +
@@ -2584,13 +2584,13 @@ function resetSeason(state, saveData, guildId) {
   state.wantedSched = null;
   state.bossMvp = null;
   if (state.relics) for (const rid of Object.keys(state.relics)) state.relics[rid].holderId = null;   // a new season, nobody's earned them yet
-  // the rig itself resets with the map (control, checkpoints, cooldowns, siege log) — but
+  // the rig itself resets with the map (control, walls, cooldowns, siege log) — but
   // `totals` (cumulative time held) is a permanent record, same spirit as hallOfFame, so it's
   // deliberately left untouched here.
   if (state.oilRig) {
     Object.assign(state.oilRig, {
       holderId: null, holderName: null, capturedAt: null, lastPayoutAt: null, incomeCarry: 0,
-      checkpoints: {}, recent: [], recentAt: null, log: [],
+      walls: {}, recent: [], recentAt: null, log: [],
     });
   }
   state.channelId = keepChannel;
@@ -3323,7 +3323,7 @@ function initDiyar({ client, db, saveData, awardLP }) {
       // ─── The Oil Rig ──────────────────────────────────────────────────────
       if (action === 'oilrig')       return interaction.update(oilRigView(state, uid));
       if (action === 'oilrig_atk')   return interaction.update(oilRigCaptureView(state, uid));
-      if (action === 'oilrig_cp')    return interaction.update(oilRigCheckpointView(state, uid));
+      if (action === 'oilrig_wall')    return interaction.update(oilRigWallView(state, uid));
       if (action === 'oilrig_lb')    return interaction.update(oilRigLeaderboardView(state));
       if (action === 'oilrig_log')   return interaction.update(oilRigLogView(state));
       if (action === 'oilrig_pad')   return interaction.deferUpdate();
@@ -3332,19 +3332,25 @@ function initDiyar({ client, db, saveData, awardLP }) {
         const r = attemptOilRigCapture(state, db, gid, saveData, uid, direction);
         if (r.error) return interaction.reply(eph({ content: r.error }));
         await interaction.update(oilRigView(state, uid));
+        const attackerName = esc(state.players[uid].name);
         if (r.captured) {
-          announce(gid, { content: `🛢 **${esc(state.players[uid].name)}** stormed in from the **${direction}** and seized **${OILRIG_NAME}** from **${r.prevHolderName ? esc(r.prevHolderName) : 'no one'}**!` });
+          announce(gid, { content: `👑 **${attackerName}** stormed in from the ${OILRIG_DIRECTION_EMOJI[direction]} **${direction}** and is the new **King of the Hill**, dethroning **${r.prevHolderName ? esc(r.prevHolderName) : 'no one'}**!` });
           return;
         }
+        // public, and pings the holder directly — a wall just came down, and everyone (holder
+        // included) should know it before someone else finds that same gap first
+        announce(gid, { content:
+          `🧱 **${attackerName}** attacked the King of the Hill from the ${OILRIG_DIRECTION_EMOJI[direction]} **${direction}** — the wall held, but it's destroyed now! ` +
+          `<@${r.holderId}>, better rebuild before someone else tries that direction.` });
         return interaction.followUp(eph({ content:
-          `🚧 **Blocked!** A checkpoint was waiting to the ${OILRIG_DIRECTION_EMOJI[direction]} ${direction} — you lost **${fmt(r.cas)}** troops (**${fmt(r.survivors)}** made it back). ` +
-          `That checkpoint is destroyed now, so it's a real gap once you're free to try again.` }));
+          `🧱 **Blocked!** A defensive wall was waiting to the ${OILRIG_DIRECTION_EMOJI[direction]} ${direction} — you lost **${fmt(r.cas)}** troops (**${fmt(r.survivors)}** made it back). ` +
+          `That wall is destroyed now, so it's a real gap once you're free to try again.` }));
       }
-      if (action === 'oilrig_build') {
+      if (action === 'oilrig_buildwall') {
         const direction = interaction.values?.[0];
-        const r = buildOilRigCheckpoint(state, saveData, gid, uid, direction);
+        const r = buildOilRigWall(state, saveData, gid, uid, direction);
         if (r.error) return interaction.reply(eph({ content: r.error }));
-        return interaction.update(oilRigCheckpointView(state, uid));
+        return interaction.update(oilRigWallView(state, uid));
       }
 
       if (action === 'map') {
