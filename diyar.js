@@ -2197,7 +2197,7 @@ function oilRigLogView(state) {
   const lines = rig.log.map(e => {
     const ago = fmtDuration(Date.now() - e.at);
     if (e.result === 'captured') return `🏆 **${esc(e.attackerName)}** seized it from **${e.prevHolderName ? esc(e.prevHolderName) : 'no one'}** — ${OILRIG_DIRECTION_EMOJI[e.direction]} ${e.direction} — *${ago} ago*`;
-    return `🧱 **${esc(e.attackerName)}** struck ${OILRIG_DIRECTION_EMOJI[e.direction]} ${e.direction} and hit a defensive wall — driven back — *${ago} ago*`;
+    return `🧱 **${esc(e.attackerName)}** hit a defensive wall and was driven back — *${ago} ago*`;
   });
   const embed = new EmbedBuilder().setColor(COLOR.blurple).setTitle('📜 King of the Hill — Recent Sieges')
     .setDescription(lines.join('\n') || '*Nothing has happened here yet.*');
@@ -3343,15 +3343,25 @@ function initDiyar({ client, db, saveData, awardLP }) {
         if (r.error) return interaction.reply(eph({ content: r.error }));
         await interaction.update(oilRigView(state, uid));
         const attackerName = esc(state.players[uid].name);
+        // war room if one is set, otherwise (or if that send fails) the channel this was clicked in —
+        // so a capture is never silently un-announced just because /diyar-set-channel wasn't run
+        const announceRig = async (payload) => {
+          try {
+            const room = state.channelId && await client.channels.fetch(state.channelId).catch(() => null);
+            if (room) { await room.send(payload); return; }
+          } catch (e) { console.error('[diyar rig announce war room]', e.message); }
+          try { await interaction.channel.send(payload); } catch (e) { console.error('[diyar rig announce fallback]', e.message); }
+        };
         if (r.captured) {
-          announce(gid, { content: `👑 **${attackerName}** stormed in from the ${OILRIG_DIRECTION_EMOJI[direction]} **${direction}** and is the new **King of the Hill**, dethroning **${r.prevHolderName ? esc(r.prevHolderName) : 'no one'}**!` });
+          await announceRig({ content: `👑 **${attackerName}** stormed in from the ${OILRIG_DIRECTION_EMOJI[direction]} **${direction}** and is the new **King of the Hill**, dethroning **${r.prevHolderName ? esc(r.prevHolderName) : 'no one'}**!` });
           return;
         }
-        // public, and pings the holder directly — a wall just came down, and everyone (holder
-        // included) should know it before someone else finds that same gap first
-        announce(gid, { content:
-          `🧱 **${attackerName}** attacked the King of the Hill from the ${OILRIG_DIRECTION_EMOJI[direction]} **${direction}** — the wall held, but it's destroyed now! ` +
-          `<@${r.holderId}>, better rebuild before someone else tries that direction.` });
+        // public, and pings the holder directly — a wall just came down, and the holder should
+        // know before someone else finds that same gap. Deliberately says nothing about WHICH
+        // direction was hit, so the announcement doesn't hand every rival a map of the walls.
+        await announceRig({ content:
+          `🧱 **${attackerName}** attacked the King of the Hill and hit a Defensive Wall — it's destroyed now! ` +
+          `<@${r.holderId}>, better rebuild before someone else tries.` });
         return interaction.followUp(eph({ content:
           `🧱 **Blocked!** A defensive wall was waiting to the ${OILRIG_DIRECTION_EMOJI[direction]} ${direction} — you lost **${fmt(r.cas)}** troops (**${fmt(r.survivors)}** made it back). ` +
           `That wall is destroyed now, so it's a real gap once you're free to try again.` }));
