@@ -219,7 +219,7 @@ const randInt = (a, b) => a + Math.floor(Math.random() * (b - a + 1));
 //   minArmy— troops you must have in reserve to even attempt the raid
 // Balanced around troop cost: at 1.5 Dinar/troop the two buttons are near-identical
 // in value, so the real decision is your own position — landless rulers want the
-// coin, sprawling empires (3 Dinar/troop) want the men.
+// coin, sprawling empires (3–5 Dinar/troop) want the men.
 const CARAVAN_DEFS = [
   // Tuned against  purse x (1 - 0.75*risk)  ==  1.5 x (guard + folk), which is the point
   // where both buttons pay the same. Most caravans sit near that line (a real coin-flip);
@@ -242,7 +242,7 @@ const CARAVAN_DEFS = [
     purse: [200, 400], guard: [30, 90], folk: [300, 450], risk: 0.10, minArmy: 30 },
 ];
 // A raid's purse scales with what troops actually cost you, because otherwise the choice
-// is structurally unbalanced: soldiers are worth 1, 1.5 or 3 Dinar depending on how much
+// is structurally unbalanced: soldiers are worth 1, 1.5, 3 or 5 Dinar depending on how much
 // land you hold, so a fixed purse makes raiding a no-brainer when troops are cheap and
 // suicidal when they're dear. Scaling by the same factor makes the verdict depend on the
 // CARAVAN, not on your rank — which is the whole point of the two buttons.
@@ -728,7 +728,8 @@ function troopCost(state, userId) {
   const n = ownedCities(state, userId).length;
   if (n === 0) return 1;      // landless — cheapest
   if (n <= 2) return 1.5;     // 1–2 cities — standard
-  return 3;                   // 3+ cities — expensive
+  if (n <= 9) return 3;       // 3–9 cities — expensive
+  return 5;                   // 10+ cities — a sprawling empire pays the most
 }
 
 // how long a convoy takes between two cities — distance-scaled, clamped both ends
@@ -2024,7 +2025,9 @@ function armyView(state, db, guildId, userId) {
     ? `You hold **no cities**, so troops are cheapest at **${unit} Dinar** each.`
     : nCities <= 2
       ? `You hold **${nCities}** cit${nCities === 1 ? 'y' : 'ies'}, so troops cost **${unit} Dinar** each.`
-      : `You hold **${nCities}** cities. Holding **3 or more** makes each troop cost **${unit} Dinar** — a large realm is expensive to raise armies for.`;
+      : nCities <= 9
+        ? `You hold **${nCities}** cities. Holding **3 or more** makes each troop cost **${unit} Dinar** — a large realm is expensive to raise armies for.`
+        : `You hold **${nCities}** cities. Holding **10 or more** makes each troop cost **${unit} Dinar** — a vast realm is the costliest to raise armies for.`;
   const embed = new EmbedBuilder().setColor(COLOR.gold)
     .setTitle('🪖 Recruit Army')
     .setDescription(`Army: **${fmt(p.army)}**  •  Dinar: **${fmt(dinar)}**\nEach troop costs **${unit} Dinar**.\n\n*${why}*`);
