@@ -19,7 +19,12 @@ const path = require('path');
 
 // ─── Tuning ───────────────────────────────────────────────────────────────────
 const STARTER_ARMY        = 40;
-const GARRISON_CAP        = 3000;                   // max troops a single city can hold
+const GARRISON_CAP        = 3000;                   // max troops a single city can hold (rulers of 3 cities or fewer)
+const GARRISON_SHRINK     = 100;                    // per-city cap drops by this for every city beyond the 3rd...
+const GARRISON_CAP_MIN    = 1200;                   // ...down to this floor (reached at 21 cities; 19 cities -> 1400 each)
+const MILITIA_MAX_CITIES  = 8;                      // rulers with this many cities or more can no longer raid neutral militias
+const UNDERDOG_PER_CITY   = 0.02;                   // attack bonus per city the defender holds beyond yours...
+const UNDERDOG_MAX        = 0.3;                    // ...capped at +30%
 const TROOP_COST          = 1.5;                    // Dinar per troop
 const SHIELD_MS           = 0;                     // truce disabled (no starting truce, no post-raid shield)
 const ATTACK_COOLDOWN_MS  = 30 * 60 * 1000;     // between your own attacks
@@ -683,6 +688,23 @@ function reseedIfLanded(state, userId) {
 
 const ownedCities = (state, userId) => state.players[userId]?.cities.map(id => state.cities[id]).filter(Boolean) || [];
 
+// ─── Anti-snowball ───────────────────────────────────────────────────────────
+// per-city garrison cap shrinks as an empire grows, so wealth can't buy unlimited defence
+// spread over many cities (1-3 cities: 3000 each; 10 cities: 2300; 19 cities: 1400; 21+ cities: 1200)
+function garrisonCap(state, userId) {
+  const n = state.players[userId]?.cities.length || 0;
+  return Math.max(GARRISON_CAP_MIN, GARRISON_CAP - GARRISON_SHRINK * Math.max(0, n - 3));
+}
+// the garrison that actually defends: anything above the owner's cap is dead weight
+function effectiveGarrison(state, city) {
+  return city.ownerId ? Math.min(city.garrison, garrisonCap(state, city.ownerId)) : city.garrison;
+}
+// catch-up: attackers get up to +30% power against a ruler who holds more cities than they do
+function underdogMult(attacker, owner) {
+  if (!owner) return 1;
+  return 1 + Math.min(UNDERDOG_MAX, UNDERDOG_PER_CITY * Math.max(0, owner.cities.length - attacker.cities.length));
+}
+
 // resolves a player's capital city, self-healing if unset or lost — falls back to their
 // first currently-held city, so old saves (from before capitals existed) and capital-loss
 // both degrade gracefully instead of the map/relics having nothing to point to
@@ -764,13 +786,14 @@ function reinforce(state, saveData, guildId, userId, cityId, amt) {
   const p = state.players[userId];
   const city = state.cities[cityId];
   if (!city || city.ownerId !== userId) return { ok: false };
-  const room = GARRISON_CAP - city.garrison;
+  const cap = garrisonCap(state, userId);
+  const room = cap - city.garrison;
   if (room <= 0) return { ok: false, capped: true, garrison: city.garrison };   // already full
   amt = Math.min(amt, p.army, room);                                            // never past the cap
   if (amt < 1) return { ok: false, noTroops: true };
   p.army -= amt; city.garrison += amt;
   saveData(guildId);
-  return { ok: true, moved: amt, garrison: city.garrison, capped: city.garrison >= GARRISON_CAP };
+  return { ok: true, moved: amt, garrison: city.garrison, capped: city.garrison >= cap, cap };
 }
 
 // validate a troop transfer and lock the committed troops out of the source garrison
@@ -813,12 +836,13 @@ function resolveTransfer(state, saveData, guildId, move) {
     p.army += move.amount;
     result.recalled = true;
   } else {
-    const room = Math.max(0, GARRISON_CAP - to.garrison);
+    const cap = garrisonCap(state, move.playerId);
+    const room = Math.max(0, cap - to.garrison);
     const arrived = Math.min(move.amount, room);
     const overflow = move.amount - arrived;
     to.garrison += arrived;
     if (overflow > 0) p.army += overflow;
-    result.arrived = arrived; result.overflow = overflow; result.newGarrison = to.garrison;
+    result.arrived = arrived; result.overflow = overflow; result.newGarrison = to.garrison; result.cap = cap;
   }
   saveData(guildId);
   return result;
@@ -1092,7 +1116,7 @@ function effectiveDefence(state, city, reinforceMult) {
   const relicBonus = relicBonusPct(state, city.ownerId, 'defense');
   const dMultBase = 1 + (owner ? owner.upg.for * 0.15 : 0) + city.level * 0.1 + relicBonus;
   const lastStand = (owner && owner.cities.length === 1) ? 1.5 : 1.0;
-  return Math.round((city.garrison * dMultBase * lastStand + city.level * 8) * (reinforceMult || 1));
+  return Math.round((effectiveGarrison(state, city) * dMultBase * lastStand + city.level * 8) * (reinforceMult || 1));
 }
 // the real attack strength of a force (troops + weapon tier + military upgrades + attack relics)
 function effectiveAttack(state, attacker, attackerId, send) {
@@ -1113,10 +1137,12 @@ function startRaid(state, db, guildId, saveData, attackerId, cityId, sendPct) {
     return { error: 'That city is already under attack — wait for the current raid to finish.' };
 
   const owner = city.ownerId ? state.players[city.ownerId] : null;
+  if (!owner && attacker.cities.length >= MILITIA_MAX_CITIES)
+    return { error: `Militias won't fight a ruler of ${attacker.cities.length} cities — take a rival's city instead.` };
   if (owner) {
     if (owner.shieldUntil > now) return { error: `${owner.name} is under truce for ${msLeft(owner.shieldUntil)}.` };
     if (!isTopRanked(state, city.ownerId) && playerStrength(state, owner) * MATCH_BAND < playerStrength(state, attacker))
-      return { error: `${owner.name} is far weaker than you — no honour in that raid. Pick someone your size (neutral militias are always fair game).` };
+      return { error: `${owner.name} is far weaker than you — no honour in that raid. Pick someone your size (neutral militias are fair game only while you rule fewer than ${MILITIA_MAX_CITIES} cities).` };
   }
 
   const send = Math.floor(attacker.army * sendPct);
@@ -1142,18 +1168,19 @@ function resolveRaid(state, db, guildId, saveData, pending, reinforceMult) {
   const garrisonBefore = city.garrison;
   const rMult = reinforceMult || 1;
 
-  const aMult = 1 + attacker.weaponTier * 0.15 + attacker.upg.mil * 0.12 + relicBonusPct(state, pending.attackerId, 'attack');
+  const underdog = underdogMult(attacker, owner);
+  const aMult = (1 + attacker.weaponTier * 0.15 + attacker.upg.mil * 0.12 + relicBonusPct(state, pending.attackerId, 'attack')) * underdog;
   const aPow = send * aMult * rnd(0.85, 1.15);
   const dMultBase = 1 + (owner ? owner.upg.for * 0.15 : 0) + city.level * 0.1 + relicBonusPct(state, city.ownerId, 'defense');
   const lastStand = (owner && owner.cities.length === 1) ? 1.5 : 1.0;
-  const dPow = (city.garrison * dMultBase * lastStand + city.level * 8) * rMult * rnd(0.85, 1.15);
+  const dPow = (effectiveGarrison(state, city) * dMultBase * lastStand + city.level * 8) * rMult * rnd(0.85, 1.15);
   const win = aPow > dPow;
 
   const result = {
     attackerId: pending.attackerId, attackerName: pending.attackerName, cityId: city.id, cityName: city.name,
     defenderId: city.ownerId, defenderName: owner ? owner.name : (pending.defenderName || null),
     send, win, reinforced: rMult > 1,
-    defShown: effectiveDefence(state, city, rMult), atkShown: effectiveAttack(state, attacker, pending.attackerId, send),
+    defShown: effectiveDefence(state, city, rMult), atkShown: Math.round(effectiveAttack(state, attacker, pending.attackerId, send) * underdog),
     cas: 0, survivors: 0, stolen: 0, captured: false,
   };
 
@@ -1300,7 +1327,7 @@ function transferArrivedEmbed(r) {
     return new EmbedBuilder().setColor(COLOR.grey).setTitle('🚚 Convoy recalled')
       .setDescription(`**${esc(r.playerName)}**'s convoy reached **${esc(r.toCityName)}** to find it was no longer theirs to hold. The **${fmt(r.amount)}** troops turned back and rejoined the reserve army.`);
   }
-  const overflowLine = r.overflow > 0 ? `\n🪖 **${fmt(r.overflow)}** couldn't fit in the garrison (at the ${fmt(GARRISON_CAP)} cap) and returned to reserve.` : '';
+  const overflowLine = r.overflow > 0 ? `\n🪖 **${fmt(r.overflow)}** couldn't fit in the garrison (at the ${fmt(r.cap || GARRISON_CAP)} cap) and returned to reserve.` : '';
   return new EmbedBuilder().setColor(COLOR.green).setTitle('🚚 Convoy arrived')
     .setDescription(`**${esc(r.playerName)}**'s convoy reached **${esc(r.toCityName)}** from **${esc(r.fromCityName)}** — **${fmt(r.arrived)}** troops join the garrison (now **${fmt(r.newGarrison)}**).${overflowLine}`);
 }
@@ -2217,6 +2244,7 @@ function targetSelect(state, userId) {
     if (state.pendingRaids && Object.values(state.pendingRaids).some(p => p.cityId === c.id)) continue;   // already under attack
     const owner = city.ownerId ? state.players[city.ownerId] : null;
     let note;
+    if (!owner && (me?.cities.length || 0) >= MILITIA_MAX_CITIES) continue;   // too big to farm militias
     if (!owner) note = `Militia • Lv ${city.level} • 🛡${fmt(effectiveDefence(state, city))} def`;
     else if (owner.shieldUntil > Date.now()) continue;                       // shielded → hide
     else if (!isTopRanked(state, city.ownerId) && playerStrength(state, owner) * MATCH_BAND < myStr) continue;     // too weak → hide (podium rulers are exempt)
@@ -2225,7 +2253,7 @@ function targetSelect(state, userId) {
   }
   if (!opts.length) {
     return { embeds: [new EmbedBuilder().setColor(COLOR.grey).setTitle('⚔ Attack')
-      .setDescription('No reachable targets right now — rivals must be near your strength, and neutral militias are always fair game when any remain.')], components: [backRow()] };
+      .setDescription(`No reachable targets right now — rivals must be near your strength, and neutral militias are only fair game while you rule fewer than ${MILITIA_MAX_CITIES} cities.`)], components: [backRow()] };
   }
   // Discord caps each dropdown at 25 options and we have more cities than that,
   // so spread targets across multiple dropdowns — otherwise the overflow vanishes from raids.
@@ -2272,7 +2300,8 @@ function reinforceAmount(state, userId, cityId) {
   const p = state.players[userId];
   const city = state.cities[cityId];
   if (!city || city.ownerId !== userId) return reinforceSelect(state, userId);
-  const room = Math.max(0, GARRISON_CAP - city.garrison);
+  const cap = garrisonCap(state, userId);
+  const room = Math.max(0, cap - city.garrison);
   const full = room <= 0;
   const amtRow = new ActionRowBuilder().addComponents(
     ...[10, 50, 100].map(n => new ButtonBuilder().setCustomId(`dy:rf_do:${cityId}:${n}`).setLabel(`+${n}`).setStyle(ButtonStyle.Success).setDisabled(p.army < n || full)),
@@ -2281,11 +2310,11 @@ function reinforceAmount(state, userId, cityId) {
     new ButtonBuilder().setCustomId('dy:reinforce').setLabel('↩ Another city').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('dy:home').setLabel('🏠 Done').setStyle(ButtonStyle.Secondary));
   const note = full
-    ? `\n\n🛡 *This city is **full** — it holds the maximum of ${fmt(GARRISON_CAP)} troops and can't take any more.*`
+    ? `\n\n🛡 *This city is **full** — it holds the maximum of ${fmt(cap)} troops and can't take any more.*`
     : p.army < 1 ? '\n\n*No troops left in reserve — recruit more or send your army elsewhere.*'
-    : `\n\n*Room for **${fmt(room)}** more before the ${fmt(GARRISON_CAP)} cap.*`;
+    : `\n\n*Room for **${fmt(room)}** more before the ${fmt(cap)} cap.*`;
   return { embeds: [new EmbedBuilder().setColor(COLOR.blue).setTitle(`🛡 Reinforce ${esc(city.name)}`)
-    .setDescription(`**${esc(city.name)}** — Lv ${city.level} • garrison **🛡${fmt(city.garrison)} / ${fmt(GARRISON_CAP)}**\nReserve army: **${fmt(p.army)}** troops.\n\nChoose how many to station here.${note}`)],
+    .setDescription(`**${esc(city.name)}** — Lv ${city.level} • garrison **🛡${fmt(city.garrison)} / ${fmt(cap)}**\nReserve army: **${fmt(p.army)}** troops.\n\nChoose how many to station here.${note}`)],
     components: [amtRow, navRow] };
 }
 
@@ -2331,7 +2360,7 @@ function transferAmount(state, userId, fromCityId, toCityId) {
   const ms = travelTime(from, to);
   const embed = new EmbedBuilder().setColor(COLOR.blue).setTitle(`🚚 Send troops to ${esc(to.name)}?`)
     .setDescription(
-      `From **${esc(from.name)}** (🛡${fmt(from.garrison)}) → **${esc(to.name)}** (🛡${fmt(to.garrison)}/${fmt(GARRISON_CAP)})\n\n` +
+      `From **${esc(from.name)}** (🛡${fmt(from.garrison)}) → **${esc(to.name)}** (🛡${fmt(to.garrison)}/${fmt(garrisonCap(state, userId))})\n\n` +
       `Travel time: **${msLeft(Date.now() + ms)}**\n\n` +
       `How many troops do you send? *Committed once sent — the convoy can't be recalled or cancelled.*`);
   return { embeds: [embed], components: [new ActionRowBuilder().addComponents(
@@ -2527,7 +2556,7 @@ function profileView(state, db, guildId, userId) {
   const unit = troopCost(state, userId);
   const underRaid = new Set(Object.values(state.pendingRaids || {}).map(r => r.cityId));
   const cityLines = cities.map(c =>
-    `🏙 **${esc(c.name)}** (L${c.level})${underRaid.has(c.id) ? ' ⚔ *under attack!*' : ''} — 🛡 ${fmt(c.garrison)}/${fmt(GARRISON_CAP)} • 💰 ${fmt(Math.round(INCOME_BY_LEVEL[c.level] * ecoMult))}/hr • def power **${fmt(effectiveDefence(state, c))}**`
+    `🏙 **${esc(c.name)}** (L${c.level})${underRaid.has(c.id) ? ' ⚔ *under attack!*' : ''} — 🛡 ${fmt(c.garrison)}/${fmt(garrisonCap(state, userId))} • 💰 ${fmt(Math.round(INCOME_BY_LEVEL[c.level] * ecoMult))}/hr • def power **${fmt(effectiveDefence(state, c))}**`
   ).join('\n') || '*Landless — raid a city to claim a home.*';
   const myRelics = Object.keys(state.relics || {}).filter(rid => state.relics[rid].holderId === userId).map(rid => RELIC_BY_ID[rid]);
   const relicsLine = myRelics.length ? `\n\n**✨ Relics (${myRelics.length})**\n${myRelics.map(r => `${esc(r.name)} — +${Math.round(r.pct * 100)}% ${r.bonus}`).join('\n')}` : '';
@@ -3437,10 +3466,10 @@ function initDiyar({ client, db, saveData, awardLP }) {
         if (Number.isFinite(amt) && amt > 0) {
           const res = reinforce(state, saveData, gid, uid, cityId, amt);
           if (res.ok) {
-            const capNote = res.capped ? ` — now at the **${fmt(GARRISON_CAP)}** troop cap` : '';
+            const capNote = res.capped ? ` — now at the **${fmt(res.cap)}** troop cap` : '';
             announce(gid, { content: `🛡 **${state.players[uid].name}** reinforced **${city.name}** with **${fmt(res.moved)}** troops${capNote} — its defence is now **${fmt(effectiveDefence(state, city))}**.` });
           } else if (res.capped) {
-            return interaction.reply(eph({ content: `🛡 **${city.name}** is already holding the maximum of **${fmt(GARRISON_CAP)}** troops, so it can't take any more. Station your army in one of your other cities instead.` }));
+            return interaction.reply(eph({ content: `🛡 **${city.name}** is already holding the maximum of **${fmt(garrisonCap(state, uid))}** troops, so it can't take any more. Station your army in one of your other cities instead.` }));
           }
         }
         return interaction.update(reinforceAmount(state, uid, cityId));
