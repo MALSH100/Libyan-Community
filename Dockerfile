@@ -1,7 +1,7 @@
 # Slim Node base (~150 MB) instead of the old Playwright image (~2 GB with 3
 # browsers). Nothing launches a browser anymore — chart PNGs are rendered by
 # @resvg/resvg-js, a small native library.
-FROM node:20-slim
+FROM public.ecr.aws/docker/library/node:20-slim
 
 WORKDIR /app
 
