@@ -25,6 +25,9 @@ const GARRISON_CAP_MIN    = 1200;                   // ...down to this floor (re
 const MILITIA_MAX_CITIES  = 8;                      // rulers with this many cities or more can no longer raid neutral militias
 const UNDERDOG_PER_CITY   = 0.02;                   // attack bonus per city the defender holds beyond yours...
 const UNDERDOG_MAX        = 0.3;                    // ...capped at +30%
+const RECRUIT_DAILY_BASE     = 300;                 // troops anyone can raise per day (Libya time)...
+const RECRUIT_DAILY_PER_CITY = 150;                 // ...plus this many per city held (1 city: 450/day, 7 cities: 1,350/day)
+const DEV_COOLDOWN_MS        = 6 * 60 * 60 * 1000;  // one upgrade OR weapon purchase every 6 h — money buys speed-limited growth
 const TROOP_COST          = 1.5;                    // Dinar per troop
 const SHIELD_MS           = 0;                     // truce disabled (no starting truce, no post-raid shield)
 const ATTACK_COOLDOWN_MS  = 30 * 60 * 1000;     // between your own attacks
@@ -174,6 +177,22 @@ const EXPEDITION_ZONES = [
   { id: 'kufra',  name: 'The Kufra Depths',       lon: 23.0, lat: 22.5, hint: '⚫ Extreme',  tag: 'The far edge of the map',                  dangerMin: 340, dangerMax: 600, weaponChance: 0.25, dinar: [300, 535], recruits: [78, 145], richness: 2.0 },
 ];
 const EXPEDITION_ZONE_BY_ID = Object.fromEntries(EXPEDITION_ZONES.map(z => [z.id, z]));
+
+// ─── Landless expeditions ───────────────────────────────────────────────────
+// A ruler with no city can still go on expeditions: they march out from a field camp placed at
+// their old capital's location (or Tripoli if they never held a city). Rulers who hold cities
+// launch from one of them exactly as before, and the camp is refused to anyone who owns a city.
+const EXPEDITION_CAMP_ID = 'camp';
+function expeditionFrom(state, userId, fromId) {
+  if (fromId === EXPEDITION_CAMP_ID) {
+    if (ownedCities(state, userId).length) return null;
+    const p = state.players[userId];
+    const base = (p && p.capitalCityId && state.cities[p.capitalCityId]) || state.cities.tripoli || state.cities[CITY_DEFS[0].id];
+    return { id: EXPEDITION_CAMP_ID, name: `Camp near ${base.name}`, lon: base.lon, lat: base.lat, ownerId: userId };
+  }
+  const c = state.cities[fromId];
+  return c && c.ownerId === userId ? c : null;
+}
 function expeditionTier(ratio) {
   for (const t of EXPEDITION_TIERS) if (ratio >= t.minRatio) return t;
   return EXPEDITION_TIERS[EXPEDITION_TIERS.length - 1];
@@ -705,6 +724,18 @@ function underdogMult(attacker, owner) {
   return 1 + Math.min(UNDERDOG_MAX, UNDERDOG_PER_CITY * Math.max(0, owner.cities.length - attacker.cities.length));
 }
 
+// ─── Anti-rush ───────────────────────────────────────────────────────────────
+// Dinar can't be turned into an instant army / instant max upgrades: recruiting has a daily limit
+// and upgrades + weapons share a cooldown. Nobody's balance is touched — it just can't be spent faster.
+function recruitLimit(state, userId) { return RECRUIT_DAILY_BASE + RECRUIT_DAILY_PER_CITY * (state.players[userId]?.cities.length || 0); }
+function recruitedToday(p) { return p.recruitDay === libyaDay(Date.now()).dateStr ? (p.recruitedToday || 0) : 0; }
+function recruitLeft(state, userId) {
+  const p = state.players[userId];
+  return p ? Math.max(0, recruitLimit(state, userId) - recruitedToday(p)) : 0;
+}
+// ms until this player may buy their next upgrade or weapon tier
+function devWait(p) { return Math.max(0, (p.lastDevAt || 0) + DEV_COOLDOWN_MS - Date.now()); }
+
 // resolves a player's capital city, self-healing if unset or lost — falls back to their
 // first currently-held city, so old saves (from before capitals existed) and capital-loss
 // both degrade gracefully instead of the map/relics having nothing to point to
@@ -762,22 +793,30 @@ function travelTime(fromCity, toCity) {
 
 function recruit(state, db, guildId, saveData, userId, n) {
   const p = state.players[userId];
-  const cost = Math.round(n * troopCost(state, userId));
+  const left = recruitLeft(state, userId);
+  if (left <= 0) return { ok: false, dailyCapped: true };
+  const buy = Math.min(n, left);                       // never more than today's limit allows
+  const cost = Math.round(buy * troopCost(state, userId));
   if (getDinar(db, guildId, userId) < cost) return { ok: false, cost };
   spendDinar(db, guildId, userId, cost, saveData);
-  p.army += n;
+  p.army += buy;
+  p.recruitedToday = recruitedToday(p) + buy;
+  p.recruitDay = libyaDay(Date.now()).dateStr;
   saveData(guildId);
-  return { ok: true, cost, army: p.army };
+  return { ok: true, cost, army: p.army, bought: buy, limited: buy < n };
 }
 
 function upgrade(state, db, guildId, saveData, userId, track) {
   const p = state.players[userId];
   const lvl = p.upg[track];
   if (lvl >= UPG_MAX) return { ok: false, maxed: true };
+  const wait = devWait(p);
+  if (wait > 0) return { ok: false, cooldown: wait };
   const cost = upgCost(track, lvl);
   if (getDinar(db, guildId, userId) < cost) return { ok: false, cost };
   spendDinar(db, guildId, userId, cost, saveData);
   p.upg[track]++;
+  p.lastDevAt = Date.now();
   saveData(guildId);
   return { ok: true, cost, level: p.upg[track] };
 }
@@ -852,10 +891,10 @@ function resolveTransfer(state, saveData, guildId, move) {
 // immediately (same "committed on send" pattern as raids and transfers); returns {error} or {pending}
 function startExpedition(state, saveData, guildId, userId, fromCityId, zoneId, pct) {
   const p = state.players[userId];
-  const from = state.cities[fromCityId];
+  const from = expeditionFrom(state, userId, fromCityId);
   const zone = EXPEDITION_ZONE_BY_ID[zoneId];
-  if (!p || !from || !zone) return { error: 'Not found.' };
-  if (from.ownerId !== userId) return { error: 'You can only launch an expedition from your own city.' };
+  if (!p || !zone) return { error: 'Not found.' };
+  if (!from) return { error: 'You can only launch an expedition from your own city.' };
   const now = Date.now();
   if (now - (p.lastExpeditionAt || 0) < EXPEDITION_COOLDOWN_MS)
     return { error: `Your expedition force hasn't finished resting. Ready in ${msLeft((p.lastExpeditionAt || 0) + EXPEDITION_COOLDOWN_MS)}.` };
@@ -980,9 +1019,12 @@ function claimTribute(state, db, guildId, saveData, userId) {
 function buyWeapon(state, db, guildId, saveData, userId) {
   const p = state.players[userId]; if (!p) return { error: 'Not found.' };
   if (p.weaponTier >= ARMOURY_MAX_TIER) return { error: `The armoury forges up to tier ${ARMOURY_MAX_TIER}. Higher tiers are won by defeating bosses.` };
+  const wait = devWait(p);
+  if (wait > 0) return { error: `Your builders and smiths are busy — the next upgrade or forging is ready in ${msLeft(Date.now() + wait)}.` };
   const cost = armouryCost(p.weaponTier);
   if (!spendDinar(db, guildId, userId, cost, saveData)) return { error: `Not enough Dinar (need ${fmt(cost)}).` };
   p.weaponTier++;
+  p.lastDevAt = Date.now();
   saveData(guildId);
   return { ok: true, cost, tier: p.weaponTier };
 }
@@ -2048,6 +2090,7 @@ function armyView(state, db, guildId, userId) {
   const dinar = getDinar(db, guildId, userId);
   const unit = troopCost(state, userId);
   const nCities = ownedCities(state, userId).length;
+  const dayLimit = recruitLimit(state, userId), dayLeft = recruitLeft(state, userId);
   const why = nCities === 0
     ? `You hold **no cities**, so troops are cheapest at **${unit} Dinar** each.`
     : nCities <= 2
@@ -2057,26 +2100,27 @@ function armyView(state, db, guildId, userId) {
         : `You hold **${nCities}** cities. Holding **10 or more** makes each troop cost **${unit} Dinar** — a vast realm is the costliest to raise armies for.`;
   const embed = new EmbedBuilder().setColor(COLOR.gold)
     .setTitle('🪖 Recruit Army')
-    .setDescription(`Army: **${fmt(p.army)}**  •  Dinar: **${fmt(dinar)}**\nEach troop costs **${unit} Dinar**.\n\n*${why}*`);
-  const mk = (n) => new ButtonBuilder().setCustomId(`dy:recruit:${n}`).setLabel(`+${n} (${Math.round(n * unit)}💰)`).setStyle(ButtonStyle.Success).setDisabled(dinar < Math.round(n * unit));
+    .setDescription(`Army: **${fmt(p.army)}**  •  Dinar: **${fmt(dinar)}**\nEach troop costs **${unit} Dinar**.\nRecruited today: **${fmt(dayLimit - dayLeft)} / ${fmt(dayLimit)}** (resets at midnight, Libya time).\n\n*${why}*`);
+  const mk = (n) => new ButtonBuilder().setCustomId(`dy:recruit:${n}`).setLabel(`+${n} (${Math.round(n * unit)}💰)`).setStyle(ButtonStyle.Success).setDisabled(dinar < Math.round(n * unit) || n > dayLeft);
   return { embeds: [embed], components: [new ActionRowBuilder().addComponents(mk(10), mk(50), mk(100), mk(250)), backRow()] };
 }
 
 function upgradeView(state, db, guildId, userId) {
   const p = state.players[userId];
   const dinar = getDinar(db, guildId, userId);
+  const wait = devWait(p);
   const row = (track, label, desc) => {
     const lvl = p.upg[track];
     const cost = upgCost(track, lvl);
     const maxed = lvl >= UPG_MAX;
     return { field: `${label} — Lv ${lvl}/${UPG_MAX}\n${desc}${maxed ? ' • *maxed*' : ` • next: **${cost}💰**`}`,
-      btn: new ButtonBuilder().setCustomId(`dy:upg:${track}`).setLabel(`${label} ${maxed ? 'MAX' : '→ ' + (lvl + 1)}`).setStyle(ButtonStyle.Primary).setDisabled(maxed || dinar < cost) };
+      btn: new ButtonBuilder().setCustomId(`dy:upg:${track}`).setLabel(`${label} ${maxed ? 'MAX' : '→ ' + (lvl + 1)}`).setStyle(ButtonStyle.Primary).setDisabled(maxed || dinar < cost || wait > 0) };
   };
   const mil = row('mil', '⚔ Military', 'Stronger attacks');
   const fr  = row('for', '🛡 Walls', 'Tougher defense');
   const eco = row('eco', '💰 Economy', 'More income, less loot stolen');
   const embed = new EmbedBuilder().setColor(COLOR.blue).setTitle('⬆ Upgrades')
-    .setDescription(`Dinar: **${fmt(dinar)}**\n\n${mil.field}\n\n${fr.field}\n\n${eco.field}`);
+    .setDescription(`Dinar: **${fmt(dinar)}**${wait > 0 ? `\n⏳ Builders are busy — next upgrade in **${msLeft(Date.now() + wait)}**` : ''}\n\n${mil.field}\n\n${fr.field}\n\n${eco.field}\n\n*One upgrade or weapon purchase every 6 hours.*`);
   return { embeds: [embed], components: [new ActionRowBuilder().addComponents(mil.btn, fr.btn, eco.btn), backRow()] };
 }
 
@@ -2084,11 +2128,12 @@ function armouryView(state, db, guildId, userId) {
   const p = state.players[userId];
   const dinar = getDinar(db, guildId, userId);
   const atShopMax = p.weaponTier >= ARMOURY_MAX_TIER;
+  const wait = devWait(p);
   const cost = armouryCost(p.weaponTier);
   const bonus = (t) => `+${Math.round(t * 15)}% attack power`;
   const embed = new EmbedBuilder().setColor(COLOR.gold).setTitle('🗡 Armoury')
     .setDescription(
-      `Dinar: **${fmt(dinar)}**\n\n` +
+      `Dinar: **${fmt(dinar)}**${wait > 0 ? `\n⏳ The smiths are busy — next forging in **${msLeft(Date.now() + wait)}**` : ''}\n\n` +
       `Current weapon: **${weaponTierName(p.weaponTier)}** — tier ${p.weaponTier} (${bonus(p.weaponTier)})\n\n` +
       (atShopMax
         ? `The smiths have done all they can — **${weaponTierName(4)}** and **${weaponTierName(5)}** (tiers 4–5) are only won from slain bosses or the deepest frontier expeditions.`
@@ -2096,7 +2141,7 @@ function armouryView(state, db, guildId, userId) {
     .setFooter({ text: 'Better weapons raise both raid power and boss/expedition damage' });
   const buy = new ButtonBuilder().setCustomId('dy:buyweapon')
     .setLabel(atShopMax ? `Maxed (tier ${ARMOURY_MAX_TIER})` : `Forge tier ${p.weaponTier + 1} (${fmt(cost)}💰)`)
-    .setStyle(ButtonStyle.Success).setDisabled(atShopMax || dinar < cost);
+    .setStyle(ButtonStyle.Success).setDisabled(atShopMax || dinar < cost || wait > 0);
   return { embeds: [embed], components: [new ActionRowBuilder().addComponents(buy), backRow()] };
 }
 
@@ -2373,10 +2418,6 @@ function transferAmount(state, userId, fromCityId, toCityId) {
 function expeditionCitySelect(state, userId) {
   const p = state.players[userId];
   const cities = ownedCities(state, userId);
-  if (!cities.length) {
-    return { embeds: [new EmbedBuilder().setColor(COLOR.grey).setTitle('🏜 Expedition')
-      .setDescription('You hold no cities to launch an expedition from.')], components: [backRow()] };
-  }
   if (p.army < 1) {
     return { embeds: [new EmbedBuilder().setColor(COLOR.grey).setTitle('🏜 Expedition')
       .setDescription('No reserve army to send — recruit troops first.')], components: [backRow()] };
@@ -2391,6 +2432,7 @@ function expeditionCitySelect(state, userId) {
     return { embeds: [new EmbedBuilder().setColor(COLOR.grey).setTitle('🏜 Expedition')
       .setDescription('You already have an expedition underway — check the war room for its return.')], components: [backRow()] };
   }
+  if (!cities.length) return expeditionZoneSelect(state, userId, EXPEDITION_CAMP_ID);   // landless: march out from a field camp
   if (cities.length === 1) return expeditionZoneSelect(state, userId, cities[0].id);
   const menu = new StringSelectMenuBuilder().setCustomId('dy:ex_from').setPlaceholder('Launch from which city?')
     .addOptions(cities.slice(0, 25).map(c => ({ label: c.name, description: `Lv ${c.level}`, value: c.id })));
@@ -2400,8 +2442,8 @@ function expeditionCitySelect(state, userId) {
 }
 
 function expeditionZoneSelect(state, userId, fromCityId) {
-  const from = state.cities[fromCityId];
-  if (!from || from.ownerId !== userId) return expeditionCitySelect(state, userId);
+  const from = expeditionFrom(state, userId, fromCityId);
+  if (!from) return expeditionCitySelect(state, userId);
   const opts = EXPEDITION_ZONES.map(z => ({
     label: z.name,
     description: `${z.hint} • ~${msLeft(Date.now() + travelTime(from, z))} travel`,
@@ -2409,15 +2451,15 @@ function expeditionZoneSelect(state, userId, fromCityId) {
   }));
   const menu = new StringSelectMenuBuilder().setCustomId(`dy:ex_zone:${fromCityId}`).setPlaceholder('Choose a frontier zone…').addOptions(opts);
   return { embeds: [new EmbedBuilder().setColor(COLOR.gold).setTitle('🏜 Choose a Frontier Zone')
-    .setDescription(`Launching from **${esc(from.name)}**. Further zones are riskier — and richer.`)],
+    .setDescription(`Launching from **${esc(from.name)}**. Further zones are riskier — and richer.${from.id === EXPEDITION_CAMP_ID ? '\n*You hold no city, so your force marches out from a field camp.*' : ''}`)],
     components: [new ActionRowBuilder().addComponents(menu), backRow()] };
 }
 
 function expeditionAmount(state, userId, fromCityId, zoneId) {
   const p = state.players[userId];
-  const from = state.cities[fromCityId];
+  const from = expeditionFrom(state, userId, fromCityId);
   const zone = EXPEDITION_ZONE_BY_ID[zoneId];
-  if (!from || from.ownerId !== userId || !zone) return expeditionCitySelect(state, userId);
+  if (!from || !zone) return expeditionCitySelect(state, userId);
   const ms = travelTime(from, zone);
   const q = Math.floor(p.army * 0.25), half = Math.floor(p.army * 0.5);
   const embed = new EmbedBuilder().setColor(COLOR.gold).setTitle(`🏜 Launch expedition to ${esc(zone.name)}?`)
@@ -3545,7 +3587,7 @@ function initDiyar({ client, db, saveData, awardLP }) {
 
   return {
     _test: {
-      getState: () => stateOf, ensurePlayer, resolveAttack, recruit, upgrade, reinforce, collectIncome, tick,
+      getState: () => stateOf, ensurePlayer, resolveAttack, recruit, upgrade, buyWeapon, effectiveAttack, recruitLeft, recruitLimit, reinforce, collectIncome, tick,
       spawnBoss, strikeBoss, resolveBossDefeat, resolveBossExpire, playerStrength, ensureBossSched,
       pendingIncome, renderMap, renderBoss, renderBattle, pickTimes, reseedIfLanded, rankPlayers, isTopRanked, threatEmbed, threatSiegeLines, threatBar,
       postWanted, repostWanted, wantedFace, finishWanted,
@@ -3553,7 +3595,7 @@ function initDiyar({ client, db, saveData, awardLP }) {
       spawnCaravan, claimCaravan, ensureCaravanSched, caravanOfferEmbed, caravanFrameEmbed, caravanFinalEmbed, caravanExpireEmbed, caravanRow,
       claimTribute, buyWeapon, armouryView, profileView, leaderboard, resetSeason, targetSelect, reinforceSelect, effectiveDefence, effectiveAttack, startRaid, resolveRaid, troopCost, raidLiveEmbed, raidResultEmbed, threatTick, finishThreat, inviteLine, postNudge, threatDefeatEmbed, threatWithdrawEmbed, strikeBoss,
       travelTime, startTransfer, resolveTransfer, transferFromSelect, transferToSelect, transferAmount, transferLiveEmbed, transferArrivedEmbed, moveBar, launchTransfer, finishTransfer, transferTick, cityView,
-      startExpedition, resolveExpedition, expeditionTier, expeditionCitySelect, expeditionZoneSelect, expeditionAmount, expeditionLiveEmbed, expeditionResultEmbed, expeditionBar, launchExpedition, finishExpedition, expeditionTick, dashboard, navButtons, profileView,
+      startExpedition, expeditionFrom, resolveExpedition, expeditionTier, expeditionCitySelect, expeditionZoneSelect, expeditionAmount, expeditionLiveEmbed, expeditionResultEmbed, expeditionBar, launchExpedition, finishExpedition, expeditionTick, dashboard, navButtons, profileView,
       maybeRecordHighScore, hallOfFameView, getCapitalCity,
       relicBonusPct, unclaimedRelicId, grantRelic, RELICS, RELIC_BY_ID,
     },
