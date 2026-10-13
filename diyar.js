@@ -18,7 +18,7 @@ const { getDinar, spendDinar, awardDinar, getGachaPool } = require('./gacha');
 const path = require('path');
 
 // ─── Tuning ───────────────────────────────────────────────────────────────────
-const STARTER_ARMY        = 40;
+const STARTER_ARMY        = 120;
 const GARRISON_CAP        = 3000;                   // max troops a single city can hold (rulers of 3 cities or fewer)
 const GARRISON_SHRINK     = 100;                    // per-city cap drops by this for every city beyond the 3rd...
 const GARRISON_CAP_MIN    = 1200;                   // ...down to this floor (reached at 21 cities; 19 cities -> 1400 each)
@@ -27,7 +27,15 @@ const UNDERDOG_PER_CITY   = 0.02;                   // attack bonus per city the
 const UNDERDOG_MAX        = 0.3;                    // ...capped at +30%
 const RECRUIT_DAILY_BASE     = 300;                 // troops anyone can raise per day (Libya time)...
 const RECRUIT_DAILY_PER_CITY = 150;                 // ...plus this many per city held (1 city: 450/day, 7 cities: 1,350/day)
-const DEV_COOLDOWN_MS        = 6 * 60 * 60 * 1000;  // one upgrade OR weapon purchase every 6 h — money buys speed-limited growth
+const RECRUIT_BANK_DAYS      = 3;                    // rulers with fewer than 3 cities save unused allowance, up to this many days' worth
+const DEV_COOLDOWN_MS        = 6 * 60 * 60 * 1000;  // builders rest 6 h after a weapon or an upgrade level 1-3 — money buys speed-limited growth
+const DEV_COOLDOWN_MID_MS    = 12 * 60 * 60 * 1000; // ...12 h after upgrade level 4-6
+const DEV_COOLDOWN_HIGH_MS   = 24 * 60 * 60 * 1000; // ...24 h after upgrade level 7-10
+const GARRISON_PER_LEVEL     = 100;                 // to buy upgrade level L, your cities must average 100 x L defending troops each
+const LANDLESS_UPGRADE_LEVELS = 2;                  // rulers with no city can still buy upgrades up to this level
+const UPKEEP_FREE_LEVEL       = 5;                  // upgrade levels up to here are free to keep, forever
+const UPKEEP_PER_CITY_PER_DAY = { 6: 5, 7: 20, 8: 45, 9: 80, 10: 125 };   // Dinar per CITY per DAY, per track, by that track's level
+const UPKEEP_MAX_ARREARS_DAYS = 5;                  // you never owe more than this many days of upkeep when you finally maintain
 const TROOP_COST          = 1.5;                    // Dinar per troop
 const SHIELD_MS           = 0;                     // truce disabled (no starting truce, no post-raid shield)
 const ATTACK_COOLDOWN_MS  = 30 * 60 * 1000;     // between your own attacks
@@ -46,6 +54,8 @@ const UPG_BASE            = { mil: 240, for: 200, eco: 180 };   // cost = base �
 const TRIBUTE_BASE        = 40;                    // daily login reward (capped mint, async-friendly)
 const TRIBUTE_PER_CITY    = 12;
 const TRIBUTE_MAX         = 120;
+const SMALL_REALM_MAX_CITIES    = 2;     // "small realm" = 2 or fewer cities (landless included)
+const TRIBUTE_SMALL_REALM_BONUS = 100;   // extra daily tribute for small realms (landless: 40 + 100 = 140)
 const ARMOURY_BASE        = 360;                   // Dinar per weapon tier bought (cost = base × (tier+1))
 const ARMOURY_MAX_TIER    = 3;                     // shop caps here; tiers 4–5 only from boss kills
 // cost to forge the NEXT tier from `tier`; doubles once you're past tier 2
@@ -169,6 +179,11 @@ const EXPEDITION_TIERS = [
 // ladder (not a bigger one) since it now multiplies a per-troop-lost bonus rather than a
 // small flat number, and a steep ladder there compounds fast against real army sizes.
 const EXPEDITION_ZONES = [
+  // gentle zone: ONLY for rulers with no city; small payouts, small risk, capped army, so a landless
+  // player can build up without gambling their whole force. Gone the moment they hold a city.
+  { id: 'trail', name: "The Wanderer's Trail", lon: 12.6, lat: 32.6, hint: '🟢 Gentle', tag: 'A quiet caravan road — safe passage for rulers with no city',
+    dangerMin: 4, dangerMax: 10, dangerScale: 0.45, casScale: 0.5, weaponChance: 0, dinar: [10, 22], recruits: [3, 7], richness: 0.5,
+    landlessOnly: true, maxSend: 150 },
   { id: 'jifara', name: 'The Jifara Approach',    lon: 12.5, lat: 32.3, hint: '🟢 Low',      tag: 'Scrubland past the coastal farms',        dangerMin: 40,  dangerMax: 90,  weaponChance: 0.02, dinar: [35, 80],  recruits: [12, 28], richness: 1.0 },
   { id: 'nafusa', name: 'The Nafusa Fringe',      lon: 11.5, lat: 31.3, hint: '🟡 Moderate', tag: 'Rocky foothills, occasional raiders',     dangerMin: 70,  dangerMax: 140, weaponChance: 0.05, dinar: [60, 125], recruits: [18, 40], richness: 1.2 },
   { id: 'sirte',  name: 'The Sirte Hinterland',   lon: 17.5, lat: 30.0, hint: '🟠 High',     tag: 'Empty coastal desert, old wartime wrecks', dangerMin: 130, dangerMax: 240, weaponChance: 0.09, dinar: [105, 195], recruits: [30, 60], richness: 1.4 },
@@ -728,13 +743,81 @@ function underdogMult(attacker, owner) {
 // Dinar can't be turned into an instant army / instant max upgrades: recruiting has a daily limit
 // and upgrades + weapons share a cooldown. Nobody's balance is touched — it just can't be spent faster.
 function recruitLimit(state, userId) { return RECRUIT_DAILY_BASE + RECRUIT_DAILY_PER_CITY * (state.players[userId]?.cities.length || 0); }
-function recruitedToday(p) { return p.recruitDay === libyaDay(Date.now()).dateStr ? (p.recruitedToday || 0) : 0; }
+// the most allowance a ruler can hold at once: one day's worth, or up to 3 days' worth if they hold fewer than 3 cities
+function recruitCap(state, userId) {
+  const lim = recruitLimit(state, userId);
+  return (state.players[userId]?.cities.length || 0) <= SMALL_REALM_MAX_CITIES ? lim * RECRUIT_BANK_DAYS : lim;
+}
+const dayIndex = (dateStr) => Math.floor(Date.parse(dateStr + 'T00:00:00Z') / 86400000);
+// the recruiting allowance a player has right now (pure — recruit() is what stores it). Each new Libya
+// day adds one day's limit; small realms keep what they didn't use (up to the cap), bigger realms just reset.
 function recruitLeft(state, userId) {
-  const p = state.players[userId];
-  return p ? Math.max(0, recruitLimit(state, userId) - recruitedToday(p)) : 0;
+  const p = state.players[userId]; if (!p) return 0;
+  const today = libyaDay(Date.now()).dateStr;
+  const lim = recruitLimit(state, userId), cap = recruitCap(state, userId);
+  let allow, day;
+  if (typeof p.recruitAllow === 'number') { allow = p.recruitAllow; day = p.recruitDay; }
+  else {                                                        // never recruited yet (or a save from before banking existed)
+    day = p.recruitDay || libyaDay(p.joinedAt || Date.now()).dateStr;      // saving starts the day they joined
+    allow = lim - (p.recruitDay ? (p.recruitedToday || 0) : 0);
+  }
+  if (day === today) return Math.max(0, allow);
+  const days = Math.max(1, dayIndex(today) - dayIndex(day));
+  return Math.min(cap, (cap > lim ? Math.max(0, allow) : 0) + days * lim);
 }
 // ms until this player may buy their next upgrade or weapon tier
-function devWait(p) { return Math.max(0, (p.lastDevAt || 0) + DEV_COOLDOWN_MS - Date.now()); }
+function devWait(p) { return Math.max(0, (p.devReadyAt ?? ((p.lastDevAt || 0) + DEV_COOLDOWN_MS)) - Date.now()); }
+// how long the builders rest after you buy upgrade level `lvl`: quick early on, a full day at the top
+const devRest = (lvl) => lvl <= 3 ? DEV_COOLDOWN_MS : lvl <= 6 ? DEV_COOLDOWN_MID_MS : DEV_COOLDOWN_HIGH_MS;
+// average DEFENDING troops per city: reserve troops and surplus above the garrison limit don't count
+function avgGarrison(state, userId) {
+  const cs = ownedCities(state, userId);
+  return cs.length ? cs.reduce((s, c) => s + effectiveGarrison(state, c), 0) / cs.length : 0;
+}
+// null if the ruler may buy upgrade level `newLevel`, otherwise why not
+function upgradeBlock(state, userId, newLevel) {
+  if (!ownedCities(state, userId).length) return newLevel <= LANDLESS_UPGRADE_LEVELS ? null : { landless: true };
+  const need = GARRISON_PER_LEVEL * newLevel, have = Math.floor(avgGarrison(state, userId));
+  return have >= need ? null : { need, have };
+}
+
+// ─── Upkeep: top-tier upgrades are 'damaged' (same level, weaker) until maintained ───────────────
+const DAY_MS = 24 * 60 * 60 * 1000;
+const UPKEEP_TRACKS = ['mil', 'for', 'eco'];
+// days since the last Maintain (0 until a level-6+ upgrade starts the clock)
+function upkeepDays(p) { return p.upkeepAt == null ? 0 : Math.max(0, (Date.now() - p.upkeepAt) / DAY_MS); }
+// levels lost to missed upkeep: none for the first day, then one more level for each further day
+function upkeepDamage(p) { return Math.min(UPG_MAX - UPKEEP_FREE_LEVEL, Math.max(0, Math.ceil(upkeepDays(p)) - 1)); }
+// the level a track actually WORKS at: its real level minus damage, but never below the free level
+function effUpg(p, track) {
+  const lvl = p.upg[track] || 0;
+  return lvl <= UPKEEP_FREE_LEVEL ? lvl : Math.max(UPKEEP_FREE_LEVEL, lvl - upkeepDamage(p));
+}
+const upgLabel = (p, track) => { const l = p.upg[track], e = effUpg(p, track); return e < l ? `${l} ⚠${e}` : `${l}`; };
+// Dinar per day to keep every track at its real level: per city, per track (landless count as 1 city)
+function dailyUpkeep(state, userId) {
+  const p = state.players[userId]; if (!p) return 0;
+  const n = Math.max(1, ownedCities(state, userId).length);
+  return n * UPKEEP_TRACKS.reduce((s, t) => s + (UPKEEP_PER_CITY_PER_DAY[p.upg[t]] || 0), 0);
+}
+// what Maintain costs right now: the days since you last paid (at most 5) x the daily upkeep
+function upkeepOwed(state, userId) {
+  const p = state.players[userId];
+  return p ? Math.ceil(dailyUpkeep(state, userId) * Math.min(upkeepDays(p), UPKEEP_MAX_ARREARS_DAYS)) : 0;
+}
+function maintain(state, db, guildId, saveData, userId) {
+  const p = state.players[userId]; if (!p) return { ok: false, error: 'Not found.' };
+  if (!UPKEEP_TRACKS.some(t => p.upg[t] > UPKEEP_FREE_LEVEL)) return { ok: false, nothing: true };
+  const cost = upkeepOwed(state, userId), repaired = upkeepDamage(p);
+  if (cost > 0 && !spendDinar(db, guildId, userId, cost, saveData)) return { ok: false, cost };
+  p.upkeepAt = Date.now(); saveData(guildId);
+  return { ok: true, cost, repaired };
+}
+// start the maintenance clock the first time someone holds a level-6+ upgrade (also covers saves from before upkeep existed)
+function startUpkeepClock(p) {
+  if (p && p.upkeepAt == null && UPKEEP_TRACKS.some(t => p.upg[t] > UPKEEP_FREE_LEVEL)) { p.upkeepAt = Date.now(); return true; }
+  return false;
+}
 
 // resolves a player's capital city, self-healing if unset or lost — falls back to their
 // first currently-held city, so old saves (from before capitals existed) and capital-loss
@@ -759,7 +842,7 @@ function maybeRecordHighScore(state, key, value, entry) {
 function playerStrength(state, p) {
   if (!p) return 0;
   const garr = ownedCities(state, findId(state, p)).reduce((s, c) => s + c.garrison, 0);
-  const upg = p.upg.mil + p.upg.for + p.upg.eco;
+  const upg = effUpg(p, 'mil') + effUpg(p, 'for') + effUpg(p, 'eco');
   return p.army + garr + p.cities.length * 25 + upg * 12 + p.weaponTier * 15;
 }
 const findId = (state, p) => Object.keys(state.players).find(id => state.players[id] === p);
@@ -768,7 +851,7 @@ function pendingIncome(state, city) {
   if (!city.ownerId) return 0;
   const owner = state.players[city.ownerId];
   const relicBonus = relicBonusPct(state, city.ownerId, 'income');
-  const rate = INCOME_BY_LEVEL[city.level] * (1 + (owner ? owner.upg.eco * 0.12 : 0) + relicBonus); // per hour
+  const rate = INCOME_BY_LEVEL[city.level] * (1 + (owner ? effUpg(owner, 'eco') * 0.12 : 0) + relicBonus); // per hour
   const hrs = clamp((Date.now() - city.lastIncomeAt) / 3600000, 0, INCOME_CAP_HRS);
   return Math.floor(rate * hrs);
 }
@@ -800,7 +883,7 @@ function recruit(state, db, guildId, saveData, userId, n) {
   if (getDinar(db, guildId, userId) < cost) return { ok: false, cost };
   spendDinar(db, guildId, userId, cost, saveData);
   p.army += buy;
-  p.recruitedToday = recruitedToday(p) + buy;
+  p.recruitAllow = left - buy;
   p.recruitDay = libyaDay(Date.now()).dateStr;
   saveData(guildId);
   return { ok: true, cost, army: p.army, bought: buy, limited: buy < n };
@@ -810,6 +893,8 @@ function upgrade(state, db, guildId, saveData, userId, track) {
   const p = state.players[userId];
   const lvl = p.upg[track];
   if (lvl >= UPG_MAX) return { ok: false, maxed: true };
+  const block = upgradeBlock(state, userId, lvl + 1);
+  if (block) return { ok: false, ...block };
   const wait = devWait(p);
   if (wait > 0) return { ok: false, cooldown: wait };
   const cost = upgCost(track, lvl);
@@ -817,6 +902,8 @@ function upgrade(state, db, guildId, saveData, userId, track) {
   spendDinar(db, guildId, userId, cost, saveData);
   p.upg[track]++;
   p.lastDevAt = Date.now();
+  p.devReadyAt = Date.now() + devRest(p.upg[track]);
+  if (p.upg[track] > UPKEEP_FREE_LEVEL && p.upkeepAt == null) p.upkeepAt = Date.now();
   saveData(guildId);
   return { ok: true, cost, level: p.upg[track] };
 }
@@ -894,13 +981,14 @@ function startExpedition(state, saveData, guildId, userId, fromCityId, zoneId, p
   const from = expeditionFrom(state, userId, fromCityId);
   const zone = EXPEDITION_ZONE_BY_ID[zoneId];
   if (!p || !zone) return { error: 'Not found.' };
+  if (zone.landlessOnly && ownedCities(state, userId).length) return { error: `${zone.name} is only open to rulers with no city.` };
   if (!from) return { error: 'You can only launch an expedition from your own city.' };
   const now = Date.now();
   if (now - (p.lastExpeditionAt || 0) < EXPEDITION_COOLDOWN_MS)
     return { error: `Your expedition force hasn't finished resting. Ready in ${msLeft((p.lastExpeditionAt || 0) + EXPEDITION_COOLDOWN_MS)}.` };
   if (state.pendingExpeditions && Object.values(state.pendingExpeditions).some(e => e.playerId === userId))
     return { error: 'You already have an expedition underway — wait for it to return.' };
-  const send = Math.floor(p.army * pct);
+  const send = Math.min(Math.floor(p.army * pct), zone.maxSend || Infinity);
   if (send < 1) return { error: 'You have no reserve army to send. Recruit troops first.' };
   p.army -= send;              // committed the instant they march — can't be recalled
   p.lastExpeditionAt = now;    // cooldown starts at launch, independent of the raid cooldown
@@ -926,12 +1014,12 @@ function resolveExpedition(state, db, guildId, saveData, exp) {
   const p = state.players[exp.playerId];
   if (!p) return null;
   const zone = EXPEDITION_ZONE_BY_ID[exp.zoneId];
-  const power = exp.send * (1 + p.weaponTier * 0.15 + p.upg.mil * 0.12) * rnd(0.75, 1.25);
-  const veteranFactor = 1 + p.weaponTier * EXPEDITION_VETERAN_WEAPON_SCALE + p.upg.mil * EXPEDITION_VETERAN_MIL_SCALE;
+  const power = exp.send * (1 + p.weaponTier * 0.15 + effUpg(p, 'mil') * 0.12) * rnd(0.75, 1.25);
+  const veteranFactor = 1 + p.weaponTier * EXPEDITION_VETERAN_WEAPON_SCALE + effUpg(p, 'mil') * EXPEDITION_VETERAN_MIL_SCALE;
   // the troop-scaled term now carries its own roll (see EXPEDITION_DANGER_ROLL_* above) so
   // it keeps real proportional variance at any send size, instead of the fixed zone roll
   // being the only source of luck and getting diluted away once `send` is large.
-  let danger = (randInt(zone.dangerMin, zone.dangerMax) + exp.send * EXPEDITION_DANGER_SCALE * rnd(EXPEDITION_DANGER_ROLL_MIN, EXPEDITION_DANGER_ROLL_MAX)) * veteranFactor;
+  let danger = (randInt(zone.dangerMin, zone.dangerMax) + exp.send * (zone.dangerScale ?? EXPEDITION_DANGER_SCALE) * rnd(EXPEDITION_DANGER_ROLL_MIN, EXPEDITION_DANGER_ROLL_MAX)) * veteranFactor;
   // ambush: a rare, send-scaled chance of real trouble regardless of how good the ratio
   // looked going in — bigger columns draw more attention. Capped so it's never a near-sure
   // thing even for the largest possible send; multiplies danger rather than forcing a
@@ -941,7 +1029,7 @@ function resolveExpedition(state, db, guildId, saveData, exp) {
   if (ambushed) danger *= rnd(EXPEDITION_AMBUSH_MULT_MIN, EXPEDITION_AMBUSH_MULT_MAX);
   const ratio = power / danger;
   const tier = expeditionTier(ratio);
-  const cas = Math.round(exp.send * rnd(tier.cas[0], tier.cas[1]));
+  const cas = Math.round(exp.send * rnd(tier.cas[0], tier.cas[1]) * (zone.casScale ?? 1));
   const survivors = exp.send - cas;
   p.army += survivors;
 
@@ -1008,7 +1096,9 @@ function claimTribute(state, db, guildId, saveData, userId) {
   const p = state.players[userId]; if (!p) return 0;
   const today = libyaDay(Date.now()).dateStr;
   if (p.lastTributeDay === today) return 0;
-  const amount = Math.min(TRIBUTE_BASE + ownedCities(state, userId).length * TRIBUTE_PER_CITY, TRIBUTE_MAX);
+  const nCities = ownedCities(state, userId).length;
+  const amount = Math.min(TRIBUTE_BASE + nCities * TRIBUTE_PER_CITY, TRIBUTE_MAX)
+               + (nCities <= SMALL_REALM_MAX_CITIES ? TRIBUTE_SMALL_REALM_BONUS : 0);
   p.lastTributeDay = today;
   awardDinar(db, guildId, userId, amount, saveData);
   saveData(guildId);
@@ -1025,6 +1115,7 @@ function buyWeapon(state, db, guildId, saveData, userId) {
   if (!spendDinar(db, guildId, userId, cost, saveData)) return { error: `Not enough Dinar (need ${fmt(cost)}).` };
   p.weaponTier++;
   p.lastDevAt = Date.now();
+  p.devReadyAt = Date.now() + DEV_COOLDOWN_MS;
   saveData(guildId);
   return { ok: true, cost, tier: p.weaponTier };
 }
@@ -1118,9 +1209,11 @@ function attemptOilRigCapture(state, db, guildId, saveData, userId, direction) {
 
   // clear — settle the outgoing holder's final Dinar, log their finished reign, then hand over
   const prevHolderId = rig.holderId, prevHolderName = rig.holderName;
+  let prevHeldMs = 0;
   if (prevHolderId) {
     settleOilRigIncome(state, db, guildId, saveData, now);
     const heldMs = now - rig.capturedAt;
+    prevHeldMs = heldMs;
     rig.totals[prevHolderId] = rig.totals[prevHolderId] || { name: prevHolderName, ms: 0 };
     rig.totals[prevHolderId].name = prevHolderName;
     rig.totals[prevHolderId].ms += heldMs;
@@ -1131,7 +1224,7 @@ function attemptOilRigCapture(state, db, guildId, saveData, userId, direction) {
   rig.recent = []; rig.recentAt = null;   // a clean slate — old grudges don't carry into the new reign
   oilRigPushLog(rig, { at: now, result: 'captured', direction, attackerName: p.name, prevHolderName });
   saveData(guildId);
-  return { captured: true, direction, prevHolderId, prevHolderName };
+  return { captured: true, direction, prevHolderId, prevHolderName, prevHeldMs };
 }
 
 function buildOilRigWall(state, saveData, guildId, userId, direction) {
@@ -1156,14 +1249,14 @@ function buildOilRigWall(state, saveData, guildId, userId, direction) {
 function effectiveDefence(state, city, reinforceMult) {
   const owner = city.ownerId ? state.players[city.ownerId] : null;
   const relicBonus = relicBonusPct(state, city.ownerId, 'defense');
-  const dMultBase = 1 + (owner ? owner.upg.for * 0.15 : 0) + city.level * 0.1 + relicBonus;
+  const dMultBase = 1 + (owner ? effUpg(owner, 'for') * 0.15 : 0) + city.level * 0.1 + relicBonus;
   const lastStand = (owner && owner.cities.length === 1) ? 1.5 : 1.0;
   return Math.round((effectiveGarrison(state, city) * dMultBase * lastStand + city.level * 8) * (reinforceMult || 1));
 }
 // the real attack strength of a force (troops + weapon tier + military upgrades + attack relics)
 function effectiveAttack(state, attacker, attackerId, send) {
   const relicBonus = relicBonusPct(state, attackerId, 'attack');
-  return Math.round(send * (1 + attacker.weaponTier * 0.15 + attacker.upg.mil * 0.12 + relicBonus));
+  return Math.round(send * (1 + attacker.weaponTier * 0.15 + effUpg(attacker, 'mil') * 0.12 + relicBonus));
 }
 
 // validate a raid and lock the committed troops; returns {error} or {pending}
@@ -1211,9 +1304,9 @@ function resolveRaid(state, db, guildId, saveData, pending, reinforceMult) {
   const rMult = reinforceMult || 1;
 
   const underdog = underdogMult(attacker, owner);
-  const aMult = (1 + attacker.weaponTier * 0.15 + attacker.upg.mil * 0.12 + relicBonusPct(state, pending.attackerId, 'attack')) * underdog;
+  const aMult = (1 + attacker.weaponTier * 0.15 + effUpg(attacker, 'mil') * 0.12 + relicBonusPct(state, pending.attackerId, 'attack')) * underdog;
   const aPow = send * aMult * rnd(0.85, 1.15);
-  const dMultBase = 1 + (owner ? owner.upg.for * 0.15 : 0) + city.level * 0.1 + relicBonusPct(state, city.ownerId, 'defense');
+  const dMultBase = 1 + (owner ? effUpg(owner, 'for') * 0.15 : 0) + city.level * 0.1 + relicBonusPct(state, city.ownerId, 'defense');
   const lastStand = (owner && owner.cities.length === 1) ? 1.5 : 1.0;
   const dPow = (effectiveGarrison(state, city) * dMultBase * lastStand + city.level * 8) * rMult * rnd(0.85, 1.15);
   const win = aPow > dPow;
@@ -1540,7 +1633,7 @@ function strikeBoss(state, saveData, guildId, userId, heavy) {
   // heavy attack only lands if the player currently has one primed; it's consumed either way
   const useHeavy = !!heavy && !!p.heavyReady;
   p.heavyReady = false;
-  let dmg = Math.round((p.army * 0.06 * (1 + p.upg.mil * 0.1 + p.weaponTier * 0.15) + 12) * rnd(0.8, 1.2));   // chip damage — tuned for the 3s cooldown
+  let dmg = Math.round((p.army * 0.06 * (1 + effUpg(p, 'mil') * 0.1 + p.weaponTier * 0.15) + 12) * rnd(0.8, 1.2));   // chip damage — tuned for the 3s cooldown
   if (useHeavy) dmg *= 3;                                   // HEAVY ATTACK — triple damage
   b.hp -= dmg;
   b.damage[userId] = (b.damage[userId] || 0) + dmg;
@@ -2050,7 +2143,7 @@ function dashboard(state, db, guildId, userId) {
     .setDescription(
       `**${cities.length}** cit${cities.length === 1 ? 'y' : 'ies'} • **${fmt(dinar)}** Dinar\n` +
       `🪖 Army: **${fmt(p.army)}**  •  🏰 Garrisons: **${fmt(garr)}**\n` +
-      `🗡 Weapon: **${weaponTierName(p.weaponTier)}** (tier ${p.weaponTier})  •  Military **${p.upg.mil}** / Walls **${p.upg.for}** / Economy **${p.upg.eco}**\n` +
+      `🗡 Weapon: **${weaponTierName(p.weaponTier)}** (tier ${p.weaponTier})  •  Military **${upgLabel(p, 'mil')}** / Walls **${upgLabel(p, 'for')}** / Economy **${upgLabel(p, 'eco')}**\n` +
       `💰 Uncollected income: **${fmt(income)}**${shield}` + boss + cvn + wtd + expLine + rigLine)
     .setFooter({ text: 'Raids steal Dinar from rivals • capture cities to grow • Expeditions put idle army to work' });
   const row2 = new ActionRowBuilder().addComponents(
@@ -2090,7 +2183,7 @@ function armyView(state, db, guildId, userId) {
   const dinar = getDinar(db, guildId, userId);
   const unit = troopCost(state, userId);
   const nCities = ownedCities(state, userId).length;
-  const dayLimit = recruitLimit(state, userId), dayLeft = recruitLeft(state, userId);
+  const dayLimit = recruitLimit(state, userId), dayLeft = recruitLeft(state, userId), dayCap = recruitCap(state, userId);
   const why = nCities === 0
     ? `You hold **no cities**, so troops are cheapest at **${unit} Dinar** each.`
     : nCities <= 2
@@ -2100,7 +2193,7 @@ function armyView(state, db, guildId, userId) {
         : `You hold **${nCities}** cities. Holding **10 or more** makes each troop cost **${unit} Dinar** — a vast realm is the costliest to raise armies for.`;
   const embed = new EmbedBuilder().setColor(COLOR.gold)
     .setTitle('🪖 Recruit Army')
-    .setDescription(`Army: **${fmt(p.army)}**  •  Dinar: **${fmt(dinar)}**\nEach troop costs **${unit} Dinar**.\nRecruited today: **${fmt(dayLimit - dayLeft)} / ${fmt(dayLimit)}** (resets at midnight, Libya time).\n\n*${why}*`);
+    .setDescription(`Army: **${fmt(p.army)}**  •  Dinar: **${fmt(dinar)}**\nEach troop costs **${unit} Dinar**.\n${nCities <= SMALL_REALM_MAX_CITIES ? `Recruit allowance: **${fmt(dayLeft)}** troops (**${fmt(dayLimit)}** a day — unused days are saved for up to ${RECRUIT_BANK_DAYS} days, max **${fmt(dayCap)}**).` : `Recruit allowance today: **${fmt(dayLeft)} / ${fmt(dayLimit)}** (resets at midnight, Libya time).`}\n\n*${why}*`);
   const mk = (n) => new ButtonBuilder().setCustomId(`dy:recruit:${n}`).setLabel(`+${n} (${Math.round(n * unit)}💰)`).setStyle(ButtonStyle.Success).setDisabled(dinar < Math.round(n * unit) || n > dayLeft);
   return { embeds: [embed], components: [new ActionRowBuilder().addComponents(mk(10), mk(50), mk(100), mk(250)), backRow()] };
 }
@@ -2109,19 +2202,28 @@ function upgradeView(state, db, guildId, userId) {
   const p = state.players[userId];
   const dinar = getDinar(db, guildId, userId);
   const wait = devWait(p);
+  const nCities = ownedCities(state, userId).length, haveAvg = Math.floor(avgGarrison(state, userId));
+  const anyHigh = UPKEEP_TRACKS.some(t => p.upg[t] > UPKEEP_FREE_LEVEL);
+  const owed = upkeepOwed(state, userId), perDay = dailyUpkeep(state, userId), dmg = upkeepDamage(p);
+  const upkeepLine = anyHigh
+    ? `\n🔧 Upkeep: **${fmt(perDay)}**/day (levels 6-10 cost per city, per track). ${dmg > 0 ? `⚠ **Overdue — your upgrades are damaged by ${dmg} level${dmg > 1 ? 's' : ''}.**` : 'Maintained ✅ — do it at least once a day.'}`
+    : `\n🔧 Levels 6-10 need daily upkeep (per city, per track). Levels 1-5 are free forever.`;
   const row = (track, label, desc) => {
     const lvl = p.upg[track];
     const cost = upgCost(track, lvl);
     const maxed = lvl >= UPG_MAX;
-    return { field: `${label} — Lv ${lvl}/${UPG_MAX}\n${desc}${maxed ? ' • *maxed*' : ` • next: **${cost}💰**`}`,
-      btn: new ButtonBuilder().setCustomId(`dy:upg:${track}`).setLabel(`${label} ${maxed ? 'MAX' : '→ ' + (lvl + 1)}`).setStyle(ButtonStyle.Primary).setDisabled(maxed || dinar < cost || wait > 0) };
+    const block = maxed ? null : upgradeBlock(state, userId, lvl + 1);
+    return { field: `${label} — Lv ${lvl}/${UPG_MAX}${effUpg(p, track) < lvl ? ` ⚠ *damaged — working at Lv ${effUpg(p, track)}*` : ''}\n${desc}${maxed ? ' • *maxed*' : ` • next: **${cost}💰**${lvl + 1 > UPKEEP_FREE_LEVEL ? ` (upkeep ${UPKEEP_PER_CITY_PER_DAY[lvl + 1]}/city/day)` : ''}${block ? (block.landless ? ' • 🔒 hold a city first' : ` • 🔒 needs **${fmt(block.need)}** troops per city`) : ''}`}`,
+      btn: new ButtonBuilder().setCustomId(`dy:upg:${track}`).setLabel(`${label} ${maxed ? 'MAX' : '→ ' + (lvl + 1)}`).setStyle(ButtonStyle.Primary).setDisabled(maxed || dinar < cost || wait > 0 || !!block) };
   };
   const mil = row('mil', '⚔ Military', 'Stronger attacks');
   const fr  = row('for', '🛡 Walls', 'Tougher defense');
   const eco = row('eco', '💰 Economy', 'More income, less loot stolen');
   const embed = new EmbedBuilder().setColor(COLOR.blue).setTitle('⬆ Upgrades')
-    .setDescription(`Dinar: **${fmt(dinar)}**${wait > 0 ? `\n⏳ Builders are busy — next upgrade in **${msLeft(Date.now() + wait)}**` : ''}\n\n${mil.field}\n\n${fr.field}\n\n${eco.field}\n\n*One upgrade or weapon purchase every 6 hours.*`);
-  return { embeds: [embed], components: [new ActionRowBuilder().addComponents(mil.btn, fr.btn, eco.btn), backRow()] };
+    .setDescription(`Dinar: **${fmt(dinar)}**${wait > 0 ? `\n⏳ Builders are busy — next upgrade in **${msLeft(Date.now() + wait)}**` : ''}\n\n${mil.field}\n\n${fr.field}\n\n${eco.field}\n\n${nCities ? `🏰 Your cities average **${fmt(haveAvg)}** defending troops each (reserve and surplus above the garrison limit don't count). Level **L** needs **${GARRISON_PER_LEVEL} × L** per city.` : `🏰 You hold no city — upgrades past level ${LANDLESS_UPGRADE_LEVELS} need cities with a standing garrison.`}${upkeepLine}\n*Builders rest after each purchase: 6h (levels 1-3), 12h (4-6), 24h (7-10). Weapons: 6h.*`);
+  const maintainBtn = new ButtonBuilder().setCustomId('dy:maintain').setLabel(owed > 0 ? `🔧 Maintain (${fmt(owed)}💰)` : '🔧 Maintain')
+    .setStyle(dmg > 0 ? ButtonStyle.Danger : ButtonStyle.Secondary).setDisabled(!anyHigh || dinar < owed);
+  return { embeds: [embed], components: [new ActionRowBuilder().addComponents(mil.btn, fr.btn, eco.btn), new ActionRowBuilder().addComponents(maintainBtn), backRow()] };
 }
 
 function armouryView(state, db, guildId, userId) {
@@ -2146,6 +2248,54 @@ function armouryView(state, db, guildId, userId) {
 }
 
 // ─── The Oil Rig — views ──────────────────────────────────────────────────
+// ─── King of the Hill: big cards instead of one-line messages ────────────────────────────────
+const oilRigDirName = (d) => `${OILRIG_DIRECTION_EMOJI[d]} ${d[0].toUpperCase()}${d.slice(1)}`;
+const wallMeter = (n) => '🧱'.repeat(n) + '⬜'.repeat(Math.max(0, OILRIG_WALL_MAX - n));      // 🧱🧱 / 🧱⬜ / ⬜⬜
+const oilRigRateNow = (rig, now) => (now - rig.capturedAt) < OILRIG_INCOME_HIGH_HRS * 3600000 ? OILRIG_INCOME_HIGH : OILRIG_INCOME_LOW;
+
+// public: a ruler seized the rig
+function oilRigCaptureCard(attackerName, avatarUrl, r) {
+  const prev = r.prevHolderName ? esc(r.prevHolderName) : null;
+  const embed = new EmbedBuilder().setColor(COLOR.gold).setTitle('👑 A NEW KING OF THE HILL!')
+    .setDescription(`**${attackerName}** stormed in from the **${oilRigDirName(r.direction)}** and seized **${OILRIG_NAME}**${prev ? ` from **${prev}**` : ''}!`)
+    .addFields(
+      { name: '👑 New King', value: attackerName, inline: true },
+      { name: prev ? '💀 Dethroned' : '🏴 Before', value: prev ? `${prev}\n*reigned ${fmtDuration(r.prevHeldMs || 0)}*` : '*Unclaimed*', inline: true },
+      { name: '🧭 Approach', value: oilRigDirName(r.direction), inline: true },
+      { name: '💰 Payout', value: `**${OILRIG_INCOME_HIGH}** Dinar/hr for the first ${OILRIG_INCOME_HIGH_HRS}h`, inline: true },
+      { name: '🧱 Walls', value: `${wallMeter(0)}  *none yet*`, inline: true },
+      { name: '⚔ Think you can take it?', value: 'Open **/diyar** → **👑 King of the Hill** and try your luck.' },
+    )
+    .setFooter({ text: `${OILRIG_NAME} • King of the Hill` }).setTimestamp();
+  if (avatarUrl) embed.setThumbnail(avatarUrl);
+  return { embeds: [embed] };
+}
+
+// public: someone ran into a wall. The `content` mention is what actually pings the king (mentions
+// inside an embed don't). Deliberately says nothing about WHICH direction was hit.
+function oilRigBlockedCard(attackerName, avatarUrl, r) {
+  const embed = new EmbedBuilder().setColor(COLOR.red).setTitle('🧱 A WALL JUST FELL!')
+    .setDescription(`**${attackerName}** attacked the King of the Hill and slammed into a **Defensive Wall** — it's rubble now.`)
+    .addFields(
+      { name: '👑 King of the Hill', value: esc(r.holderName), inline: true },
+      { name: '🚨 Gap alert', value: 'A wall is gone. Rebuild before someone else finds that opening.', inline: true },
+    )
+    .setFooter({ text: `${OILRIG_NAME} • King of the Hill` }).setTimestamp();
+  if (avatarUrl) embed.setThumbnail(avatarUrl);
+  return { content: `<@${r.holderId}> 🚨`, embeds: [embed] };
+}
+
+// private (only the attacker sees it)
+function oilRigBlockedPrivateCard(r, lockUntil) {
+  return new EmbedBuilder().setColor(COLOR.red).setTitle('🧱 Blocked!')
+    .setDescription(`A defensive wall was waiting to the **${oilRigDirName(r.direction)}**. That wall is destroyed now, so it's a real gap once you're free to try again.`)
+    .addFields(
+      { name: '💀 Troops lost', value: fmt(r.cas), inline: true },
+      { name: '🏃 Made it back', value: fmt(r.survivors), inline: true },
+      { name: '⏳ Next attempt', value: lockUntil > Date.now() ? msLeft(lockUntil) : 'now', inline: true },
+    );
+}
+
 function oilRigView(state, userId) {
   const rig = state.oilRig;
   const now = Date.now();
@@ -2179,10 +2329,25 @@ function oilRigView(state, userId) {
       : `✅ You're free to attempt a capture right now.`;
   }
 
-  const embed = new EmbedBuilder().setColor(COLOR.blurple).setTitle('👑 King of the Hill')
-    .setDescription(
-      `*${OILRIG_NAME} — a neutral oil field in the deep desert. Whoever holds it taps the wealth, but nobody holds it for free.*\n\n` +
-      `${statusLines.join('\n')}\n\n${actionLine}`)
+  const rateNow = rig.holderId ? oilRigRateNow(rig, now) : OILRIG_INCOME_HIGH;
+  const payNote = !rig.holderId ? `for the first ${OILRIG_INCOME_HIGH_HRS}h`
+    : rateNow === OILRIG_INCOME_HIGH ? `drops to ${OILRIG_INCOME_LOW}/hr after ${OILRIG_INCOME_HIGH_HRS}h` : `down from ${OILRIG_INCOME_HIGH}/hr (held past ${OILRIG_INCOME_HIGH_HRS}h)`;
+  const embed = new EmbedBuilder().setColor(isHolder ? COLOR.green : rig.holderId ? COLOR.gold : COLOR.blurple).setTitle(`👑 King of the Hill — ${OILRIG_NAME}`)
+    .setDescription(`*A neutral oil field in the deep desert. Whoever holds it taps the wealth, but nobody holds it for free.*`);
+  if (!rig.holderId) {
+    embed.addFields(
+      { name: '🏴 Unclaimed', value: 'The first ruler to seize it writes their name into history.', inline: true },
+      { name: '💰 Prize', value: `**${rateNow}** Dinar/hr\n*${payNote}*`, inline: true },
+    );
+  } else {
+    embed.addFields(
+      { name: '👑 King', value: `**${esc(rig.holderName)}**${isHolder ? ' *(you)*' : ''}`, inline: true },
+      { name: '⏱ Reign', value: `**${fmtDuration(now - rig.capturedAt)}**\n*and counting*`, inline: true },
+      { name: '💰 Payout', value: `**${rateNow}** Dinar/hr\n*${payNote}*`, inline: true },
+      { name: '🧱 Walls', value: `${wallMeter(wallCount)}  **${wallCount}/${OILRIG_WALL_MAX}**`, inline: true },
+    );
+  }
+  embed.addFields({ name: isHolder ? '🛡 Your defences' : '⚔ Your move', value: actionLine })
     .setFooter({ text: `Capturing costs ${OILRIG_CAPTURE_COST} troops • a defensive wall costs ${OILRIG_WALL_COST} • blind guess, no power comparison` });
 
   const row1 = new ActionRowBuilder().addComponents(
@@ -2216,10 +2381,12 @@ function oilRigCaptureView(state, userId) {
   const dir = (d) => new ButtonBuilder().setCustomId(`dy:oilrig_go:${d}`).setLabel(`${OILRIG_DIRECTION_EMOJI[d]} ${d[0].toUpperCase()}${d.slice(1)}`).setStyle(ButtonStyle.Danger);
   const center = new ButtonBuilder().setCustomId('dy:oilrig_pad:c').setLabel('🛢').setStyle(ButtonStyle.Secondary).setDisabled(true);
   const embed = new EmbedBuilder().setColor(COLOR.blurple).setTitle('👑 Choose your approach')
-    .setDescription(
-      `Pick a direction to strike from. The holder may have up to **${OILRIG_WALL_MAX}** hidden defensive walls — ` +
-      `you won't know which, until it's too late.\n\n` +
-      `Costs **${OILRIG_CAPTURE_COST}** troops. Guess clear and the rig is yours. Guess a wall and you lose **${Math.round(OILRIG_CAPTURE_COST * (1 - OILRIG_LOSS_REFUND))}** of them.`);
+    .setDescription(`Pick a direction to strike from. The holder may have up to **${OILRIG_WALL_MAX}** hidden defensive walls — you won't know which, until it's too late.`)
+    .addFields(
+      { name: '💰 Cost', value: `**${OILRIG_CAPTURE_COST}** troops`, inline: true },
+      { name: '✅ Guess clear', value: 'The rig is **yours**', inline: true },
+      { name: '💀 Guess a wall', value: `Lose **${Math.round(OILRIG_CAPTURE_COST * (1 - OILRIG_LOSS_REFUND))}** troops`, inline: true },
+    );
   return {
     embeds: [embed],
     components: [
@@ -2261,9 +2428,16 @@ function oilRigLeaderboardView(state) {
     .map(uid => ({ uid, name: rig.totals[uid]?.name || rig.holderName, ms: oilRigTotalHeldMs(rig, uid, now) }))
     .sort((a, b) => b.ms - a.ms)
     .slice(0, 10);
-  const lines = rows.map((r, i) => `${['🥇', '🥈', '🥉'][i] || `${i + 1}.`} ${esc(r.name)} — **${fmtDuration(r.ms)}**${rig.holderId === r.uid ? ' *(current ruler)*' : ''}`);
-  const embed = new EmbedBuilder().setColor(COLOR.blurple).setTitle('👑 King of the Hill — Longest Reigns')
-    .setDescription(`*Total time held, added up across every reign. Survives season resets.*\n\n${lines.join('\n') || '*Nobody has held it yet — be the first.*'}`);
+  const medal = ['🥇', '🥈', '🥉'];
+  const crown = (r) => rig.holderId === r.uid ? ' 👑' : '';
+  const embed = new EmbedBuilder().setColor(COLOR.gold).setTitle('👑 King of the Hill — Longest Reigns')
+    .setDescription('*Total time held, added up across every reign. Survives season resets.*')
+    .setFooter({ text: `${OILRIG_NAME} • 👑 = the current king` });
+  if (!rows.length) embed.addFields({ name: '🏴 No reigns yet', value: '*Nobody has held it yet — be the first.*' });
+  else {
+    embed.addFields(...rows.slice(0, 3).map((r, i) => ({ name: `${medal[i]} ${esc(r.name)}${crown(r)}`, value: `**${fmtDuration(r.ms)}**`, inline: true })));
+    if (rows.length > 3) embed.addFields({ name: 'Challengers', value: rows.slice(3).map((r, i) => `**${i + 4}.** ${esc(r.name)}${crown(r)} — ${fmtDuration(r.ms)}`).join('\n') });
+  }
   return { embeds: [embed], components: [backRow()] };
 }
 
@@ -2271,11 +2445,11 @@ function oilRigLogView(state) {
   const rig = state.oilRig;
   const lines = rig.log.map(e => {
     const ago = fmtDuration(Date.now() - e.at);
-    if (e.result === 'captured') return `🏆 **${esc(e.attackerName)}** seized it from **${e.prevHolderName ? esc(e.prevHolderName) : 'no one'}** — ${OILRIG_DIRECTION_EMOJI[e.direction]} ${e.direction} — *${ago} ago*`;
-    return `🧱 **${esc(e.attackerName)}** hit a defensive wall and was driven back — *${ago} ago*`;
+    if (e.result === 'captured') return `🏆 **${esc(e.attackerName)}** seized the rig from **${e.prevHolderName ? esc(e.prevHolderName) : 'no one'}**\n└ ${OILRIG_DIRECTION_EMOJI[e.direction]} from the ${e.direction} • *${ago} ago*`;
+    return `🧱 **${esc(e.attackerName)}** hit a defensive wall and was driven back\n└ *${ago} ago*`;
   });
   const embed = new EmbedBuilder().setColor(COLOR.blurple).setTitle('📜 King of the Hill — Recent Sieges')
-    .setDescription(lines.join('\n') || '*Nothing has happened here yet.*');
+    .setDescription(lines.join('\n\n') || '*Nothing has happened here yet.*').setFooter({ text: `Last ${OILRIG_LOG_MAX} sieges • ${OILRIG_NAME}` });
   return { embeds: [embed], components: [backRow()] };
 }
 
@@ -2444,7 +2618,8 @@ function expeditionCitySelect(state, userId) {
 function expeditionZoneSelect(state, userId, fromCityId) {
   const from = expeditionFrom(state, userId, fromCityId);
   if (!from) return expeditionCitySelect(state, userId);
-  const opts = EXPEDITION_ZONES.map(z => ({
+  const landless = ownedCities(state, userId).length === 0;
+  const opts = EXPEDITION_ZONES.filter(z => !z.landlessOnly || landless).map(z => ({
     label: z.name,
     description: `${z.hint} • ~${msLeft(Date.now() + travelTime(from, z))} travel`,
     value: z.id,
@@ -2459,19 +2634,20 @@ function expeditionAmount(state, userId, fromCityId, zoneId) {
   const p = state.players[userId];
   const from = expeditionFrom(state, userId, fromCityId);
   const zone = EXPEDITION_ZONE_BY_ID[zoneId];
-  if (!from || !zone) return expeditionCitySelect(state, userId);
+  if (!from || !zone || (zone.landlessOnly && ownedCities(state, userId).length)) return expeditionCitySelect(state, userId);
   const ms = travelTime(from, zone);
-  const q = Math.floor(p.army * 0.25), half = Math.floor(p.army * 0.5);
+  const sendCap = zone.maxSend || Infinity;
+  const q = Math.min(sendCap, Math.floor(p.army * 0.25)), half = Math.min(sendCap, Math.floor(p.army * 0.5)), all = Math.min(sendCap, p.army);
   const embed = new EmbedBuilder().setColor(COLOR.gold).setTitle(`🏜 Launch expedition to ${esc(zone.name)}?`)
     .setDescription(
       `*${esc(zone.tag)}* — danger ${zone.hint}\n\n` +
       `From **${esc(from.name)}** • Reserve army: **${fmt(p.army)}**\n\n` +
       `Travel time: **${msLeft(Date.now() + ms)}**\n\n` +
-      `How many troops do you send? *Committed once launched — the expedition can't be recalled or cancelled.*`);
+      `${zone.maxSend ? `This trail takes at most **${fmt(zone.maxSend)}** troops.\n\n` : ''}How many troops do you send? *Committed once launched — the expedition can't be recalled or cancelled.*`);
   return { embeds: [embed], components: [new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(`dy:ex:${fromCityId}:${zoneId}:25`).setLabel(`Send Some (${fmt(q)})`).setStyle(ButtonStyle.Primary).setDisabled(q < 1),
     new ButtonBuilder().setCustomId(`dy:ex:${fromCityId}:${zoneId}:50`).setLabel(`Send Half (${fmt(half)})`).setStyle(ButtonStyle.Primary).setDisabled(half < 1),
-    new ButtonBuilder().setCustomId(`dy:ex:${fromCityId}:${zoneId}:100`).setLabel(`Send All (${fmt(p.army)})`).setStyle(ButtonStyle.Danger).setDisabled(p.army < 1),
+    new ButtonBuilder().setCustomId(`dy:ex:${fromCityId}:${zoneId}:100`).setLabel(`Send All (${fmt(all)})`).setStyle(ButtonStyle.Danger).setDisabled(all < 1),
   ), backRow()] };
 }
 
@@ -2590,7 +2766,7 @@ function profileView(state, db, guildId, userId) {
   const fights = s.raidsWon + s.raidsLost;
   const winRate = fights ? Math.round(s.raidsWon / fights * 100) : 0;
   const dinar = getDinar(db, guildId, userId);
-  const ecoMult = 1 + p.upg.eco * 0.12;
+  const ecoMult = 1 + effUpg(p, 'eco') * 0.12;
   const incomeHr = cities.reduce((t, c) => t + INCOME_BY_LEVEL[c.level] * ecoMult, 0);
   const pending = cities.reduce((t, c) => t + pendingIncome(state, c), 0);
   const cdEnd = (p.lastCollectAt || 0) + COLLECT_COOLDOWN_MS;
@@ -2607,7 +2783,7 @@ function profileView(state, db, guildId, userId) {
       `Rank **#${rank}** of ${ranked.length}  •  **${fmt(str)}** power\n\n` +
       `**💰 Wealth**\nDinar **${fmt(dinar)}**  •  income **${fmt(Math.round(incomeHr))}/hr**  •  uncollected **${fmt(Math.floor(pending))}**  •  collect ${collectStr}\n\n` +
       `**🪖 Military**\nArmy **${fmt(p.army)}** in reserve  •  🗡 weapon **${weaponTierName(p.weaponTier)}** (tier ${p.weaponTier})  •  troop cost **${unit}💰** each\n` +
-      `Upgrades: ⚔ Military **${p.upg.mil}**/${UPG_MAX}  •  🧱 Fortifications **${p.upg.for}**/${UPG_MAX}  •  💰 Economy **${p.upg.eco}**/${UPG_MAX}${relicsLine}\n\n` +
+      `Upgrades: ⚔ Military **${upgLabel(p, 'mil')}**/${UPG_MAX}  •  🧱 Fortifications **${upgLabel(p, 'for')}**/${UPG_MAX}  •  💰 Economy **${upgLabel(p, 'eco')}**/${UPG_MAX}${relicsLine}\n\n` +
       `**🏙 Cities (${cities.length})**\n${cityLines}\n\n` +
       `**⚔ War Record**\nRaids **${s.raidsWon}W / ${s.raidsLost}L** (${winRate}% win rate)  •  🛡 **${s.defended}** defended\n` +
       `🏰 Captured **${s.captured}**  •  lost **${s.lost}**\n` +
@@ -3390,6 +3566,7 @@ function initDiyar({ client, db, saveData, awardLP }) {
       // everything else requires being registered
       if (!state.players[uid]) return interaction.reply(eph({ content: 'Join first with `/diyar`.' }));
       if (reseedIfLanded(state, uid)) saveData(gid);   // resettle a knocked-out player (and persist it)
+      if (startUpkeepClock(state.players[uid])) saveData(gid);   // saves from before upkeep existed: start their clock now
 
       const home = () => interaction.update(dashboard(state, db, gid, uid));
 
@@ -3417,6 +3594,7 @@ function initDiyar({ client, db, saveData, awardLP }) {
         if (r.error) return interaction.reply(eph({ content: r.error }));
         await interaction.update(oilRigView(state, uid));
         const attackerName = esc(state.players[uid].name);
+        const avatarUrl = interaction.user?.displayAvatarURL?.({ size: 128 }) || null;
         // war room if one is set, otherwise (or if that send fails) the channel this was clicked in —
         // so a capture is never silently un-announced just because /diyar-set-channel wasn't run
         const announceRig = async (payload) => {
@@ -3427,18 +3605,14 @@ function initDiyar({ client, db, saveData, awardLP }) {
           try { await interaction.channel.send(payload); } catch (e) { console.error('[diyar rig announce fallback]', e.message); }
         };
         if (r.captured) {
-          await announceRig({ content: `👑 **${attackerName}** stormed in from the ${OILRIG_DIRECTION_EMOJI[direction]} **${direction}** and is the new **King of the Hill**, dethroning **${r.prevHolderName ? esc(r.prevHolderName) : 'no one'}**!` });
+          await announceRig(oilRigCaptureCard(attackerName, avatarUrl, r));
           return;
         }
         // public, and pings the holder directly — a wall just came down, and the holder should
         // know before someone else finds that same gap. Deliberately says nothing about WHICH
         // direction was hit, so the announcement doesn't hand every rival a map of the walls.
-        await announceRig({ content:
-          `🧱 **${attackerName}** attacked the King of the Hill and hit a Defensive Wall — it's destroyed now! ` +
-          `<@${r.holderId}>, better rebuild before someone else tries.` });
-        return interaction.followUp(eph({ content:
-          `🧱 **Blocked!** A defensive wall was waiting to the ${OILRIG_DIRECTION_EMOJI[direction]} ${direction} — you lost **${fmt(r.cas)}** troops (**${fmt(r.survivors)}** made it back). ` +
-          `That wall is destroyed now, so it's a real gap once you're free to try again.` }));
+        await announceRig(oilRigBlockedCard(attackerName, avatarUrl, r));
+        return interaction.followUp(eph({ embeds: [oilRigBlockedPrivateCard(r, oilRigLockUntil(state.oilRig, uid))] }));
       }
       if (action === 'oilrig_buildwall') {
         const direction = interaction.values?.[0];
@@ -3468,7 +3642,7 @@ function initDiyar({ client, db, saveData, awardLP }) {
         let msg;
         if (!cities.length) msg = '🪙 You hold no cities yet — capture one to start earning Dinar.';
         else {
-          const ecoMult = 1 + p.upg.eco * 0.12;
+          const ecoMult = 1 + effUpg(p, 'eco') * 0.12;
           const ratePerHr = cities.reduce((s, c) => s + INCOME_BY_LEVEL[c.level] * ecoMult, 0);
           const capTotal = Math.floor(ratePerHr * INCOME_CAP_HRS);
           let soonestMs = Infinity;
@@ -3492,6 +3666,10 @@ function initDiyar({ client, db, saveData, awardLP }) {
       }
       if (action === 'upg') {
         const r = upgrade(state, db, gid, saveData, uid, parts[2]);
+        return interaction.update(upgradeView(state, db, gid, uid));
+      }
+      if (action === 'maintain') {
+        maintain(state, db, gid, saveData, uid);
         return interaction.update(upgradeView(state, db, gid, uid));
       }
       if (action === 'buyweapon') {
@@ -3587,7 +3765,8 @@ function initDiyar({ client, db, saveData, awardLP }) {
 
   return {
     _test: {
-      getState: () => stateOf, ensurePlayer, resolveAttack, recruit, upgrade, buyWeapon, effectiveAttack, recruitLeft, recruitLimit, reinforce, collectIncome, tick,
+      getState: () => stateOf, ensurePlayer, resolveAttack, recruit, upgrade, buyWeapon, effectiveAttack, recruitLeft, recruitLimit, recruitCap, upgradeView, upgradeBlock, avgGarrison, devWait, maintain, effUpg, dailyUpkeep, upkeepOwed, upkeepDamage, startUpkeepClock, pendingIncome, reinforce, collectIncome, tick,
+      oilRigView, oilRigCaptureView, oilRigLeaderboardView, oilRigLogView, oilRigCaptureCard, oilRigBlockedCard, oilRigBlockedPrivateCard, attemptOilRigCapture, buildOilRigWall,
       spawnBoss, strikeBoss, resolveBossDefeat, resolveBossExpire, playerStrength, ensureBossSched,
       pendingIncome, renderMap, renderBoss, renderBattle, pickTimes, reseedIfLanded, rankPlayers, isTopRanked, threatEmbed, threatSiegeLines, threatBar,
       postWanted, repostWanted, wantedFace, finishWanted,
