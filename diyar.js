@@ -38,6 +38,7 @@ const UPKEEP_PER_CITY_PER_DAY = { 6: 5, 7: 20, 8: 45, 9: 80, 10: 125 };   // Din
 const UPKEEP_MAX_ARREARS_DAYS = 5;                  // you never owe more than this many days of upkeep when you finally maintain
 const TROOP_COST          = 1.5;                    // Dinar per troop
 const SHIELD_MS           = 0;                     // truce disabled (no starting truce, no post-raid shield)
+const CAPTURE_PROTECT_MS  = 2 * 60 * 60 * 1000;  // a freshly captured city can't be raided by anyone (previous owner included) for this long
 const ATTACK_COOLDOWN_MS  = 30 * 60 * 1000;     // between your own attacks
 const RAID_WINDOW_MS      = 30 * 1000;          // PvP raids run live for 30s so the defender can rally
 const REINFORCE_MULT      = 2.0;                // defence boost if the defender reinforces in time (bonus, never a penalty)
@@ -1270,6 +1271,8 @@ function startRaid(state, db, guildId, saveData, attackerId, cityId, sendPct) {
     return { error: `Your army is regrouping. Ready in ${msLeft(attacker.lastAttackAt + ATTACK_COOLDOWN_MS)}.` };
   if (state.pendingRaids && Object.values(state.pendingRaids).some(p => p.cityId === cityId))
     return { error: 'That city is already under attack — wait for the current raid to finish.' };
+  if (city.protectedUntil && city.protectedUntil > now)
+    return { error: `**${city.name}** was only just captured — its new ruler is still settling in. It can be attacked again in ${msLeft(city.protectedUntil)}.` };
 
   const owner = city.ownerId ? state.players[city.ownerId] : null;
   if (!owner && attacker.cities.length >= MILITIA_MAX_CITIES)
@@ -1346,6 +1349,7 @@ function resolveRaid(state, db, guildId, saveData, pending, reinforceMult) {
     }
     const g = Math.round(survivors * 0.35);
     city.garrison = g; survivors -= g; city.lastIncomeAt = now;
+    city.protectedUntil = now + CAPTURE_PROTECT_MS;   // new ruler gets a breather before anyone can strike back
     attacker.stats.captured++; result.captured = true;
     result.defLoss = garrisonBefore;   // defender lost the whole garrison with the city
     maybeRecordHighScore(state, 'biggestConquest', garrisonBefore, { name: attacker.name, cityName: city.name });
@@ -1416,6 +1420,9 @@ function raidResultEmbed(r) {
   const relicLine = r.relicsStolen?.length
     ? `\n\n✨ **${esc(r.cityName)}** was a capital — ${r.relicsStolen.map(n => `**${esc(n)}**`).join(', ')} passed to **${r.attackerName}**!`
     : '';
+  const protectLine = r.captured
+    ? `\n\n🔒 **${esc(r.cityName)}** is protected from attack for **${CAPTURE_PROTECT_MS / 3600000}h**.`
+    : '';
   const atkField = [
     `Troops sent: **${fmt(r.send)}**`,
     `Attack power: **${fmt(r.atkShown)}**`,
@@ -1432,7 +1439,7 @@ function raidResultEmbed(r) {
   return new EmbedBuilder()
     .setColor(won ? COLOR.green : COLOR.red)
     .setTitle(title)
-    .setDescription(subtitle + relicLine)
+    .setDescription(subtitle + relicLine + protectLine)
     .addFields(
       { name: `⚔ Attacker · ${r.attackerName}`, value: atkField, inline: true },
       { name: `🛡 Defender · ${r.defenderName || 'Militia'}`, value: defField, inline: true },
@@ -2468,7 +2475,9 @@ function targetSelect(state, userId) {
     else if (owner.shieldUntil > Date.now()) continue;                       // shielded → hide
     else if (!isTopRanked(state, city.ownerId) && playerStrength(state, owner) * MATCH_BAND < myStr) continue;     // too weak → hide (podium rulers are exempt)
     else note = `${owner.name} • Lv ${city.level} • 🛡${fmt(effectiveDefence(state, city))} def`;
-    opts.push({ label: city.name, description: note, value: c.id });
+    // just-captured cities stay listed so nobody thinks they vanished — the note says how long is left
+    if (city.protectedUntil && city.protectedUntil > Date.now()) note = `🔒 Protected ${msLeft(city.protectedUntil)} • ${note}`;
+    opts.push({ label: city.name, description: note.slice(0, 100), value: c.id });
   }
   if (!opts.length) {
     return { embeds: [new EmbedBuilder().setColor(COLOR.grey).setTitle('⚔ Attack')
@@ -2494,6 +2503,10 @@ function targetSelect(state, userId) {
 function sendAmount(state, userId, cityId) {
   const p = state.players[userId];
   const city = state.cities[cityId];
+  if (city.protectedUntil && city.protectedUntil > Date.now()) {
+    return { embeds: [new EmbedBuilder().setColor(COLOR.grey).setTitle(`🔒 ${city.name} is protected`)
+      .setDescription(`**${esc(city.name)}** was only just captured — its new ruler is still settling in.\n\nIt can be attacked again in **${msLeft(city.protectedUntil)}**.`)], components: [backRow()] };
+  }
   const half = Math.floor(p.army * 0.5);
   const embed = new EmbedBuilder().setColor(COLOR.red).setTitle(`⚔ Raid ${city.name}?`)
     .setDescription(`Your army: **${fmt(p.army)}**\nDefenders: 🛡 **${fmt(city.garrison)}** (Lv ${city.level})\n\nHow many troops do you commit?`);
@@ -2774,7 +2787,7 @@ function profileView(state, db, guildId, userId) {
   const unit = troopCost(state, userId);
   const underRaid = new Set(Object.values(state.pendingRaids || {}).map(r => r.cityId));
   const cityLines = cities.map(c =>
-    `🏙 **${esc(c.name)}** (L${c.level})${underRaid.has(c.id) ? ' ⚔ *under attack!*' : ''} — 🛡 ${fmt(c.garrison)}/${fmt(garrisonCap(state, userId))} • 💰 ${fmt(Math.round(INCOME_BY_LEVEL[c.level] * ecoMult))}/hr • def power **${fmt(effectiveDefence(state, c))}**`
+    `🏙 **${esc(c.name)}** (L${c.level})${underRaid.has(c.id) ? ' ⚔ *under attack!*' : ''}${c.protectedUntil > Date.now() ? ` 🔒 *protected ${msLeft(c.protectedUntil)}*` : ''} — 🛡 ${fmt(c.garrison)}/${fmt(garrisonCap(state, userId))} • 💰 ${fmt(Math.round(INCOME_BY_LEVEL[c.level] * ecoMult))}/hr • def power **${fmt(effectiveDefence(state, c))}**`
   ).join('\n') || '*Landless — raid a city to claim a home.*';
   const myRelics = Object.keys(state.relics || {}).filter(rid => state.relics[rid].holderId === userId).map(rid => RELIC_BY_ID[rid]);
   const relicsLine = myRelics.length ? `\n\n**✨ Relics (${myRelics.length})**\n${myRelics.map(r => `${esc(r.name)} — +${Math.round(r.pct * 100)}% ${r.bonus}`).join('\n')}` : '';
