@@ -1,7 +1,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // lottery.js — Daily Dinar Lottery Wheel
 // One unpredictable lottery per day (11:00–23:00 Libya time).
-// Users wager 1–500 Dinar via /dinar-lotto; odds are wager-weighted; winner
+// Users wager 1–2,000 Dinar via /dinar-lotto; odds are wager-weighted; winner
 // takes the whole pool. Libyan-flag wheel rendered as animated GIFs.
 // Wire-up in index.js:
 //   const { getLottoCommands, initLotto } = require('./lottery');
@@ -20,7 +20,7 @@ const { getDinar, spendDinar, awardDinar } = require('./gacha');
 
 // ── rules ──
 const WAGER_MIN         = 1;
-const WAGER_MAX         = 500;
+const WAGER_MAX         = 2000;
 const LOTTO_DURATION_MS = 60 * 60 * 1000;   // each lottery runs for 1 hour
 const REMIND_EVERY_MS   = 15 * 60 * 1000;   // channel reminder cadence
 const JOIN_COOLDOWN_MS  = 12 * 1000;        // gap between ANY two entries (anti-spam)
