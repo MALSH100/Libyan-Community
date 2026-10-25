@@ -19,8 +19,10 @@
 // adjusts itself. If the account lookup fails it falls back to counting its own searches.
 // It also pauses searching while 40+ videos are already waiting (no point buying more).
 //
-// Only four sources are kept: YouTube, TikTok, Facebook and Instagram, and only links to
-// actual videos. Each link is rewritten so Discord can embed it:
+// Only four sources are kept, and only SHORT videos: YouTube Shorts, TikTok videos, Facebook
+// reels and Instagram reels. Regular/long videos, live streams and news broadcasts are
+// skipped (set VIDEOS_SHORTS_ONLY=0 to allow them again). Each link is rewritten so Discord
+// can embed it:
 //   YouTube    → https://www.youtube.com/watch?v=ID                (Discord's own player)
 //   TikTok     → https://www.tiktok.com/@user/video/ID             (Discord's own embed)
 //                or a fixer host if TIKTOK_EMBED_HOST is set (e.g. tnktok.com)
@@ -45,6 +47,8 @@
 //   VIDEOS_ACTIVE_HOURS    hours videos may be posted, default 8-23 ("off" = any time)
 //   VIDEOS_TZ              time zone for those hours (default Africa/Tripoli)
 //   VIDEOS_QUEUE_TTL_HOURS drop queued videos older than this (default 36)
+//   VIDEOS_SHORTS_ONLY     set to 0 to also allow long videos (YouTube watch links, Facebook
+//                          /videos and /watch links, Instagram IGTV). Default: shorts only.
 //   VIDEOS_WINDOW          h = past hour, d = past 24h (default), w = past week
 //   VIDEOS_SITE_FILTER     set to 0 to stop adding "site:youtube.com OR site:tiktok.com…"
 //                          to the SerpApi query
@@ -71,7 +75,7 @@ const {
 const crypto = require('crypto');
 
 const KEY = '__videos';
-const SCHEMA = 4;                 // 2 = plain links · 3 = Arabic query + title de-dupe · 4 = queue + drip
+const SCHEMA = 5;                 // 2 = plain links · 3 = Arabic + title de-dupe · 4 = queue + drip · 5 = shorts only
 const DEFAULT_QUERY = 'ليبيا';
 const WINDOW = ['h', 'd', 'w'].includes(process.env.VIDEOS_WINDOW) ? process.env.VIDEOS_WINDOW : 'd';
 const WINDOW_MS = { h: 3600e3, d: 86400e3, w: 604800e3 }[WINDOW];
@@ -86,6 +90,7 @@ const FIRST_BEAT_DELAY_MS = 90 * 1000;   // let MongoDB finish loading before th
 const MANUAL_COOLDOWN_MS = 60 * 1000;    // /videos-feed fetch and test each spend one search
 const EMBED_COLOR = 0xe70013;
 const SITE_FILTER = process.env.VIDEOS_SITE_FILTER !== '0';
+const SHORTS_ONLY = process.env.VIDEOS_SHORTS_ONLY !== '0';
 const SITE_QUERY = '(site:youtube.com OR site:tiktok.com OR site:facebook.com OR site:instagram.com)';
 
 const intEnv = (name, def) => {
@@ -246,7 +251,7 @@ const MIN_TITLE_TOKENS = 3;
 //   key    – the clean original-platform link (de-dupe key, Watch button)
 //   url    – the link we actually post, rewritten so Discord gives a playable embed
 // Returns null for anything else (other sites, channel pages, profiles, photo posts…).
-function curateUrl(raw) {
+function curateUrl(raw, trustedShort = false) {
   let u;
   try { u = new URL(raw); } catch { return null; }
   if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
@@ -254,16 +259,19 @@ function curateUrl(raw) {
   const host = u.hostname.toLowerCase().replace(/^(www|m|mobile|web|mbasic)\./, '');
   const path = u.pathname.replace(/\/+$/, '');
 
-  // YouTube: videos, Shorts, youtu.be, embed and live links → the standard watch link.
+  // YouTube: Shorts (or any video when shorts-only is off) → the standard watch link.
+  // trustedShort = the provider already guarantees it is a short clip (YouTube API search).
   if (host === 'youtube.com' || host === 'youtu.be') {
     let id = null;
+    let isShortUrl = false;
     if (host === 'youtu.be') id = path.split('/')[1];
     else if (path === '/watch') id = u.searchParams.get('v');
     else {
       const m = path.match(/^\/(?:shorts|embed|live|v)\/([\w-]{11})(?:\/|$)/);
-      if (m) id = m[1];
+      if (m) { id = m[1]; isShortUrl = path.startsWith('/shorts/'); }
     }
     if (!id || !/^[\w-]{11}$/.test(id)) return null;
+    if (SHORTS_ONLY && !isShortUrl && !trustedShort) return null;   // regular videos and live streams are skipped
     const link = `https://www.youtube.com/watch?v=${id}`;
     return { source: 'YouTube', key: link, url: link };
   }
@@ -280,13 +288,17 @@ function curateUrl(raw) {
     };
   }
 
-  // Facebook: reels, /watch?v=, share/v + share/r links and /<page>/videos/<id>.
+  // Facebook: reels only (/reel/ID and share/r links). With shorts-only off, regular videos
+  // (/watch?v=, share/v links and /<page>/videos/<id>) are allowed too.
   if (host === 'facebook.com') {
     let tail = null;
     if (/^\/reel\/\d+$/.test(path)) tail = path;
-    else if (/^\/share\/[vr]\/[\w-]+$/.test(path)) tail = path;
-    else if (/^\/[^/]+\/videos\/(?:[^/]+\/)?\d+$/.test(path)) tail = path;
-    else if (path === '/watch' && /^\d+$/.test(u.searchParams.get('v') || '')) tail = `/watch/?v=${u.searchParams.get('v')}`;
+    else if (/^\/share\/r\/[\w-]+$/.test(path)) tail = path;
+    else if (!SHORTS_ONLY) {
+      if (/^\/share\/v\/[\w-]+$/.test(path)) tail = path;
+      else if (/^\/[^/]+\/videos\/(?:[^/]+\/)?\d+$/.test(path)) tail = path;
+      else if (path === '/watch' && /^\d+$/.test(u.searchParams.get('v') || '')) tail = `/watch/?v=${u.searchParams.get('v')}`;
+    }
     if (!tail) return null;
     return {
       source: 'Facebook',
@@ -295,9 +307,11 @@ function curateUrl(raw) {
     };
   }
 
-  // Instagram: reels and IGTV only (plain /p/ posts may be photos). Media-only embed.
+  // Instagram: reels only (plain /p/ posts may be photos, IGTV is long). Media-only embed.
   if (host === 'instagram.com') {
-    const m = path.match(/^(?:\/[^/]+)?\/(reel|reels|tv)\/([\w-]+)$/);
+    const m = path.match(SHORTS_ONLY
+      ? /^(?:\/[^/]+)?\/(reel|reels)\/([\w-]+)$/
+      : /^(?:\/[^/]+)?\/(reel|reels|tv)\/([\w-]+)$/);
     if (!m) return null;
     const kind = m[1] === 'reels' ? 'reel' : m[1];
     return {
@@ -316,7 +330,7 @@ function curate(rawVideos) {
   const dropped = new Map();      // host → how many were thrown away
   const keys = new Set();
   for (const v of rawVideos) {
-    const c = curateUrl(v.url);
+    const c = curateUrl(v.url, v.short);
     if (!c) {
       const h = hostOf(v.url);
       dropped.set(h, (dropped.get(h) || 0) + 1);
@@ -421,6 +435,7 @@ async function fetchYouTube(query) {
         channel: decodeEntities(s.channelTitle || ''),
         date: '',
         duration: '',
+        short: true,       // search was limited to videos under 4 minutes
       };
     });
 }
@@ -510,6 +525,15 @@ async function searchPlan(activeGuilds = 1) {
 
 // ─── Per-guild settings ──────────────────────────────────────────────────────
 
+// Used once on upgrade to shorts-only: removes already-queued videos that the new rules reject
+// (long Facebook videos, IGTV). Queued YouTube items can't be re-checked and are kept.
+function stillWanted(item) {
+  if (!SHORTS_ONLY || !item || !item.key) return true;
+  if (item.source === 'Facebook') return /\/(reel\/\d+|share\/r\/)/.test(item.key);
+  if (item.source === 'Instagram') return !/\/tv\//.test(item.key);
+  return true;
+}
+
 function upgrade(c) {
   const v = c.ver || 0;
   if (v < 2) c.mode = 'link';                                   // v2: plain links become the default
@@ -518,6 +542,7 @@ function upgrade(c) {
   if (!Array.isArray(c.titles)) c.titles = [];
   if (!Array.isArray(c.queue)) c.queue = [];                    // v4: waiting videos
   if (!c.usage || typeof c.usage !== 'object') c.usage = { month: '', count: 0 };
+  if (v < 5) c.queue = c.queue.filter(stillWanted);              // v5: shorts only
   if (!c.lastSearch) c.lastSearch = c.lastRun || 0;
   c.nextPostAt = c.nextPostAt || 0;
   c.lastSource = c.lastSource || '';
@@ -872,7 +897,7 @@ async function handleVideosFeed(i) {
         c ? `Queue: **${c.queue.length}** waiting · next post ${nextPostText(c)}` : 'Queue: 0 waiting',
         `Drip: one video every ${fmtDur(MIN_GAP_MS)}–${fmtDur(MAX_GAP_MS)} (adapts to the queue), ${activeLabel()}`,
         searchLine,
-        `Sources kept: YouTube · TikTok${TIKTOK_HOST ? ` (→ ${TIKTOK_HOST})` : ''} · Facebook (→ ${FACEBOOK_HOST}) · Instagram (→ ${INSTAGRAM_HOST})`,
+        `Sources kept (${SHORTS_ONLY ? 'shorts only' : 'all video lengths'}): YouTube · TikTok${TIKTOK_HOST ? ` (→ ${TIKTOK_HOST})` : ''} · Facebook (→ ${FACEBOOK_HOST}) · Instagram (→ ${INSTAGRAM_HOST})`,
         c && c.lastSearch ? `Last search: <t:${unix(c.lastSearch)}:R>${c.lastPosted ? ` · last post: <t:${unix(c.lastPosted)}:R>` : ''}` : 'Last search: never',
       ].join('\n'),
     });
