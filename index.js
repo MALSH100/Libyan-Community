@@ -925,6 +925,7 @@ const initBlackMarketExchange = require('./black-market-exchange');
 //const initJobs = require('./jobs');
 const { initPOTD } = require('./potd');
 const { getLibyaChatCommands, initLibyaChat } = require('./libya-chat');
+const { getLibyaVideosCommands, initLibyaVideos } = require('./libya-videos');
 const { getGachaCommands, initGacha, awardDinar, isAtDinarCap, dinarDailyCap, getDinar, spendDinar } = require('./gacha');
 const { CLAN_CREATE_COST, CLAN_JOIN_COST, CLAN_CHANNEL_COST } = require('./clanfns');
 const { getBattleCardsCommands, initBattleCards } = require('./battlecards');
@@ -986,6 +987,12 @@ function getAllCommands() {
   } catch (e) {
     console.error('Could not load libya-chat.js commands:', e.message);
   }
+  let libyaVideosCommands = [];
+  try {
+    libyaVideosCommands = getLibyaVideosCommands();
+  } catch (e) {
+    console.error('Could not load libya-videos.js commands:', e.message);
+  }
   let gachaCommands = [];
   try {
     gachaCommands = getGachaCommands();
@@ -1029,7 +1036,7 @@ function getAllCommands() {
   } catch (e) {
     console.error('Could not load shop.js commands:', e.message);
   }
-  _allCommands = [...commands, ...pokeCommands, ...yaraytCommands, ...exchangeCommands, ...newsCommands, ...jobsCommands, ...potdCommands, ...translatorCommands, ...libyaChatCommands, ...gachaCommands, ...battleCardsCommands, ...diyarCommands, ...clanChannelCommands, ...footballCommands, ...lottoCommands, ...shopCommands];
+  _allCommands = [...commands, ...pokeCommands, ...yaraytCommands, ...exchangeCommands, ...newsCommands, ...jobsCommands, ...potdCommands, ...translatorCommands, ...libyaChatCommands, ...libyaVideosCommands, ...gachaCommands, ...battleCardsCommands, ...diyarCommands, ...clanChannelCommands, ...footballCommands, ...lottoCommands, ...shopCommands];
   console.log(`📋 Command list built: ${_allCommands.map(c => c.name).join(', ')}`);
   return _allCommands;
 }
@@ -2993,6 +3000,13 @@ initPOTD({ client, db, saveData, saveNow, awardLP });
 
 // Libya Chat / Announce (owner-only bot messages)
 initLibyaChat(client);
+
+// Libya Videos — scheduled video feed (needs SERPAPI_KEY or YOUTUBE_API_KEY)
+try {
+  initLibyaVideos({ client, db, saveData });
+} catch (e) {
+  console.error('Could not start Libya videos feed:', e.message);
+}
 
 // Qa'ima — Server Collection Game (Dinar economy)
 const gachaApi = initGacha({ client, db, saveData });
