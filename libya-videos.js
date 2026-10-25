@@ -1,15 +1,20 @@
 // ═══════════════════════════════════════════════════════════════════════════════
-// LIBYA VIDEOS — scheduled video feed
+// LIBYA VIDEOS — scheduled video feed (v2)
 //
 // Every few hours the bot searches for fresh videos about a topic (default
-// "libya", past 24h) and posts new ones to a channel as branded embeds — title,
-// thumbnail, a "Source: TikTok · 2 hours ago" footer and a Watch button that links
-// to the ORIGINAL video. Nothing is downloaded or re-hosted, so there's no storage
-// to pay for and nothing for Railway to lose on a redeploy.
+// "libya", past 24h) and posts new ones to a channel as plain links that Discord
+// turns into playable embeds. Nothing is downloaded or re-hosted by the bot.
+//
+// Only four sources are kept: YouTube, TikTok, Facebook and Instagram, and only
+// links that point at an actual video. Each link is rewritten so Discord can embed it:
+//   YouTube    → https://www.youtube.com/watch?v=ID                (Discord's own player)
+//   TikTok     → https://www.tiktok.com/@user/video/ID             (Discord's own embed)
+//                or a fixer host if TIKTOK_EMBED_HOST is set (e.g. tnktok.com)
+//   Facebook   → https://facebed.com/reel/ID                        (facebed embed fixer)
+//   Instagram  → https://d.ddinstagram.com/reel/CODE/               (InstaFix "media only")
 //
 // Data source (set ONE of these in Railway → Variables):
-//   SERPAPI_KEY       Google Videos results via SerpApi — the closest match to the
-//                     Google link: YouTube + TikTok + Facebook + Instagram + X.
+//   SERPAPI_KEY       Google Videos results via SerpApi — covers all four platforms.
 //                     Free plan = 250 searches/month, so the default check interval
 //                     is 240 min (~180 searches/month).
 //   YOUTUBE_API_KEY   YouTube Data API v3 — free quota, YouTube videos only.
@@ -17,9 +22,16 @@
 // If both are set SerpApi wins; force the other with VIDEO_PROVIDER=youtube.
 //
 // Optional variables:
-//   VIDEOS_INTERVAL_MIN   minutes between checks (minimum 10)
-//   VIDEOS_MAX_PER_RUN    max posts per check, 1–10 (default 5)
-//   VIDEOS_WINDOW         h = past hour, d = past 24h (default), w = past week
+//   VIDEOS_INTERVAL_MIN    minutes between checks (minimum 10)
+//   VIDEOS_MAX_PER_RUN     max posts per check, 1–10 (default 5)
+//   VIDEOS_WINDOW          h = past hour, d = past 24h (default), w = past week
+//   VIDEOS_SITE_FILTER     set to 0 to stop adding "site:youtube.com OR site:tiktok.com…"
+//                          to the SerpApi query
+//   FACEBOOK_EMBED_HOST    default facebed.com
+//   INSTAGRAM_EMBED_HOST   default d.ddinstagram.com  (the InstaFix repo was archived in
+//                          April 2026; if that host stops working, change it here)
+//   TIKTOK_EMBED_HOST      default empty = TikTok's own link. Try tnktok.com if the native
+//                          embed looks cluttered or doesn't play.
 //
 // Per-guild settings live in db[guildId].__videos and persist through the bot's
 // normal MongoDB save, including the list of already-posted videos (no repeats
@@ -39,6 +51,7 @@ const {
 const crypto = require('crypto');
 
 const KEY = '__videos';
+const SCHEMA = 2;                 // v2 = plain links are the default style
 const DEFAULT_QUERY = 'libya';
 const WINDOW = ['h', 'd', 'w'].includes(process.env.VIDEOS_WINDOW) ? process.env.VIDEOS_WINDOW : 'd';
 const WINDOW_MS = { h: 3600e3, d: 86400e3, w: 604800e3 }[WINDOW];
@@ -48,8 +61,18 @@ const SEEN_CAP = 600;             // remembered video IDs per guild
 const FETCH_TIMEOUT_MS = 15000;
 const POST_GAP_MS = 1500;         // pause between posts so we never trip Discord rate limits
 const FIRST_TICK_DELAY_MS = 90 * 1000;   // let MongoDB finish loading before the first check
-const MANUAL_COOLDOWN_MS = 2 * 60 * 1000;
+const MANUAL_COOLDOWN_MS = 60 * 1000;    // /videos-feed fetch and test each spend one API search
 const EMBED_COLOR = 0xe70013;
+const SITE_FILTER = process.env.VIDEOS_SITE_FILTER !== '0';
+const SITE_QUERY = '(site:youtube.com OR site:tiktok.com OR site:facebook.com OR site:instagram.com)';
+
+const cleanHost = (h, fallback) => {
+  const v = String(h || '').trim().replace(/^https?:\/\//i, '').replace(/\/.*$/, '').toLowerCase();
+  return /^[a-z0-9.-]+$/.test(v) ? v : fallback;
+};
+const FACEBOOK_HOST = cleanHost(process.env.FACEBOOK_EMBED_HOST, 'facebed.com');
+const INSTAGRAM_HOST = cleanHost(process.env.INSTAGRAM_EMBED_HOST, 'd.ddinstagram.com');
+const TIKTOK_HOST = cleanHost(process.env.TIKTOK_EMBED_HOST, '');   // '' = TikTok's own link
 
 let client = null;
 let db = null;
@@ -73,8 +96,8 @@ function decodeEntities(s) {
     .replace(/&amp;/g, '&');
 }
 
-// Same video reached through slightly different URLs (tracking params, m./www.)
-// must produce the same ID, or it would be posted twice.
+// Used for de-duplication IDs. (Kept identical to v1 so videos posted before the
+// upgrade are still recognised.)
 function canonical(url) {
   try {
     const u = new URL(url);
@@ -93,25 +116,101 @@ function videoId(url) {
   return crypto.createHash('sha1').update(canonical(url)).digest('base64url').slice(0, 12);
 }
 
-const SOURCES = [
-  [/(^|\.)(youtube\.com|youtu\.be)$/, 'YouTube'],
-  [/(^|\.)tiktok\.com$/, 'TikTok'],
-  [/(^|\.)(facebook\.com|fb\.watch)$/, 'Facebook'],
-  [/(^|\.)instagram\.com$/, 'Instagram'],
-  [/(^|\.)(x\.com|twitter\.com)$/, 'X'],
-];
+const isHttp = u => typeof u === 'string' && /^https?:\/\//i.test(u);
 
-function sourceName(url) {
-  try {
-    const host = new URL(url).hostname;
-    for (const [re, name] of SOURCES) if (re.test(host)) return name;
-    return host.replace(/^www\./, '');
-  } catch {
-    return 'Web';
-  }
+function hostOf(url) {
+  try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return 'unknown'; }
 }
 
-const isHttp = u => typeof u === 'string' && /^https?:\/\//i.test(u);
+// ─── Link curation: keep only YouTube / TikTok / Facebook / Instagram VIDEOS ─
+
+// Turns any result URL into:
+//   source – 'YouTube' | 'TikTok' | 'Facebook' | 'Instagram'
+//   key    – the clean original-platform link (de-dupe key, Watch button)
+//   url    – the link we actually post, rewritten so Discord gives a playable embed
+// Returns null for anything else (other sites, channel pages, profiles, photo posts…).
+function curateUrl(raw) {
+  let u;
+  try { u = new URL(raw); } catch { return null; }
+  if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
+
+  const host = u.hostname.toLowerCase().replace(/^(www|m|mobile|web|mbasic)\./, '');
+  const path = u.pathname.replace(/\/+$/, '');
+
+  // YouTube: videos, Shorts, youtu.be, embed and live links → the standard watch link.
+  if (host === 'youtube.com' || host === 'youtu.be') {
+    let id = null;
+    if (host === 'youtu.be') id = path.split('/')[1];
+    else if (path === '/watch') id = u.searchParams.get('v');
+    else {
+      const m = path.match(/^\/(?:shorts|embed|live|v)\/([\w-]{11})(?:\/|$)/);
+      if (m) id = m[1];
+    }
+    if (!id || !/^[\w-]{11}$/.test(id)) return null;
+    const link = `https://www.youtube.com/watch?v=${id}`;
+    return { source: 'YouTube', key: link, url: link };
+  }
+
+  // TikTok: only real video pages (@user/video/ID). Profiles, tags and slideshows are skipped.
+  if (host === 'tiktok.com') {
+    const m = path.match(/^\/(@[^/]+)\/video\/(\d+)$/);
+    if (!m) return null;
+    const tail = `/${m[1]}/video/${m[2]}`;
+    return {
+      source: 'TikTok',
+      key: `https://www.tiktok.com${tail}`,
+      url: `https://${TIKTOK_HOST || 'www.tiktok.com'}${tail}`,
+    };
+  }
+
+  // Facebook: reels, /watch?v=, share/v + share/r links and /<page>/videos/<id>.
+  if (host === 'facebook.com') {
+    let tail = null;
+    if (/^\/reel\/\d+$/.test(path)) tail = path;
+    else if (/^\/share\/[vr]\/[\w-]+$/.test(path)) tail = path;
+    else if (/^\/[^/]+\/videos\/(?:[^/]+\/)?\d+$/.test(path)) tail = path;
+    else if (path === '/watch' && /^\d+$/.test(u.searchParams.get('v') || '')) tail = `/watch/?v=${u.searchParams.get('v')}`;
+    if (!tail) return null;
+    return {
+      source: 'Facebook',
+      key: `https://www.facebook.com${tail}`,
+      url: `https://${FACEBOOK_HOST}${tail}`,
+    };
+  }
+
+  // Instagram: reels and IGTV only (plain /p/ posts may be photos). Media-only embed.
+  if (host === 'instagram.com') {
+    const m = path.match(/^(?:\/[^/]+)?\/(reel|reels|tv)\/([\w-]+)$/);
+    if (!m) return null;
+    const kind = m[1] === 'reels' ? 'reel' : m[1];
+    return {
+      source: 'Instagram',
+      key: `https://www.instagram.com/${kind}/${m[2]}/`,
+      url: `https://${INSTAGRAM_HOST}/${kind}/${m[2]}/`,
+    };
+  }
+
+  return null;
+}
+
+// Filters a provider's raw results down to the four sources and rewrites their links.
+function curate(rawVideos) {
+  const kept = [];
+  const dropped = new Map();      // host → how many were thrown away
+  const keys = new Set();
+  for (const v of rawVideos) {
+    const c = curateUrl(v.url);
+    if (!c) {
+      const h = hostOf(v.url);
+      dropped.set(h, (dropped.get(h) || 0) + 1);
+      continue;
+    }
+    if (keys.has(c.key)) continue;
+    keys.add(c.key);
+    kept.push({ ...v, ...c, raw: v.url, id: videoId(c.key) });
+  }
+  return { kept, dropped };
+}
 
 // ─── Providers ───────────────────────────────────────────────────────────────
 
@@ -140,11 +239,12 @@ async function getJson(url) {
 }
 
 // Google Videos via SerpApi. tbs=qdr:d is the same "past 24 hours" filter that's in
-// the Google URL you gave me.
+// the Google URL. The site: filter asks Google for the four platforms only, so the
+// ten-or-so results per search aren't wasted on news sites that get dropped anyway.
 async function fetchSerpApi(query) {
   const params = new URLSearchParams({
     engine: 'google_videos',
-    q: query,
+    q: SITE_FILTER ? `${query} ${SITE_QUERY}` : query,
     tbs: `qdr:${WINDOW}`,
     api_key: process.env.SERPAPI_KEY,
   });
@@ -169,7 +269,6 @@ async function fetchSerpApi(query) {
         title: decodeEntities(r.title) || 'Video',
         snippet: decodeEntities(r.snippet || ''),
         thumbnail: isHttp(r.thumbnail) ? r.thumbnail : null,   // data: URIs can't be used in embeds
-        source: sourceName(url),
         channel: typeof r.channel === 'string' ? r.channel : '',
         date: r.date || '',
         duration: r.duration || '',
@@ -205,7 +304,6 @@ async function fetchYouTube(query) {
         title: decodeEntities(s.title) || 'Video',
         snippet: decodeEntities(s.description || ''),
         thumbnail: isHttp(pic) ? pic : null,
-        source: 'YouTube',
         channel: decodeEntities(s.channelTitle || ''),
         date: '',
         duration: '',
@@ -219,6 +317,14 @@ function fetchVideos(query) {
 
 // ─── Per-guild settings ──────────────────────────────────────────────────────
 
+function upgrade(c) {
+  if (c.ver !== SCHEMA) {
+    c.mode = 'link';      // v2: embeds-only (plain links) becomes the default for everyone
+    c.ver = SCHEMA;
+  }
+  return c;
+}
+
 function cfg(guildId, create = false) {
   if (!db[guildId]) {
     if (!create) return null;
@@ -227,47 +333,58 @@ function cfg(guildId, create = false) {
   if (!db[guildId][KEY]) {
     if (!create) return null;
     db[guildId][KEY] = {
+      ver: SCHEMA,
       channelId: null,
       query: DEFAULT_QUERY,
-      mode: 'embed',      // 'embed' = branded card, 'link' = bare link (Discord's own player)
+      mode: 'link',       // 'link' = bare link (Discord's own embed/player), 'embed' = branded card
       paused: false,
       seen: [],
       lastRun: 0,
       lastPosted: 0,
     };
   }
-  return db[guildId][KEY];
+  return upgrade(db[guildId][KEY]);
 }
 
 // ─── Posting ─────────────────────────────────────────────────────────────────
 
 async function postVideo(channel, v, mode) {
-  if (mode === 'link') return channel.send({ content: v.url });
+  if (mode !== 'embed') return channel.send({ content: v.url });
 
   const meta = [v.source, v.channel, v.duration, v.date].filter(Boolean).join(' · ');
   const embed = new EmbedBuilder()
     .setColor(EMBED_COLOR)
     .setTitle(clip(v.title, 250))
-    .setURL(v.url)
+    .setURL(v.key)
     .setFooter({ text: clip(`Source: ${meta || v.source}`, 200) });
   if (v.snippet) embed.setDescription(clip(v.snippet, 300));
   if (v.thumbnail) embed.setImage(v.thumbnail);
 
   const payload = { embeds: [embed] };
-  if (v.url.length <= 512) {
+  if (v.key.length <= 512) {
     payload.components = [
       new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setStyle(ButtonStyle.Link).setLabel('Watch').setURL(v.url),
+        new ButtonBuilder().setStyle(ButtonStyle.Link).setLabel('Watch').setURL(v.key),
       ),
     ];
   }
   return channel.send(payload);
 }
 
+// Fetch, keep the four sources, and work out which of them this guild hasn't had yet.
+async function gather(c, getVideos) {
+  const raw = await getVideos(c.query);
+  const { kept, dropped } = curate(raw);
+  const seen = new Set(c.seen);
+  // v.raw check = videos posted by v1 (their IDs were made from the raw search-result URL)
+  const fresh = kept.filter(v => !seen.has(v.id) && !seen.has(videoId(v.raw)));
+  return { rawCount: raw.length, kept, dropped, fresh };
+}
+
 const running = new Set();
 
-// Fetch (via the supplied getter, so several guilds sharing a query cost ONE API call)
-// and post up to MAX_PER_RUN videos that haven't been posted in this guild before.
+// Post up to MAX_PER_RUN videos that haven't been posted in this guild before.
+// getVideos is supplied by the caller so several guilds sharing a query cost ONE API call.
 async function runGuild(guildId, getVideos) {
   const c = cfg(guildId);
   if (!c || !c.channelId) return { posted: 0, note: 'No channel set — use `/videos-feed channel`.' };
@@ -280,19 +397,11 @@ async function runGuild(guildId, getVideos) {
       return { posted: 0, note: 'I can no longer see the configured channel — set it again with `/videos-feed channel`.' };
     }
 
-    const videos = await getVideos(c.query);
-    const seen = new Set(c.seen);
-    const fresh = [];
-    for (const v of videos) {
-      const id = videoId(v.url);
-      if (seen.has(id)) continue;
-      seen.add(id);                 // also de-dupes repeats inside this one result set
-      fresh.push({ ...v, id });
-    }
+    const g = await gather(c, getVideos);
 
     let posted = 0;
     let permError = false;
-    for (const v of fresh.slice(0, MAX_PER_RUN)) {
+    for (const v of g.fresh.slice(0, MAX_PER_RUN)) {
       try {
         await postVideo(channel, v, c.mode);
         c.seen.push(v.id);
@@ -300,7 +409,7 @@ async function runGuild(guildId, getVideos) {
       } catch (e) {
         console.error('[videos] post failed:', e.message);
         if (e.code === 50013 || e.code === 50001) { permError = true; break; }   // no permission: try again later
-        c.seen.push(v.id);          // a video Discord rejects (bad image URL etc.) must not block the queue forever
+        c.seen.push(v.id);          // a video Discord rejects must not block the queue forever
       }
       await sleep(POST_GAP_MS);
     }
@@ -310,11 +419,11 @@ async function runGuild(guildId, getVideos) {
     if (posted) c.lastPosted = Date.now();
     saveData(guildId);
 
-    const waiting = Math.max(0, fresh.length - MAX_PER_RUN);
     return {
       posted,
-      found: videos.length,
-      waiting,
+      found: g.rawCount,
+      usable: g.kept.length,
+      waiting: Math.max(0, g.fresh.length - MAX_PER_RUN),
       note: permError ? 'I\'m missing permissions in that channel (need Send Messages + Embed Links).' : '',
     };
   } finally {
@@ -375,15 +484,21 @@ function getLibyaVideosCommands() {
         .setDescription('How videos are posted')
         .addStringOption(o => o
           .setName('mode')
-          .setDescription('Embed card, or a plain link that Discord plays inline')
+          .setDescription('Plain link (playable embed) or a branded card')
           .setRequired(true)
           .addChoices(
-            { name: 'Embed card (title, thumbnail, source, Watch button)', value: 'embed' },
-            { name: 'Plain link (Discord shows its own player)', value: 'link' },
+            { name: 'Plain link (playable embed) — default', value: 'link' },
+            { name: 'Embed card (title, thumbnail, Watch button)', value: 'embed' },
           )))
       .addSubcommand(s => s.setName('pause').setDescription('Stop auto-posting'))
       .addSubcommand(s => s.setName('resume').setDescription('Resume auto-posting'))
-      .addSubcommand(s => s.setName('fetch').setDescription('Check for new videos and post them right now'))
+      .addSubcommand(s => s.setName('fetch').setDescription('Check for new videos and post them to the feed channel now'))
+      .addSubcommand(s => s
+        .setName('test')
+        .setDescription('Dry run: fetch now and show what would be posted (nothing is marked as posted)')
+        .addBooleanOption(o => o
+          .setName('post')
+          .setDescription('Also post up to 3 of them in THIS channel to preview how they embed')))
       .addSubcommand(s => s.setName('status').setDescription('Show the current settings')),
   ];
 }
@@ -394,6 +509,10 @@ function providerLabel() {
   if (provider === 'serpapi') return 'Google Videos via SerpApi';
   if (provider === 'youtube') return 'YouTube Data API';
   return '❌ none — set SERPAPI_KEY or YOUTUBE_API_KEY in Railway';
+}
+
+function cooldownLeft(gid) {
+  return (manualCooldown.get(gid) || 0) + MANUAL_COOLDOWN_MS - Date.now();
 }
 
 async function handleVideosFeed(i) {
@@ -412,9 +531,10 @@ async function handleVideosFeed(i) {
       '📺 **Libya videos feed**',
       `Channel: ${c && c.channelId ? `<#${c.channelId}>` : 'not set'}`,
       `Search: \`${(c && c.query) || DEFAULT_QUERY}\` · ${WINDOW_LABEL}`,
-      `Style: ${(c && c.mode) === 'link' ? 'plain link' : 'embed card'}`,
+      `Style: ${c && c.mode === 'embed' ? 'embed card' : 'plain link (playable embed)'}`,
       `State: ${!c || !c.channelId ? 'not configured' : c.paused ? '⏸️ paused' : '▶️ running'}`,
       `Source: ${providerLabel()}`,
+      `Sources kept: YouTube · TikTok${TIKTOK_HOST ? ` (→ ${TIKTOK_HOST})` : ''} · Facebook (→ ${FACEBOOK_HOST}) · Instagram (→ ${INSTAGRAM_HOST})`,
       `Checks every ${mins} min · up to ${MAX_PER_RUN} posts per check`,
       c && c.lastRun ? `Last check: <t:${Math.floor(c.lastRun / 1000)}:R>` : 'Last check: never',
     ].join('\n'));
@@ -434,7 +554,7 @@ async function handleVideosFeed(i) {
     saveData(gid);
     return say(
       `✅ Videos will be posted in ${ch}.` +
-      (provider ? ' Use `/videos-feed fetch` to post the first batch now.' : '\n⚠️ No API key is configured yet, so nothing will post until you add SERPAPI_KEY or YOUTUBE_API_KEY in Railway.'),
+      (provider ? ' Use `/videos-feed test` to preview, or `/videos-feed fetch` to post the first batch now.' : '\n⚠️ No API key is configured yet, so nothing will post until you add SERPAPI_KEY or YOUTUBE_API_KEY in Railway.'),
     );
   }
 
@@ -449,7 +569,7 @@ async function handleVideosFeed(i) {
     const c = cfg(gid, true);
     c.mode = i.options.getString('mode', true);
     saveData(gid);
-    return say(`✅ Style set to **${c.mode === 'link' ? 'plain link' : 'embed card'}**.`);
+    return say(`✅ Style set to **${c.mode === 'embed' ? 'embed card' : 'plain link'}**.`);
   }
 
   if (sub === 'pause' || sub === 'resume') {
@@ -464,8 +584,8 @@ async function handleVideosFeed(i) {
     const c = cfg(gid);
     if (!c || !c.channelId) return say('❌ Set a channel first with `/videos-feed channel`.');
     if (!provider) return say(`❌ No video source configured: ${providerLabel()}`);
-    const wait = (manualCooldown.get(gid) || 0) + MANUAL_COOLDOWN_MS - Date.now();
-    if (wait > 0) return say(`⏳ Try again in ${Math.ceil(wait / 1000)}s (this uses an API search each time).`);
+    const wait = cooldownLeft(gid);
+    if (wait > 0) return say(`⏳ Try again in ${Math.ceil(wait / 1000)}s (each fetch or test uses one API search).`);
     manualCooldown.set(gid, Date.now());
 
     await i.deferReply({ flags: 64 });
@@ -475,11 +595,63 @@ async function handleVideosFeed(i) {
         ? `⚠️ ${r.note}`
         : r.posted
           ? `✅ Posted **${r.posted}** new video(s)${r.waiting ? ` — ${r.waiting} more are waiting for the next check` : ''}.`
-          : `ℹ️ Nothing new — ${r.found} result(s), all already posted.`;
+          : `ℹ️ Nothing new to post (${r.found} raw result(s), ${r.usable} usable, all already posted). Run \`/videos-feed test\` for details.`;
       return i.editReply({ content: msg });
     } catch (e) {
       console.error('[videos] manual fetch failed:', e.message);
       return i.editReply({ content: `❌ Fetch failed: ${clip(e.message, 300)}` });
+    }
+  }
+
+  if (sub === 'test') {
+    if (!provider) return say(`❌ No video source configured: ${providerLabel()}`);
+    const wait = cooldownLeft(gid);
+    if (wait > 0) return say(`⏳ Try again in ${Math.ceil(wait / 1000)}s (each fetch or test uses one API search).`);
+    manualCooldown.set(gid, Date.now());
+
+    await i.deferReply({ flags: 64 });
+    try {
+      const c = cfg(gid) || { query: DEFAULT_QUERY, seen: [], mode: 'link' };
+      const g = await gather(c, fetchVideos);
+
+      const bySource = {};
+      for (const v of g.kept) bySource[v.source] = (bySource[v.source] || 0) + 1;
+      const lines = [
+        `🧪 **Fetch test** — ${providerLabel()} · \`${c.query}\` · ${WINDOW_LABEL}`,
+        `Raw results: **${g.rawCount}**`,
+        `Usable videos: **${g.kept.length}**` +
+          (g.kept.length ? ` (${Object.entries(bySource).map(([k, n]) => `${k} ${n}`).join(', ')})` : ''),
+        `Already posted: ${g.kept.length - g.fresh.length} · New: **${g.fresh.length}**`,
+      ];
+      if (g.dropped.size) {
+        lines.push(`Dropped: ${clip([...g.dropped].map(([h, n]) => `${h} ×${n}`).join(', '), 300)}`);
+      }
+      if (!g.rawCount) lines.push('⚠️ The API returned nothing — check the Railway logs for the response details.');
+      if (g.fresh.length) {
+        lines.push('', 'Next links the bot would post:');
+        g.fresh.slice(0, 8).forEach((v, n) => lines.push(`${n + 1}. ${v.source} — <${v.url}>`));
+      }
+
+      if (i.options.getBoolean('post') && g.fresh.length) {
+        const target = i.channel || await i.client.channels.fetch(i.channelId).catch(() => null);
+        const batch = g.fresh.slice(0, 3);
+        let sent = 0;
+        try {
+          for (const v of batch) {
+            await postVideo(target, v, c.mode);
+            sent++;
+            await sleep(POST_GAP_MS);
+          }
+        } catch (e) {
+          lines.push('', `⚠️ Couldn't post here: ${clip(e.message, 150)}`);
+        }
+        if (sent) lines.push('', `📨 Posted ${sent} here as a preview. They are NOT marked as posted, so the feed may post them again later.`);
+      }
+
+      return i.editReply({ content: clip(lines.join('\n'), 1950) });
+    } catch (e) {
+      console.error('[videos] test failed:', e.message);
+      return i.editReply({ content: `❌ Test failed: ${clip(e.message, 300)}` });
     }
   }
 }
@@ -521,4 +693,4 @@ function initLibyaVideos(deps) {
   });
 }
 
-module.exports = { initLibyaVideos, getLibyaVideosCommands };
+module.exports = { initLibyaVideos, getLibyaVideosCommands, curateUrl };
