@@ -11,7 +11,7 @@
 //   TikTok     → https://www.tiktok.com/@user/video/ID             (Discord's own embed)
 //                or a fixer host if TIKTOK_EMBED_HOST is set (e.g. tnktok.com)
 //   Facebook   → https://facebed.com/reel/ID                        (facebed embed fixer)
-//   Instagram  → https://d.ddinstagram.com/reel/CODE/               (InstaFix "media only")
+//   Instagram  → https://c.instagramfix.com/reel/CODE/              (instagramfix "media only")
 //
 // Data source (set ONE of these in Railway → Variables):
 //   SERPAPI_KEY       Google Videos results via SerpApi — covers all four platforms.
@@ -28,8 +28,10 @@
 //   VIDEOS_SITE_FILTER     set to 0 to stop adding "site:youtube.com OR site:tiktok.com…"
 //                          to the SerpApi query
 //   FACEBOOK_EMBED_HOST    default facebed.com
-//   INSTAGRAM_EMBED_HOST   default d.ddinstagram.com  (the InstaFix repo was archived in
-//                          April 2026; if that host stops working, change it here)
+//   INSTAGRAM_EMBED_HOST   default c.instagramfix.com  (media-only embeds). The older
+//                          ddinstagram.com service is dead; if this one ever stops working,
+//                          swap in another fixer host here (e.g. instagramfix.com for the
+//                          full card with caption)
 //   TIKTOK_EMBED_HOST      default empty = TikTok's own link. Try tnktok.com if the native
 //                          embed looks cluttered or doesn't play.
 //
@@ -71,7 +73,7 @@ const cleanHost = (h, fallback) => {
   return /^[a-z0-9.-]+$/.test(v) ? v : fallback;
 };
 const FACEBOOK_HOST = cleanHost(process.env.FACEBOOK_EMBED_HOST, 'facebed.com');
-const INSTAGRAM_HOST = cleanHost(process.env.INSTAGRAM_EMBED_HOST, 'd.ddinstagram.com');
+const INSTAGRAM_HOST = cleanHost(process.env.INSTAGRAM_EMBED_HOST, 'c.instagramfix.com');
 const TIKTOK_HOST = cleanHost(process.env.TIKTOK_EMBED_HOST, '');   // '' = TikTok's own link
 
 let client = null;
