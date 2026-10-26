@@ -309,18 +309,22 @@ function curateUrl(raw, opts = {}) {
     };
   }
 
-  // Facebook: reels (/reel/ID, share/r links). Other video links (/<page>/videos/<id>, /watch?v=,
-  // share/v) are only accepted when they come from the Short Videos search (Google vouches that
-  // they are short clips; clips with a reported length over the limit were already dropped),
-  // or when shorts-only is off. Results from the general Videos tab never qualify.
+  // Facebook: reels (/reel/ID, share/r links). Other links (/<page>/videos/<id>, /watch?v=, share/v,
+  // and /<page>/posts/... holding a video) are only accepted when they come from the Short Videos
+  // search (Google vouches that they are short clips; clips with a reported length over the limit
+  // were already dropped), or when shorts-only is off. General Videos tab results never qualify.
   if (host === 'facebook.com') {
     let tail = null;
     if (/^\/reel\/\d+$/.test(path)) tail = path;
     else if (/^\/share\/r\/[\w-]+$/.test(path)) tail = path;
     else if (!SHORTS_ONLY || opts.short) {
+      const vm = path.match(/^(\/[^/]+\/videos)\/(?:[^/]+\/)?(\d+)$/);
       if (/^\/share\/v\/[\w-]+$/.test(path)) tail = path;
-      else if (/^\/[^/]+\/videos\/(?:[^/]+\/)?\d+$/.test(path)) tail = path;
+      else if (vm) tail = `${vm[1]}/${vm[2]}`;       // drop the long title slug, the ID is enough
       else if (path === '/watch' && /^\d+$/.test(u.searchParams.get('v') || '')) tail = `/watch/?v=${u.searchParams.get('v')}`;
+      // Posts that hold a short video (the Short Videos tab lists plenty of these). Only with a
+      // reported clip length, as proof there is a video in it; facebed reads the video out of the post.
+      else if ((!SHORTS_ONLY || Number.isFinite(opts.seconds)) && /^\/[^/]+\/posts\/.+/.test(path)) tail = path;
     }
     if (!tail) return null;
     return {
@@ -1103,7 +1107,15 @@ async function handleVideosFeed(i) {
       if (plan.left != null) lines.push(`Searches left ≈ ${Math.max(plan.left - 1, 0)}`);
       if (g.fresh.length) {
         lines.push('', 'Next links that would be queued:');
-        g.fresh.slice(0, 8).forEach((v, n) => lines.push(`${n + 1}. ${v.source} — <${v.url}>`));
+        g.fresh.slice(0, 8).forEach((v, n) => {
+          let shown = `<${v.url}>`;
+          if (v.url.length > 110) {        // long percent-encoded Arabic links: show a readable, shortened form
+            let readable = v.url;
+            try { readable = decodeURIComponent(v.url); } catch { /* keep encoded */ }
+            shown = clip(readable.replace(/^https?:\/\//, ''), 90);
+          }
+          lines.push(`${n + 1}. ${v.source} — ${shown}`);
+        });
       }
 
       if (i.options.getBoolean('post') && g.fresh.length) {
