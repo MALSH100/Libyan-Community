@@ -25,13 +25,18 @@
 // Each search targets ONE platform (YouTube → TikTok → Facebook → Instagram → …), so a platform
 // with lots of results can't crowd out the others.
 //
+// Before a Facebook link is posted the bot asks facebed for it exactly like Discord does; if facebed
+// can only give a picture card (no video), the link is skipped and the next one is used instead.
+// Any doubt (network error, rate limit, unexpected page) never blocks a post.
+//
 // Only four sources are kept, and only SHORT videos: YouTube Shorts, TikTok videos, Facebook
 // reels and Instagram reels. Regular/long videos, live streams and news broadcasts are
 // skipped (set VIDEOS_SHORTS_ONLY=0 to allow them again). Each link is rewritten so Discord
 // can embed it:
 //   YouTube    → https://www.youtube.com/watch?v=ID                (Discord's own player)
-//   TikTok     → https://www.tiktok.com/@user/video/ID             (Discord's own embed)
-//                or a fixer host if TIKTOK_EMBED_HOST is set (e.g. tnktok.com)
+//   TikTok     → https://d.tnktok.com/@user/video/ID               (fxTikTok "direct": video only,
+//                                                                    H.264 so it plays in Discord;
+//                                                                    TikTok's own embed buffers forever)
 //   Facebook   → https://facebed.com/reel/ID                        (facebed embed fixer)
 //   Instagram  → https://c.instagramfix.com/reel/CODE/              (instagramfix "media only")
 // Videos with the same or near-identical TITLE are queued only once, even when they come
@@ -59,13 +64,15 @@
 //                          /videos and /watch links, Instagram IGTV). Default: shorts only.
 //   VIDEOS_WINDOW          h = past hour, d = past 24h (default), w = past week
 //   VIDEOS_SITE_FILTER     set to 0 to stop adding site: filters to the SerpApi query
+//   VIDEOS_VERIFY_EMBEDS   set to 0 to stop checking Facebook links with facebed before posting
 //   VIDEOS_ROTATE          set to 0 to search all four platforms in one query instead of one
 //                          platform per search, in turn (default)
 //   VIDEOS_GL / VIDEOS_HL  Google country / language for SerpApi, default ly / ar
 //                          (set either to "off" to leave it out)
 //   FACEBOOK_EMBED_HOST    default facebed.com
 //   INSTAGRAM_EMBED_HOST   default c.instagramfix.com
-//   TIKTOK_EMBED_HOST      default empty = TikTok's own link
+//   TIKTOK_EMBED_HOST      default d.tnktok.com (video only). Use tnktok.com for the full card with
+//                          likes and caption, or "off" for TikTok's own link
 //
 // Per-guild settings, the queue and the already-posted lists live in db[guildId].__videos
 // and persist through the bot's normal MongoDB save, so redeploys lose nothing.
@@ -101,6 +108,8 @@ const EMBED_COLOR = 0xe70013;
 const SITE_FILTER = process.env.VIDEOS_SITE_FILTER !== '0';
 const SHORTS_ONLY = process.env.VIDEOS_SHORTS_ONLY !== '0';
 const ROTATE = process.env.VIDEOS_ROTATE !== '0';
+const VERIFY_EMBEDS = process.env.VIDEOS_VERIFY_EMBEDS !== '0';
+const DISCORD_UA = 'Mozilla/5.0 (compatible; Discordbot/2.0; +https://discordapp.com)';
 const PLATFORM_SITES = ['youtube.com', 'tiktok.com', 'facebook.com', 'instagram.com'];
 const SITE_QUERY = '(site:youtube.com OR site:tiktok.com OR site:facebook.com OR site:instagram.com)';
 
@@ -148,7 +157,10 @@ const cleanHost = (h, fallback) => {
 };
 const FACEBOOK_HOST = cleanHost(process.env.FACEBOOK_EMBED_HOST, 'facebed.com');
 const INSTAGRAM_HOST = cleanHost(process.env.INSTAGRAM_EMBED_HOST, 'c.instagramfix.com');
-const TIKTOK_HOST = cleanHost(process.env.TIKTOK_EMBED_HOST, '');   // '' = TikTok's own link
+// d.tnktok.com = fxTikTok "direct" embed (video only, H.264 so it plays in Discord). 'off' = TikTok's own link.
+const TIKTOK_HOST = /^(off|native|none)$/i.test(String(process.env.TIKTOK_EMBED_HOST || '').trim())
+  ? ''
+  : cleanHost(process.env.TIKTOK_EMBED_HOST, 'd.tnktok.com');
 
 let client = null;
 let db = null;
@@ -743,6 +755,30 @@ function expireQueue(c) {
 
 // ─── Posting (the drip) ──────────────────────────────────────────────────────
 
+// Asks the embed fixer for a Facebook link exactly like Discord does (facebed sends browsers to
+// Facebook and gives crawlers the embed page). Returns:
+//   true  – the page carries a video (og:video / twitter:player tags)
+//   false – facebed answered with a picture-only card, so Discord would show no video
+//   null  – couldn't tell (not a Facebook link, check disabled, network error, rate limit,
+//           unexpected page). Only a clear `false` ever stops a post.
+async function embedOk(v) {
+  if (!VERIFY_EMBEDS || !v || v.source !== 'Facebook') return null;
+  try {
+    const res = await fetch(v.url, {
+      headers: { 'User-Agent': DISCORD_UA },
+      redirect: 'manual',
+      signal: AbortSignal.timeout(12000),
+    });
+    if (res.status !== 200) return null;
+    const html = (await res.text()).slice(0, 300000);
+    if (/(?:property|name)="(?:og:video(?::url|:secure_url)?|twitter:player(?::stream)?)"/i.test(html)) return true;
+    if (/name="twitter:card"/i.test(html)) return false;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 async function postVideo(channel, v, mode) {
   if (mode !== 'embed') return channel.send({ content: v.url });
 
@@ -788,29 +824,52 @@ async function postNext(gid, c) {
     return { posted: false, note: 'I can no longer see the configured channel — set it again with `/videos-feed channel`.' };
   }
 
-  const idx = pickNext(c);
-  const v = c.queue[idx];
-  try {
-    await postVideo(channel, v, c.mode);
-  } catch (e) {
-    console.error('[videos] post failed:', e.message);
-    if (e.code === 50013 || e.code === 50001) {       // missing permissions: keep the video, retry later
-      c.nextPostAt = Date.now() + 15 * 60e3;
-      saveData(gid);
-      return { posted: false, note: 'I\'m missing permissions in that channel (need Send Messages + Embed Links).' };
+  let skipped = 0;
+  while (c.queue.length && skipped < 5) {
+    const idx = pickNext(c);
+    const v = c.queue[idx];
+    if (v.source === 'TikTok' && v.key) {              // always use the current TikTok embed host, even for items queued earlier
+      v.url = v.key.replace(/^https:\/\/www\.tiktok\.com/, `https://${TIKTOK_HOST || 'www.tiktok.com'}`);
     }
-    c.queue.splice(idx, 1);                           // a video Discord rejects must not block the queue
-    c.nextPostAt = Date.now() + 60e3;
+
+    if ((await embedOk(v)) === false) {               // facebed has no video for this one: drop it, try the next
+      console.log(`[videos] skipped a Facebook link that facebed can't play as video: ${v.url.slice(0, 120)}`);
+      c.queue.splice(idx, 1);
+      skipped++;
+      continue;
+    }
+
+    try {
+      await postVideo(channel, v, c.mode);
+    } catch (e) {
+      console.error('[videos] post failed:', e.message);
+      if (e.code === 50013 || e.code === 50001) {     // missing permissions: keep the video, retry later
+        c.nextPostAt = Date.now() + 15 * 60e3;
+        saveData(gid);
+        return { posted: false, note: 'I\'m missing permissions in that channel (need Send Messages + Embed Links).' };
+      }
+      c.queue.splice(idx, 1);                         // a video Discord rejects must not block the queue
+      c.nextPostAt = Date.now() + 60e3;
+      saveData(gid);
+      return { posted: false, note: 'Discord rejected that video, so I skipped it.' };
+    }
+
+    c.queue.splice(idx, 1);
+    c.lastSource = v.source;
+    c.lastPosted = Date.now();
+    c.nextPostAt = c.queue.length ? Date.now() + gapMs(c.queue.length) : 0;   // empty queue: next video goes out right away
     saveData(gid);
-    return { posted: false, note: 'Discord rejected that video, so I skipped it.' };
+    return { posted: true, video: v, skipped };
   }
 
-  c.queue.splice(idx, 1);
-  c.lastSource = v.source;
-  c.lastPosted = Date.now();
-  c.nextPostAt = c.queue.length ? Date.now() + gapMs(c.queue.length) : 0;   // empty queue: next video goes out right away
+  c.nextPostAt = c.queue.length ? Date.now() + 60e3 : 0;
   saveData(gid);
-  return { posted: true, video: v };
+  return {
+    posted: false,
+    note: skipped
+      ? `Skipped ${skipped} Facebook link(s) that facebed couldn't turn into a playable video.`
+      : 'The queue is empty.',
+  };
 }
 
 // ─── Heartbeat: runs every minute, decides everything from saved timestamps ──
@@ -1044,7 +1103,7 @@ async function handleVideosFeed(i) {
     if (out.busy) return i.editReply({ content: '⏳ The feed is busy for a moment — try again.' });
     return i.editReply({
       content: out.posted
-        ? `✅ Posted a ${out.video.source} video. **${c.queue.length}** left in the queue.`
+        ? `✅ Posted a ${out.video.source} video${out.skipped ? ` (skipped ${out.skipped} unplayable Facebook link(s))` : ''}. **${c.queue.length}** left in the queue.`
         : `⚠️ ${out.note}`,
     });
   }
@@ -1123,8 +1182,10 @@ async function handleVideosFeed(i) {
       }
       if (!g.rawCount) lines.push('⚠️ Google returned no results for this search (normal for a quiet platform — try another one).');
       if (plan.left != null) lines.push(`Searches left ≈ ${Math.max(plan.left - 1, 0)}`);
+      let checks = [];
       if (g.fresh.length) {
         lines.push('', 'Next links that would be queued:');
+        checks = await Promise.all(g.fresh.slice(0, 8).map(embedOk));
         g.fresh.slice(0, 8).forEach((v, n) => {
           let shown = `<${v.url}>`;
           if (v.url.length > 110) {        // long percent-encoded Arabic links: show a readable, shortened form
@@ -1132,13 +1193,14 @@ async function handleVideosFeed(i) {
             try { readable = decodeURIComponent(v.url); } catch { /* keep encoded */ }
             shown = clip(readable.replace(/^https?:\/\//, ''), 90);
           }
-          lines.push(`${n + 1}. ${v.source} — ${shown}`);
+          const mark = checks[n] === true ? ' ✅ plays' : checks[n] === false ? ' ❌ no video (would be skipped)' : '';
+          lines.push(`${n + 1}. ${v.source} — ${shown}${mark}`);
         });
       }
 
       if (i.options.getBoolean('post') && g.fresh.length) {
         const target = i.channel || await i.client.channels.fetch(i.channelId).catch(() => null);
-        const batch = g.fresh.slice(0, 3);
+        const batch = g.fresh.slice(0, 8).filter((v, n) => checks[n] !== false).slice(0, 3);
         let sent = 0;
         try {
           for (const v of batch) {
@@ -1201,5 +1263,5 @@ module.exports = {
   initLibyaVideos,
   getLibyaVideosCommands,
   curateUrl,
-  _test: { heartbeat, isActiveNow, gapMs, pickNext, searchPlan, normTitle },
+  _test: { heartbeat, isActiveNow, gapMs, pickNext, searchPlan, normTitle, embedOk, postNext },
 };
