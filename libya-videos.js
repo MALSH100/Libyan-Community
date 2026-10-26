@@ -22,6 +22,9 @@
 // Search engine: SerpApi's google_short_videos, i.e. Google's "Short videos" tab (udm=39), which
 // reports each clip's length. Clips longer than 3 minutes are dropped when the length is known.
 //
+// Each search targets ONE platform (YouTube → TikTok → Facebook → Instagram → …), so a platform
+// with lots of results can't crowd out the others.
+//
 // Only four sources are kept, and only SHORT videos: YouTube Shorts, TikTok videos, Facebook
 // reels and Instagram reels. Regular/long videos, live streams and news broadcasts are
 // skipped (set VIDEOS_SHORTS_ONLY=0 to allow them again). Each link is rewritten so Discord
@@ -55,8 +58,9 @@
 //   VIDEOS_SHORTS_ONLY     set to 0 to also allow long videos (YouTube watch links, Facebook
 //                          /videos and /watch links, Instagram IGTV). Default: shorts only.
 //   VIDEOS_WINDOW          h = past hour, d = past 24h (default), w = past week
-//   VIDEOS_SITE_FILTER     set to 0 to stop adding "site:youtube.com OR site:tiktok.com…"
-//                          to the SerpApi query
+//   VIDEOS_SITE_FILTER     set to 0 to stop adding site: filters to the SerpApi query
+//   VIDEOS_ROTATE          set to 0 to search all four platforms in one query instead of one
+//                          platform per search, in turn (default)
 //   VIDEOS_GL / VIDEOS_HL  Google country / language for SerpApi, default ly / ar
 //                          (set either to "off" to leave it out)
 //   FACEBOOK_EMBED_HOST    default facebed.com
@@ -96,6 +100,8 @@ const MANUAL_COOLDOWN_MS = 60 * 1000;    // /videos-feed fetch and test each spe
 const EMBED_COLOR = 0xe70013;
 const SITE_FILTER = process.env.VIDEOS_SITE_FILTER !== '0';
 const SHORTS_ONLY = process.env.VIDEOS_SHORTS_ONLY !== '0';
+const ROTATE = process.env.VIDEOS_ROTATE !== '0';
+const PLATFORM_SITES = ['youtube.com', 'tiktok.com', 'facebook.com', 'instagram.com'];
 const SITE_QUERY = '(site:youtube.com OR site:tiktok.com OR site:facebook.com OR site:instagram.com)';
 
 const intEnv = (name, def) => {
@@ -304,13 +310,14 @@ function curateUrl(raw, opts = {}) {
   }
 
   // Facebook: reels (/reel/ID, share/r links). Other video links (/<page>/videos/<id>, /watch?v=,
-  // share/v) are only accepted when the Short Videos search vouches for them AND reports a clip
-  // length within the limit, or when shorts-only is off. Live broadcasts and news bulletins fail that.
+  // share/v) are only accepted when they come from the Short Videos search (Google vouches that
+  // they are short clips; clips with a reported length over the limit were already dropped),
+  // or when shorts-only is off. Results from the general Videos tab never qualify.
   if (host === 'facebook.com') {
     let tail = null;
     if (/^\/reel\/\d+$/.test(path)) tail = path;
     else if (/^\/share\/r\/[\w-]+$/.test(path)) tail = path;
-    else if (!SHORTS_ONLY || (opts.short && Number.isFinite(opts.seconds) && opts.seconds <= MAX_SHORT_SECONDS)) {
+    else if (!SHORTS_ONLY || opts.short) {
       if (/^\/share\/v\/[\w-]+$/.test(path)) tail = path;
       else if (/^\/[^/]+\/videos\/(?:[^/]+\/)?\d+$/.test(path)) tail = path;
       else if (path === '/watch' && /^\d+$/.test(u.searchParams.get('v') || '')) tail = `/watch/?v=${u.searchParams.get('v')}`;
@@ -340,28 +347,36 @@ function curateUrl(raw, opts = {}) {
   return null;
 }
 
+const FOUR_HOSTS = /^(youtube\.com|youtu\.be|tiktok\.com|facebook\.com|instagram\.com)$/;
+
 // Filters a provider's raw results down to the four sources and rewrites their links.
+// droppedItems keeps a few examples with the reason, for /videos-feed test.
 function curate(rawVideos) {
   const kept = [];
   const dropped = new Map();      // host → how many were thrown away
+  const droppedItems = [];
   const keys = new Set();
+  const drop = (v, label, reason) => {
+    dropped.set(label, (dropped.get(label) || 0) + 1);
+    if (droppedItems.length < 12) droppedItems.push({ url: v.url, duration: v.duration || '', short: !!v.short, reason });
+  };
   for (const v of rawVideos) {
     const seconds = parseDuration(v.duration);
     if (SHORTS_ONLY && Number.isFinite(seconds) && seconds > MAX_SHORT_SECONDS) {
-      dropped.set('too long', (dropped.get('too long') || 0) + 1);
+      drop(v, 'too long', 'too long');
       continue;
     }
     const c = curateUrl(v.url, { short: v.short, seconds });
     if (!c) {
       const h = hostOf(v.url);
-      dropped.set(h, (dropped.get(h) || 0) + 1);
+      drop(v, h, FOUR_HOSTS.test(h.replace(/^(m|mobile|web|mbasic)\./, '')) ? 'not a short-video link' : 'other site');
       continue;
     }
     if (keys.has(c.key)) continue;
     keys.add(c.key);
     kept.push({ ...v, ...c, raw: v.url, id: videoId(c.key) });
   }
-  return { kept, dropped };
+  return { kept, dropped, droppedItems };
 }
 
 // ─── Providers ───────────────────────────────────────────────────────────────
@@ -384,13 +399,22 @@ async function getJson(url) {
   return res.json();
 }
 
+// Which sites this search is limited to. By default each search targets ONE platform and they
+// take turns, so a platform with lots of results (Facebook) can't crowd out the others.
+function siteQuery(c, override) {
+  if (override) return `site:${override}`;
+  if (!SITE_FILTER) return '';
+  if (!ROTATE) return SITE_QUERY;
+  return `site:${PLATFORM_SITES[(c.rot || 0) % PLATFORM_SITES.length]}`;
+}
+
 // Google Videos via SerpApi. tbs=qdr:d is the "past 24 hours" filter. The site: filter asks
 // Google for the four platforms only, so the ~10 results per search aren't wasted on sites
 // that get dropped anyway; gl/hl bias the results towards Libya and Arabic.
-async function fetchSerpApi(query) {
+async function fetchSerpApi(query, site) {
   const params = new URLSearchParams({
     engine: ENGINE,
-    q: SITE_FILTER ? `${query} ${SITE_QUERY}` : query,
+    q: site ? `${query} ${site}` : query,
     tbs: `qdr:${WINDOW}`,
     api_key: process.env.SERPAPI_KEY,
   });
@@ -463,8 +487,8 @@ async function fetchYouTube(query) {
     });
 }
 
-function fetchVideos(query) {
-  return provider === 'youtube' ? fetchYouTube(query) : fetchSerpApi(query);
+function fetchVideos(query, site) {
+  return provider === 'youtube' ? fetchYouTube(query) : fetchSerpApi(query, site);
 }
 
 // ─── Search budget ───────────────────────────────────────────────────────────
@@ -566,6 +590,7 @@ function upgrade(c) {
   if (!Array.isArray(c.queue)) c.queue = [];                    // v4: waiting videos
   if (!c.usage || typeof c.usage !== 'object') c.usage = { month: '', count: 0 };
   if (v < 5) c.queue = c.queue.filter(stillWanted);              // v5: shorts only
+  if (typeof c.rot !== 'number') c.rot = 0;
   if (!c.lastSearch) c.lastSearch = c.lastRun || 0;
   c.nextPostAt = c.nextPostAt || 0;
   c.lastSource = c.lastSource || '';
@@ -591,6 +616,7 @@ function cfg(guildId, create = false) {
       queue: [],
       usage: { month: '', count: 0 },
       lastSearch: 0,
+      rot: 0,
       nextPostAt: 0,
       lastSource: '',
       lastPosted: 0,
@@ -614,9 +640,10 @@ async function withLock(gid, fn) {
 // ─── Fetching and queueing ───────────────────────────────────────────────────
 
 // Fetch, keep the four sources, and work out which of them this guild hasn't had yet.
-async function gather(c, getVideos) {
-  const raw = await getVideos(c.query);
-  const { kept, dropped } = curate(raw);
+async function gather(c, getVideos, siteOverride) {
+  const site = siteQuery(c, siteOverride);
+  const raw = await getVideos(c.query, site);
+  const { kept, dropped, droppedItems } = curate(raw);
   const seen = new Set(c.seen);
   // v.raw check = videos posted by v1 (their IDs were made from the raw search-result URL)
   const unseen = kept.filter(v => !seen.has(v.id) && !seen.has(videoId(v.raw)));
@@ -638,7 +665,7 @@ async function gather(c, getVideos) {
     fresh.push(v);
   }
   return {
-    rawCount: raw.length, kept, dropped, fresh, dupTitles,
+    rawCount: raw.length, kept, dropped, droppedItems, fresh, dupTitles, site,
     alreadyPosted: kept.length - unseen.length,
   };
 }
@@ -668,6 +695,7 @@ async function searchAndQueue(gid, c) {
   c.lastSearch = Date.now();       // set first, so a failure can't turn into a rapid retry loop
   const g = await gather(c, fetchVideos);
   charge(c);                       // a successful search counts against the budget
+  c.rot = (c.rot || 0) + 1;        // next search targets the next platform
 
   let added = 0;
   for (const v of g.fresh) {
@@ -679,7 +707,7 @@ async function searchAndQueue(gid, c) {
   if (c.seen.length > SEEN_CAP) c.seen = c.seen.slice(-SEEN_CAP);
   saveData(gid);
   return {
-    added, rawCount: g.rawCount, usable: g.kept.length,
+    added, site: g.site, rawCount: g.rawCount, usable: g.kept.length,
     alreadyPosted: g.alreadyPosted, dupTitles: g.dupTitles.length,
   };
 }
@@ -774,7 +802,7 @@ async function maybeSearch(gid, c, activeGuilds) {
   if (Date.now() - c.lastSearch < plan.intervalMs) return;
   try {
     const r = await searchAndQueue(gid, c);
-    console.log(`[videos] guild ${gid}: search done — ${r.added} queued (${c.queue.length} waiting)` +
+    console.log(`[videos] guild ${gid}: search done (${r.site || 'no site filter'}) — ${r.added} queued (${c.queue.length} waiting)` +
       (plan.left != null ? ` · ~${plan.left - 1} searches left` : ''));
   } catch (e) {
     console.error(`[videos] guild ${gid} search failed:`, e.message);
@@ -859,6 +887,15 @@ function getLibyaVideosCommands() {
       .addSubcommand(s => s
         .setName('test')
         .setDescription('Dry run: search now and show what would be queued (nothing is saved)')
+        .addStringOption(o => o
+          .setName('site')
+          .setDescription('Search just one platform (default: the next one in the rotation)')
+          .addChoices(
+            { name: 'YouTube', value: 'youtube.com' },
+            { name: 'TikTok', value: 'tiktok.com' },
+            { name: 'Facebook', value: 'facebook.com' },
+            { name: 'Instagram', value: 'instagram.com' },
+          ))
         .addBooleanOption(o => o
           .setName('post')
           .setDescription('Also post up to 3 of them in THIS channel to preview how they embed')))
@@ -914,7 +951,7 @@ async function handleVideosFeed(i) {
       content: [
         '📺 **Libya videos feed**',
         `Channel: ${c && c.channelId ? `<#${c.channelId}>` : 'not set'}`,
-        `Search: \`${(c && c.query) || DEFAULT_QUERY}\` · ${WINDOW_LABEL}${GL || HL ? ` · region ${GL || '-'}/${HL || '-'}` : ''}`,
+        `Search: \`${(c && c.query) || DEFAULT_QUERY}\` · ${WINDOW_LABEL}${GL || HL ? ` · region ${GL || '-'}/${HL || '-'}` : ''}${provider === 'serpapi' && SITE_FILTER && ROTATE ? ` · next platform: ${PLATFORM_SITES[((c && c.rot) || 0) % PLATFORM_SITES.length]}` : ''}`,
         `Style: ${c && c.mode === 'embed' ? 'embed card' : 'plain link (playable embed)'}`,
         `State: ${!c || !c.channelId ? 'not configured' : c.paused ? '⏸️ paused' : '▶️ running'}`,
         c ? `Queue: **${c.queue.length}** waiting · next post ${nextPostText(c)}` : 'Queue: 0 waiting',
@@ -1013,7 +1050,7 @@ async function handleVideosFeed(i) {
       const budget = out.left != null ? ` Searches left ≈ ${Math.max(out.left - 1, 0)}.` : '';
       return i.editReply({
         content: r.added
-          ? `✅ Added **${r.added}** new video(s) to the queue — **${c.queue.length}** waiting. They go out gradually (use \`/videos-feed next\` to post one now).${budget}`
+          ? `✅ Searched ${r.site ? r.site.replace('site:', '') : 'all sites'} and added **${r.added}** new video(s) to the queue — **${c.queue.length}** waiting. They go out gradually (use \`/videos-feed next\` to post one now).${budget}`
           : `ℹ️ Nothing new to queue (${r.rawCount} raw, ${r.usable} usable, ${r.alreadyPosted} already seen, ${r.dupTitles} duplicate titles). **${c.queue.length}** still waiting.${budget}`,
       });
     } catch (e) {
@@ -1035,14 +1072,14 @@ async function handleVideosFeed(i) {
       if (provider === 'serpapi' && plan.left !== null && plan.left <= 0) {
         return i.editReply({ content: '⚠️ No SerpApi searches are left this month.' });
       }
-      const g = await gather(c, fetchVideos);
+      const g = await gather(c, fetchVideos, i.options.getString('site'));
       charge(c);
       saveData(gid);
 
       const bySource = {};
       for (const v of g.kept) bySource[v.source] = (bySource[v.source] || 0) + 1;
       const lines = [
-        `🧪 **Fetch test** — ${providerLabel()} · \`${c.query}\` · ${WINDOW_LABEL}`,
+        `🧪 **Fetch test** — ${providerLabel()} · \`${c.query}${g.site ? ` ${g.site}` : ''}\` · ${WINDOW_LABEL}`,
         `Raw results: **${g.rawCount}**`,
         `Usable videos: **${g.kept.length}**` +
           (g.kept.length ? ` (${Object.entries(bySource).map(([k, n]) => `${k} ${n}`).join(', ')})` : ''),
@@ -1050,6 +1087,14 @@ async function handleVideosFeed(i) {
       ];
       if (g.dropped.size) {
         lines.push(`Dropped: ${clip([...g.dropped].map(([h, n]) => `${h} ×${n}`).join(', '), 300)}`);
+      }
+      if (g.droppedItems.length) {
+        lines.push('Examples dropped:');
+        g.droppedItems.slice(0, 5).forEach((d, n) => {
+          let where = d.url;
+          try { const u = new URL(d.url); where = decodeURIComponent(u.hostname.replace(/^www\./, '') + u.pathname); } catch { /* keep raw */ }
+          lines.push(`${n + 1}. ${clip(where, 70)} · ${d.duration || 'no length'} · ${d.reason}`);
+        });
       }
       if (g.dupTitles.length) {
         lines.push(`Skipped as look-alikes: ${clip(g.dupTitles.slice(0, 3).map(v => clip(v.title, 40)).join(' | '), 250)}`);
