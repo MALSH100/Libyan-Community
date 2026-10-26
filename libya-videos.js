@@ -19,6 +19,9 @@
 // adjusts itself. If the account lookup fails it falls back to counting its own searches.
 // It also pauses searching while 40+ videos are already waiting (no point buying more).
 //
+// Search engine: SerpApi's google_short_videos, i.e. Google's "Short videos" tab (udm=39), which
+// reports each clip's length. Clips longer than 3 minutes are dropped when the length is known.
+//
 // Only four sources are kept, and only SHORT videos: YouTube Shorts, TikTok videos, Facebook
 // reels and Instagram reels. Regular/long videos, live streams and news broadcasts are
 // skipped (set VIDEOS_SHORTS_ONLY=0 to allow them again). Each link is rewritten so Discord
@@ -47,6 +50,8 @@
 //   VIDEOS_ACTIVE_HOURS    hours videos may be posted, default 8-23 ("off" = any time)
 //   VIDEOS_TZ              time zone for those hours (default Africa/Tripoli)
 //   VIDEOS_QUEUE_TTL_HOURS drop queued videos older than this (default 36)
+//   SERPAPI_ENGINE         google_short_videos (default) or google_videos (general Videos tab)
+//   VIDEOS_MAX_SECONDS     longest clip counted as "short" when its length is known (default 180)
 //   VIDEOS_SHORTS_ONLY     set to 0 to also allow long videos (YouTube watch links, Facebook
 //                          /videos and /watch links, Instagram IGTV). Default: shorts only.
 //   VIDEOS_WINDOW          h = past hour, d = past 24h (default), w = past week
@@ -103,6 +108,8 @@ const geoParam = (v, fallback) => {
 };
 const GL = geoParam(process.env.VIDEOS_GL, 'ly');
 const HL = geoParam(process.env.VIDEOS_HL, 'ar');
+const ENGINE = process.env.SERPAPI_ENGINE === 'google_videos' ? 'google_videos' : 'google_short_videos';
+const MAX_SHORT_SECONDS = intEnv('VIDEOS_MAX_SECONDS', 180);
 
 // Drip settings
 const MIN_GAP_MS = intEnv('VIDEOS_MIN_GAP_MIN', 20) * 60e3;
@@ -195,6 +202,13 @@ function fmtDur(ms) {
 
 const unix = ms => Math.floor(ms / 1000);
 
+// "0:47" → 47, "1:02:03" → 3723, anything else → NaN
+function parseDuration(s) {
+  const m = String(s || '').trim().match(/^(?:(\d+):)?(\d{1,2}):(\d{2})$/);
+  if (!m) return NaN;
+  return Number(m[1] || 0) * 3600 + Number(m[2]) * 60 + Number(m[3]);
+}
+
 // ─── Active hours ────────────────────────────────────────────────────────────
 
 function localHour() {
@@ -251,7 +265,7 @@ const MIN_TITLE_TOKENS = 3;
 //   key    – the clean original-platform link (de-dupe key, Watch button)
 //   url    – the link we actually post, rewritten so Discord gives a playable embed
 // Returns null for anything else (other sites, channel pages, profiles, photo posts…).
-function curateUrl(raw, trustedShort = false) {
+function curateUrl(raw, opts = {}) {
   let u;
   try { u = new URL(raw); } catch { return null; }
   if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
@@ -260,7 +274,8 @@ function curateUrl(raw, trustedShort = false) {
   const path = u.pathname.replace(/\/+$/, '');
 
   // YouTube: Shorts (or any video when shorts-only is off) → the standard watch link.
-  // trustedShort = the provider already guarantees it is a short clip (YouTube API search).
+  // opts.short = the search itself guarantees a short clip (Short Videos tab / YouTube API search);
+  // opts.seconds = the clip length when the search reports it.
   if (host === 'youtube.com' || host === 'youtu.be') {
     let id = null;
     let isShortUrl = false;
@@ -271,7 +286,7 @@ function curateUrl(raw, trustedShort = false) {
       if (m) { id = m[1]; isShortUrl = path.startsWith('/shorts/'); }
     }
     if (!id || !/^[\w-]{11}$/.test(id)) return null;
-    if (SHORTS_ONLY && !isShortUrl && !trustedShort) return null;   // regular videos and live streams are skipped
+    if (SHORTS_ONLY && !isShortUrl && !opts.short) return null;   // regular videos and live streams are skipped
     const link = `https://www.youtube.com/watch?v=${id}`;
     return { source: 'YouTube', key: link, url: link };
   }
@@ -288,13 +303,14 @@ function curateUrl(raw, trustedShort = false) {
     };
   }
 
-  // Facebook: reels only (/reel/ID and share/r links). With shorts-only off, regular videos
-  // (/watch?v=, share/v links and /<page>/videos/<id>) are allowed too.
+  // Facebook: reels (/reel/ID, share/r links). Other video links (/<page>/videos/<id>, /watch?v=,
+  // share/v) are only accepted when the Short Videos search vouches for them AND reports a clip
+  // length within the limit, or when shorts-only is off. Live broadcasts and news bulletins fail that.
   if (host === 'facebook.com') {
     let tail = null;
     if (/^\/reel\/\d+$/.test(path)) tail = path;
     else if (/^\/share\/r\/[\w-]+$/.test(path)) tail = path;
-    else if (!SHORTS_ONLY) {
+    else if (!SHORTS_ONLY || (opts.short && Number.isFinite(opts.seconds) && opts.seconds <= MAX_SHORT_SECONDS)) {
       if (/^\/share\/v\/[\w-]+$/.test(path)) tail = path;
       else if (/^\/[^/]+\/videos\/(?:[^/]+\/)?\d+$/.test(path)) tail = path;
       else if (path === '/watch' && /^\d+$/.test(u.searchParams.get('v') || '')) tail = `/watch/?v=${u.searchParams.get('v')}`;
@@ -330,7 +346,12 @@ function curate(rawVideos) {
   const dropped = new Map();      // host → how many were thrown away
   const keys = new Set();
   for (const v of rawVideos) {
-    const c = curateUrl(v.url, v.short);
+    const seconds = parseDuration(v.duration);
+    if (SHORTS_ONLY && Number.isFinite(seconds) && seconds > MAX_SHORT_SECONDS) {
+      dropped.set('too long', (dropped.get('too long') || 0) + 1);
+      continue;
+    }
+    const c = curateUrl(v.url, { short: v.short, seconds });
     if (!c) {
       const h = hostOf(v.url);
       dropped.set(h, (dropped.get(h) || 0) + 1);
@@ -368,7 +389,7 @@ async function getJson(url) {
 // that get dropped anyway; gl/hl bias the results towards Libya and Arabic.
 async function fetchSerpApi(query) {
   const params = new URLSearchParams({
-    engine: 'google_videos',
+    engine: ENGINE,
     q: SITE_FILTER ? `${query} ${SITE_QUERY}` : query,
     tbs: `qdr:${WINDOW}`,
     api_key: process.env.SERPAPI_KEY,
@@ -378,17 +399,18 @@ async function fetchSerpApi(query) {
   const data = await getJson(`https://serpapi.com/search.json?${params}`);
   if (data.error) throw new Error(`SerpApi: ${data.error}`);
 
-  const rows = [
-    ...(Array.isArray(data.video_results) ? data.video_results : []),
-    ...(Array.isArray(data.short_videos) ? data.short_videos : []),
-  ];
+  // Short Videos tab results are short clips by definition; general video_results are not.
+  const rows = [];
+  for (const [arr, short] of [[data.short_video_results, true], [data.short_videos, true], [data.video_results, false]]) {
+    if (Array.isArray(arr)) for (const r of arr) rows.push({ r, short });
+  }
   if (!rows.length) {
     // Helps spot a changed response shape: shows what the API actually returned.
-    console.log('[videos] SerpApi returned no video rows. Response keys:', Object.keys(data).join(', '));
+    console.log(`[videos] SerpApi (${ENGINE}) returned no video rows. Response keys:`, Object.keys(data).join(', '));
   }
 
   return rows
-    .map(r => {
+    .map(({ r, short }) => {
       const url = r.link || r.video_link || r.url;
       if (!isHttp(url)) return null;
       return {
@@ -396,9 +418,10 @@ async function fetchSerpApi(query) {
         title: decodeEntities(r.title) || 'Video',
         snippet: decodeEntities(r.snippet || ''),
         thumbnail: isHttp(r.thumbnail) ? r.thumbnail : null,   // data: URIs can't be used in embeds
-        channel: typeof r.channel === 'string' ? r.channel : '',
+        channel: typeof r.channel === 'string' ? r.channel : (typeof r.profile_name === 'string' ? r.profile_name : ''),
         date: r.date || '',
         duration: r.duration || '',
+        short,
       };
     })
     .filter(Boolean);
@@ -847,7 +870,7 @@ function getLibyaVideosCommands() {
 const manualCooldown = new Map();
 
 function providerLabel() {
-  if (provider === 'serpapi') return 'Google Videos via SerpApi';
+  if (provider === 'serpapi') return ENGINE === 'google_short_videos' ? 'Google Short Videos via SerpApi' : 'Google Videos via SerpApi';
   if (provider === 'youtube') return 'YouTube Data API';
   return '❌ none — set SERPAPI_KEY or YOUTUBE_API_KEY in Railway';
 }
