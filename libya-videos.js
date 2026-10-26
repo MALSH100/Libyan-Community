@@ -425,7 +425,15 @@ async function fetchSerpApi(query, site) {
   if (GL) params.set('gl', GL);
   if (HL) params.set('hl', HL);
   const data = await getJson(`https://serpapi.com/search.json?${params}`);
-  if (data.error) throw new Error(`SerpApi: ${data.error}`);
+  if (data.error) {
+    // SerpApi answers a search that found nothing with an "error" message. That is an empty
+    // result (it happens often for quiet platforms), not a failure.
+    if (/hasn't returned any results|no results/i.test(String(data.error))) {
+      console.log(`[videos] SerpApi: no results for "${params.get('q')}"`);
+      return [];
+    }
+    throw new Error(`SerpApi: ${data.error}`);
+  }
 
   // Short Videos tab results are short clips by definition; general video_results are not.
   const rows = [];
@@ -697,7 +705,16 @@ function enqueue(c, v) {
 // Run one search now and put the new videos in the queue. Nothing is posted here.
 async function searchAndQueue(gid, c) {
   c.lastSearch = Date.now();       // set first, so a failure can't turn into a rapid retry loop
-  const g = await gather(c, fetchVideos);
+  const label = (siteQuery(c) || 'all sites').replace('site:', '');
+  let g;
+  try {
+    g = await gather(c, fetchVideos);
+  } catch (e) {
+    c.rot = (c.rot || 0) + 1;      // a failing platform must never block the rotation
+    c.lastNote = clip(`${label}: failed — ${e.message}`, 120);
+    saveData(gid);
+    throw e;
+  }
   charge(c);                       // a successful search counts against the budget
   c.rot = (c.rot || 0) + 1;        // next search targets the next platform
 
@@ -709,6 +726,7 @@ async function searchAndQueue(gid, c) {
   }
   for (const d of g.dupTitles) c.seen.push(d.id);     // look-alike titles are not re-checked every time
   if (c.seen.length > SEEN_CAP) c.seen = c.seen.slice(-SEEN_CAP);
+  c.lastNote = `${label}: ${g.rawCount} result(s), ${g.kept.length} usable, ${added} queued`;
   saveData(gid);
   return {
     added, site: g.site, rawCount: g.rawCount, usable: g.kept.length,
@@ -962,7 +980,7 @@ async function handleVideosFeed(i) {
         `Drip: one video every ${fmtDur(MIN_GAP_MS)}–${fmtDur(MAX_GAP_MS)} (adapts to the queue), ${activeLabel()}`,
         searchLine,
         `Sources kept (${SHORTS_ONLY ? 'shorts only' : 'all video lengths'}): YouTube · TikTok${TIKTOK_HOST ? ` (→ ${TIKTOK_HOST})` : ''} · Facebook (→ ${FACEBOOK_HOST}) · Instagram (→ ${INSTAGRAM_HOST})`,
-        c && c.lastSearch ? `Last search: <t:${unix(c.lastSearch)}:R>${c.lastPosted ? ` · last post: <t:${unix(c.lastPosted)}:R>` : ''}` : 'Last search: never',
+        c && c.lastSearch ? `Last search: <t:${unix(c.lastSearch)}:R>${c.lastNote ? ` (${c.lastNote})` : ''}${c.lastPosted ? ` · last post: <t:${unix(c.lastPosted)}:R>` : ''}` : 'Last search: never',
       ].join('\n'),
     });
   }
@@ -1103,7 +1121,7 @@ async function handleVideosFeed(i) {
       if (g.dupTitles.length) {
         lines.push(`Skipped as look-alikes: ${clip(g.dupTitles.slice(0, 3).map(v => clip(v.title, 40)).join(' | '), 250)}`);
       }
-      if (!g.rawCount) lines.push('⚠️ The API returned nothing — check the Railway logs for the response details.');
+      if (!g.rawCount) lines.push('⚠️ Google returned no results for this search (normal for a quiet platform — try another one).');
       if (plan.left != null) lines.push(`Searches left ≈ ${Math.max(plan.left - 1, 0)}`);
       if (g.fresh.length) {
         lines.push('', 'Next links that would be queued:');
