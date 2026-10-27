@@ -27,8 +27,10 @@
 // Each search targets ONE platform (YouTube → TikTok → Facebook → Instagram → …), so a platform
 // with lots of results can't crowd out the others.
 //
-// Before a Facebook link is posted the bot asks facebed for it exactly like Discord does; if facebed
-// can only give a picture card (no video), the link is skipped and the next one is used instead.
+// Before a Facebook or TikTok link is posted the bot asks the embed service for it exactly like
+// Discord does. If the service can't produce a video (facebed answers with a picture-only card;
+// fxTikTok answers with an error), the link is skipped and the next one is used instead. TikTok
+// failures are often temporary, so such a video is retried later and only dropped after 3 failures.
 // Any doubt (network error, rate limit, unexpected page) never blocks a post.
 //
 // Only four sources are kept, and only SHORT videos: YouTube Shorts, TikTok videos, Facebook
@@ -66,7 +68,7 @@
 //                          /videos and /watch links, Instagram IGTV). Default: shorts only.
 //   VIDEOS_WINDOW          h = past hour, d = past 24h (default), w = past week
 //   VIDEOS_SITE_FILTER     set to 0 to stop adding site: filters to the SerpApi query
-//   VIDEOS_VERIFY_EMBEDS   set to 0 to stop checking Facebook links with facebed before posting
+//   VIDEOS_VERIFY_EMBEDS   set to 0 to stop checking Facebook/TikTok links before posting
 //   VIDEOS_ROTATE          set to 0 to search all four platforms in one query instead of one
 //                          platform per search, in turn (default)
 //   VIDEOS_GL / VIDEOS_HL  Google country / language for SerpApi, default ly / ar
@@ -766,7 +768,9 @@ function expireQueue(c) {
 //   null  – couldn't tell (not a Facebook link, check disabled, network error, rate limit,
 //           unexpected page). Only a clear `false` ever stops a post.
 async function embedOk(v) {
-  if (!VERIFY_EMBEDS || !v || v.source !== 'Facebook') return null;
+  if (!VERIFY_EMBEDS || !v) return null;
+  if (v.source === 'TikTok') return TIKTOK_HOST ? tiktokOk(v) : null;
+  if (v.source !== 'Facebook') return null;
   try {
     const res = await fetch(v.url, {
       headers: { 'User-Agent': DISCORD_UA },
@@ -777,6 +781,53 @@ async function embedOk(v) {
     const html = (await res.text()).slice(0, 300000);
     if (/(?:property|name)="(?:og:video(?::url|:secure_url)?|twitter:player(?::stream)?)"/i.test(html)) return true;
     if (/name="twitter:card"/i.test(html)) return false;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// One request like Discord's crawler: no redirects followed. Reads the page only when it is HTML.
+async function crawlerHop(url) {
+  const res = await fetch(url, {
+    headers: { 'User-Agent': DISCORD_UA },
+    redirect: 'manual',
+    signal: AbortSignal.timeout(12000),
+  });
+  const type = res.headers.get('content-type') || '';
+  const out = { status: res.status, location: res.headers.get('location') || '', type, html: '' };
+  if (res.status === 200 && /text\/html/i.test(type)) out.html = (await res.text()).slice(0, 300000);
+  else { try { await res.body?.cancel(); } catch { /* ignore */ } }
+  return out;
+}
+
+// fxTikTok: d.tnktok.com answers 302 → offload.tnktok.com/generate/video/ID → 302 → TikTok's CDN file.
+// When it can't fetch the video (TikTok blocks or limits it, region-locked, removed...) it answers with
+// an HTTP error, and Discord then shows just the link. Same answers to us, same outcome, so we can tell
+// BEFORE posting. true = reaches a video file, false = clear error, null = can't tell.
+async function tiktokOk(v) {
+  try {
+    const fixer = TIKTOK_HOST.split('.').slice(-2).join('.');
+    let url = v.url;
+    for (let step = 0; step < 4; step++) {
+      const r = await crawlerHop(url);
+      if ([301, 302, 303, 307, 308].includes(r.status)) {
+        if (!r.location) return null;
+        url = new URL(r.location, url).toString();
+        const host = new URL(url).hostname.toLowerCase();
+        if (host !== fixer && !host.endsWith(`.${fixer}`)) return true;   // left the fixer: it is the video file's own address
+        continue;
+      }
+      if (r.status === 200) {
+        if (/^video\//i.test(r.type)) return true;
+        if (/(?:property|name)="(?:og:video(?::url|:secure_url)?|twitter:player(?::stream)?)"/i.test(r.html)) return true;
+        if (/name="twitter:card"|property="og:title"/i.test(r.html)) return false;   // a card without a video
+        return null;
+      }
+      if (r.status === 429 || r.status === 408) return null;               // rate limited: don't judge
+      if (r.status >= 400) return false;
+      return null;
+    }
     return null;
   } catch {
     return null;
@@ -809,10 +860,10 @@ async function postVideo(channel, v, mode) {
 // Newest first, so a backlog never buries fresh videos (older ones simply age out). Among the
 // latest batches (see FRESH_BAND_MS) a different platform than the last post is preferred; within
 // the same batch the best-ranked search result goes first.
-function pickNext(c) {
-  if (!c.queue.length) return -1;
+function pickNext(c, skip = new Set()) {
+  const all = c.queue.map((_, i) => i).filter(i => !skip.has(c.queue[i].id));
+  if (!all.length) return -1;
   const at = i => c.queue[i].at || 0;
-  const all = c.queue.map((_, i) => i);
   const newest = Math.max(...all.map(at));
   const band = all.filter(i => at(i) >= newest - FRESH_BAND_MS);
   const other = band.filter(i => c.queue[i].source !== c.lastSource);
@@ -838,17 +889,23 @@ async function postNext(gid, c) {
   }
 
   let skipped = 0;
-  while (c.queue.length && skipped < 5) {
-    const idx = pickNext(c);
+  const deferred = new Set();        // failed the check this round, kept in the queue to be retried later
+  while (skipped < 5) {
+    const idx = pickNext(c, deferred);
+    if (idx < 0) break;
     const v = c.queue[idx];
     if (v.source === 'TikTok' && v.key) {              // always use the current TikTok embed host, even for items queued earlier
       v.url = v.key.replace(/^https:\/\/www\.tiktok\.com/, `https://${TIKTOK_HOST || 'www.tiktok.com'}`);
     }
 
-    if ((await embedOk(v)) === false) {               // facebed has no video for this one: drop it, try the next
-      console.log(`[videos] skipped a Facebook link that facebed can't play as video: ${v.url.slice(0, 120)}`);
-      c.queue.splice(idx, 1);
+    if ((await embedOk(v)) === false) {               // the embed service has no video for this one
       skipped++;
+      v.tries = (v.tries || 0) + 1;
+      // TikTok failures are often temporary: keep the video and retry later, drop it after 3 failures.
+      // Facebook answers "no video" definitively, so that one is dropped straight away.
+      if (v.source === 'TikTok' && v.tries < 3) deferred.add(v.id);
+      else c.queue.splice(idx, 1);
+      console.log(`[videos] ${v.source} link can't be played as video (try ${v.tries}${deferred.has(v.id) ? ', will retry' : ', dropped'}): ${v.url.slice(0, 120)}`);
       continue;
     }
 
@@ -875,12 +932,12 @@ async function postNext(gid, c) {
     return { posted: true, video: v, skipped };
   }
 
-  c.nextPostAt = c.queue.length ? Date.now() + 60e3 : 0;
+  c.nextPostAt = c.queue.length ? Date.now() + (deferred.size ? 5 * 60e3 : 60e3) : 0;
   saveData(gid);
   return {
     posted: false,
     note: skipped
-      ? `Skipped ${skipped} Facebook link(s) that facebed couldn't turn into a playable video.`
+      ? `Skipped ${skipped} link(s) the embed service couldn't turn into a playable video${deferred.size ? ` (${deferred.size} will be retried)` : ''}.`
       : 'The queue is empty.',
   };
 }
@@ -1276,5 +1333,5 @@ module.exports = {
   initLibyaVideos,
   getLibyaVideosCommands,
   curateUrl,
-  _test: { heartbeat, isActiveNow, gapMs, pickNext, searchPlan, normTitle, embedOk, postNext },
+  _test: { heartbeat, isActiveNow, gapMs, pickNext, searchPlan, normTitle, embedOk, postNext, tiktokOk },
 };
