@@ -7,10 +7,12 @@
 //      about a topic (default ليبيا, past 24h) and puts the good ones in a QUEUE that is
 //      saved in MongoDB. Nothing is posted at this point.
 //   2. DRIP (frequent, gentle): every minute the bot checks whether it's time to post
-//      ONE video from the queue. Gaps are 20–90 min (random ±20%) and stretch or shrink
-//      so the queue drains over roughly 12 hours; videos only go out during active hours
-//      (08:00–23:59 Libya time), and consecutive posts come from different platforms
-//      where possible. Videos still queued after 36 h are dropped as stale.
+//      ONE video from the queue. Gaps are 10–90 min (random ±20%) and stretch or shrink
+//      so the queue drains over roughly 6 hours: a big backlog is posted faster, a small
+//      one slower. Videos only go out during active hours (08:00–23:59 Libya time). The
+//      NEWEST videos go first (a backlog never buries fresh ones; the oldest simply age
+//      out), and among the latest batches consecutive posts come from different platforms
+//      where possible. Videos still queued after 24 h are dropped as stale.
 //
 // Search budget (SerpApi free plan = 250 searches/month): the bot asks SerpApi's free
 // Account API how many searches are left and when the plan renews, keeps 10 in reserve for
@@ -53,11 +55,11 @@
 //   SERPAPI_MONTHLY_LIMIT  plan size used only if the account lookup fails (default 250)
 //   SERPAPI_RESERVE        searches kept back for manual use (default 10)
 //   VIDEOS_INTERVAL_MIN    force a fixed minutes-between-searches instead of budget pacing
-//   VIDEOS_MIN_GAP_MIN / VIDEOS_MAX_GAP_MIN   posting gap limits, default 20 / 90
-//   VIDEOS_DRAIN_HOURS     aim to empty the queue in about this long (default 12)
+//   VIDEOS_MIN_GAP_MIN / VIDEOS_MAX_GAP_MIN   posting gap limits, default 10 / 90
+//   VIDEOS_DRAIN_HOURS     aim to empty the queue in about this long (default 6)
 //   VIDEOS_ACTIVE_HOURS    hours videos may be posted, default 8-23 ("off" = any time)
 //   VIDEOS_TZ              time zone for those hours (default Africa/Tripoli)
-//   VIDEOS_QUEUE_TTL_HOURS drop queued videos older than this (default 36)
+//   VIDEOS_QUEUE_TTL_HOURS drop queued videos older than this (default 24)
 //   SERPAPI_ENGINE         google_short_videos (default) or google_videos (general Videos tab)
 //   VIDEOS_MAX_SECONDS     longest clip counted as "short" when its length is known (default 180)
 //   VIDEOS_SHORTS_ONLY     set to 0 to also allow long videos (YouTube watch links, Facebook
@@ -127,10 +129,11 @@ const ENGINE = process.env.SERPAPI_ENGINE === 'google_videos' ? 'google_videos' 
 const MAX_SHORT_SECONDS = intEnv('VIDEOS_MAX_SECONDS', 180);
 
 // Drip settings
-const MIN_GAP_MS = intEnv('VIDEOS_MIN_GAP_MIN', 20) * 60e3;
+const MIN_GAP_MS = intEnv('VIDEOS_MIN_GAP_MIN', 10) * 60e3;
 const MAX_GAP_MS = Math.max(MIN_GAP_MS, intEnv('VIDEOS_MAX_GAP_MIN', 90) * 60e3);
-const DRAIN_MS = intEnv('VIDEOS_DRAIN_HOURS', 12) * 3600e3;
-const QUEUE_TTL_MS = intEnv('VIDEOS_QUEUE_TTL_HOURS', 36) * 3600e3;
+const DRAIN_MS = intEnv('VIDEOS_DRAIN_HOURS', 6) * 3600e3;
+const QUEUE_TTL_MS = intEnv('VIDEOS_QUEUE_TTL_HOURS', 24) * 3600e3;
+const FRESH_BAND_MS = 3 * 3600e3;   // "latest batches": queued within this long of the newest video
 const QUEUE_CAP = 120;            // hard limit on stored videos
 const QUEUE_PAUSE_AT = 40;        // don't search while this many are already waiting
 
@@ -700,8 +703,8 @@ function rememberTitle(c, v) {
   if (c.titles.length > TITLES_CAP) c.titles = c.titles.slice(-TITLES_CAP);
 }
 
-function enqueue(c, v) {
-  const q = { id: v.id, url: v.url, key: v.key, source: v.source, title: clip(v.title, 150), at: Date.now() };
+function enqueue(c, v, at = Date.now()) {
+  const q = { id: v.id, url: v.url, key: v.key, source: v.source, title: clip(v.title, 150), at };
   if (c.mode === 'embed') {        // extras only needed for the branded card
     q.snippet = clip(v.snippet, 160);
     q.thumbnail = v.thumbnail;
@@ -731,9 +734,10 @@ async function searchAndQueue(gid, c) {
   c.rot = (c.rot || 0) + 1;        // next search targets the next platform
 
   let added = 0;
+  const batchAt = Date.now();      // all videos from one search share a timestamp
   for (const v of g.fresh) {
     if (c.queue.length >= QUEUE_CAP) break;
-    enqueue(c, v);
+    enqueue(c, v, batchAt);
     added++;
   }
   for (const d of g.dupTitles) c.seen.push(d.id);     // look-alike titles are not re-checked every time
@@ -802,11 +806,20 @@ async function postVideo(channel, v, mode) {
   return channel.send(payload);
 }
 
-// Prefer a video from a different platform than the last one, otherwise the oldest.
+// Newest first, so a backlog never buries fresh videos (older ones simply age out). Among the
+// latest batches (see FRESH_BAND_MS) a different platform than the last post is preferred; within
+// the same batch the best-ranked search result goes first.
 function pickNext(c) {
   if (!c.queue.length) return -1;
-  const i = c.queue.findIndex(v => v.source !== c.lastSource);
-  return i >= 0 ? i : 0;
+  const at = i => c.queue[i].at || 0;
+  const all = c.queue.map((_, i) => i);
+  const newest = Math.max(...all.map(at));
+  const band = all.filter(i => at(i) >= newest - FRESH_BAND_MS);
+  const other = band.filter(i => c.queue[i].source !== c.lastSource);
+  const pool = other.length ? other : band;
+  let best = pool[0];
+  for (const i of pool) if (at(i) > at(best)) best = i;      // strict ">" keeps the best-ranked on ties
+  return best;
 }
 
 // Time until the next post: stretches when few videos are waiting, shrinks when many are,
