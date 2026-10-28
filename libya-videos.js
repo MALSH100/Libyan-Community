@@ -16,7 +16,8 @@
 //
 // What gets searched: a LIST of terms (/videos-feed terms ...), mostly Libyan-dialect entertainment
 // terms looking back a week, plus one news term looking back a day. Each search takes the next term
-// (liked terms more often, disliked ones less) on the next platform. News is capped at 1 in every 4
+// (liked terms more often, disliked ones less, and terms that keep finding nothing less too; a week-long
+// term that finds nothing twice in a row looks back a month). News is capped at 1 in every 4
 // posts, so it never floods the feed but never disappears either.
 //
 // Member votes: every posted video gets 👍 and 👎 reactions. The bot reads the counts back and learns
@@ -24,7 +25,7 @@
 // troll) barely moves anything; only a clear, repeated pattern changes what is searched or blocked.
 // Each person gets ONE vote per video: clicking 👍 removes their 👎 and the other way round (the bot
 // needs the Manage Messages permission in the feed channel for that).
-// See /videos-feed votes and /videos-feed terms list.
+// See /videos-feed votes, /videos-feed terms list and /videos-feed history (what each search found).
 //
 // Search budget (SerpApi free plan = 250 searches/month): the bot asks SerpApi's free
 // Account API how many searches are left and when the plan renews, keeps 10 in reserve for
@@ -36,8 +37,8 @@
 // Search engine: SerpApi's google_short_videos, i.e. Google's "Short videos" tab (udm=39), which
 // reports each clip's length. Clips longer than 3 minutes are dropped when the length is known.
 //
-// Each search targets ONE platform (YouTube → TikTok → Facebook → Instagram → …), so a platform
-// with lots of results can't crowd out the others.
+// The news term is searched on ONE platform at a time (YouTube → TikTok → Facebook → Instagram → …)
+// so Facebook can't crowd out the rest; entertainment terms are searched across all platforms at once.
 //
 // Before a Facebook or TikTok link is posted the bot asks the embed service for it exactly like
 // Discord does. If the service can't produce a video (facebed answers with a picture-only card;
@@ -112,7 +113,7 @@ const KEY = '__videos';
 const SCHEMA = 8;                 // 2 plain links · 3 Arabic + title de-dupe · 4 queue + drip · 5 shorts only · 6 terms + votes · 8 term list update
 const DEFAULT_QUERY = 'ليبيا';
 const WINDOW = ['h', 'd', 'w'].includes(process.env.VIDEOS_WINDOW) ? process.env.VIDEOS_WINDOW : 'w';   // window for terms added without one
-const WIN = { h: { ms: 3600e3, label: 'past hour' }, d: { ms: 86400e3, label: 'past 24h' }, w: { ms: 604800e3, label: 'past week' } };
+const WIN = { h: { ms: 3600e3, label: 'past hour' }, d: { ms: 86400e3, label: 'past 24h' }, w: { ms: 604800e3, label: 'past week' }, m: { ms: 30 * 86400e3, label: 'past month' } };
 const winOf = w => WIN[w] || WIN.d;
 const WINDOW_MS = { h: 3600e3, d: 86400e3, w: 604800e3 }[WINDOW];
 const WINDOW_LABEL = { h: 'past hour', d: 'past 24h', w: 'past week' }[WINDOW];
@@ -393,14 +394,30 @@ const isBlocked = (st, acct) => {
   return !!x && x.dv >= BLOCK_MIN_VIDEOS && x.d >= BLOCK_MIN_DOWNS && scoreOf(x) < BLOCK_SCORE;
 };
 
-const termWeight = (t, st) => Math.min(1.8, Math.max(0.35, 2 * scoreOf(st.terms[t.q])));
+// Search log: what each recent search found. Used to see which terms are dead and to adapt.
+const LOG_CAP = 40;
+const recentRaw = (c, q, n = 3) => (c.log || []).filter(e => e.q === q && !e.err).slice(-n).map(e => e.raw).reverse();   // newest first
+function emptyStreak(c, q) {
+  let n = 0;
+  for (const r of recentRaw(c, q, 5)) { if (r === 0) n++; else break; }
+  return n;
+}
+const yieldFactor = (c, q) => { const n = emptyStreak(c, q); return n >= 3 ? 0.3 : n === 2 ? 0.5 : n === 1 ? 0.8 : 1; };
+function logSearch(c, entry) {
+  c.log.push({ at: Date.now(), ...entry });
+  if (c.log.length > LOG_CAP) c.log = c.log.slice(-LOG_CAP);
+}
+
+// A term's search weight: members' votes (never below 35% on their own) times how well its recent
+// searches did (a term that keeps finding nothing is searched less, down to 30%, until it finds something).
+const termWeight = (t, st, c) => Math.min(1.8, Math.max(0.2, 2 * scoreOf(st.terms[t.q]) * (c ? yieldFactor(c, t.q) : 1)));
 
 // Smooth weighted round-robin: every term is searched in proportion to its weight (liked terms
 // more, disliked ones less, never below 35%), in a steady rotation. commit=false only peeks.
 function nextTerm(c, commit = true) {
   if (!Array.isArray(c.terms) || !c.terms.length) c.terms = starterTerms();
   const st = voteStats(c);
-  const w = c.terms.map(t => termWeight(t, st));
+  const w = c.terms.map(t => termWeight(t, st, c));
   const total = w.reduce((a, b) => a + b, 0);
   let bi = 0;
   let bc = -Infinity;
@@ -555,11 +572,14 @@ async function getJson(url) {
   return res.json();
 }
 
-// Which sites this search is limited to. By default each search targets ONE platform and they
-// take turns, so a platform with lots of results (Facebook) can't crowd out the others.
-function siteQuery(c, override) {
+// Which sites this search is limited to. The news term is searched on ONE platform at a time, in
+// turn, so a platform with lots of results (Facebook) can't crowd out the others. Entertainment terms
+// are specific enough that splitting them by platform leaves nothing (that returned 0 results), so
+// they are searched across all platforms at once.
+function siteQuery(c, override, term) {
   if (override) return `site:${override}`;
   if (!SITE_FILTER) return '';
+  if (term && term.kind !== 'news') return '';       // niche entertainment terms find few videos: search all platforms at once
   if (!ROTATE) return SITE_QUERY;
   return `site:${PLATFORM_SITES[(c.rot || 0) % PLATFORM_SITES.length]}`;
 }
@@ -762,6 +782,7 @@ function upgrade(c) {
   }
   if (!Array.isArray(c.ledger)) c.ledger = [];                    // v6: posted videos + their 👍/👎 counts
   if (!Array.isArray(c.hist)) c.hist = [];                        // v6: kinds of the latest posts
+  if (!Array.isArray(c.log)) c.log = [];                          // v9: what recent searches found
   if (v < 6) {                                                    // videos queued before v6 came from the news-style search
     c.queue.forEach(it => { if (!it.k) { it.k = 'n'; it.q = it.q || DEFAULT_QUERY; it.a = it.a || acctOf(it); } });
   }
@@ -800,6 +821,7 @@ function cfg(guildId, create = false) {
       terms: starterTerms(),
       ledger: [],
       hist: [],
+      log: [],
       lastPoll: 0,
       usage: { month: '', count: 0 },
       lastSearch: 0,
@@ -829,7 +851,7 @@ async function withLock(gid, fn) {
 // Fetch, keep the four sources, and work out which of them this guild hasn't had yet.
 async function gather(c, getVideos, opts = {}) {
   const term = opts.term || nextTerm(c, false);
-  const site = siteQuery(c, opts.site);
+  const site = siteQuery(c, opts.site, term);
   const raw = await getVideos(term.q, site, term.w);
   const { kept, dropped, droppedItems } = curate(raw);
   const st = voteStats(c);
@@ -890,19 +912,25 @@ function enqueue(c, v, at = Date.now()) {
 // Run one search now and put the new videos in the queue. Nothing is posted here.
 async function searchAndQueue(gid, c) {
   c.lastSearch = Date.now();       // set first, so a failure can't turn into a rapid retry loop
-  const term = nextTerm(c, true);   // terms rotate by weight, platforms rotate evenly; both move on even if the search fails
-  const label = `${term.q} · ${(siteQuery(c) || 'all sites').replace('site:', '')}`;
+  const picked = nextTerm(c, true);   // terms rotate by weight; the rotation moves on even if the search fails
+  // An entertainment term that found nothing twice in a row looks back a month instead of a week
+  // (evergreen videos don't go stale). Once the month window finds videos it stays on it.
+  const widened = picked.kind !== 'news' && picked.w === 'w' && (picked.wide || emptyStreak(c, picked.q) >= 2);
+  const term = widened ? { ...picked, w: 'm' } : picked;
+  const site = siteQuery(c, undefined, term);
+  const label = `${term.q} · ${(site || 'all platforms').replace('site:', '')}${widened ? ' · month' : ''}`;
   let g;
   try {
     g = await gather(c, fetchVideos, { term });
   } catch (e) {
-    c.rot = (c.rot || 0) + 1;      // a failing platform must never block the rotation
+    if (term.kind === 'news') c.rot = (c.rot || 0) + 1;     // a failing platform must never block the news rotation
+    logSearch(c, { q: term.q, s: site, w: term.w, raw: 0, ok: 0, add: 0, err: 1 });
     c.lastNote = clip(`${label}: failed — ${e.message}`, 120);
     saveData(gid);
     throw e;
   }
   charge(c);                       // a successful search counts against the budget
-  c.rot = (c.rot || 0) + 1;        // next search targets the next platform
+  if (term.kind === 'news') c.rot = (c.rot || 0) + 1;       // the news term moves to the next platform
 
   let added = 0;
   const batchAt = Date.now();      // all videos from one search share a timestamp
@@ -914,6 +942,8 @@ async function searchAndQueue(gid, c) {
   for (const d of g.dupTitles) c.seen.push(d.id);     // look-alike titles are not re-checked every time
   for (const b of g.blocked) c.seen.push(b.id);       // videos from voted-down accounts aren't re-checked either
   if (c.seen.length > SEEN_CAP) c.seen = c.seen.slice(-SEEN_CAP);
+  if (widened && g.rawCount > 0) picked.wide = true;
+  logSearch(c, { q: term.q, s: site, w: term.w, raw: g.rawCount, ok: g.kept.length, add: added });
   c.lastNote = `${label}: ${g.rawCount} result(s), ${g.kept.length} usable, ${added} queued${g.blocked.length ? `, ${g.blocked.length} from blocked accounts` : ''}`;
   saveData(gid);
   return {
@@ -1328,7 +1358,7 @@ function getLibyaVideosCommands() {
           .addStringOption(o => o
             .setName('window')
             .setDescription('How far back to look (default: a week for entertainment, 24 hours for news)')
-            .addChoices({ name: 'Past hour', value: 'h' }, { name: 'Past 24 hours', value: 'd' }, { name: 'Past week', value: 'w' })))
+            .addChoices({ name: 'Past hour', value: 'h' }, { name: 'Past 24 hours', value: 'd' }, { name: 'Past week', value: 'w' }, { name: 'Past month', value: 'm' })))
         .addSubcommand(s => s
           .setName('remove')
           .setDescription('Remove a search term')
@@ -1366,6 +1396,7 @@ function getLibyaVideosCommands() {
           .setName('post')
           .setDescription('Also post up to 3 of them in THIS channel to preview how they embed')))
       .addSubcommand(s => s.setName('clear').setDescription('Empty the queue of waiting videos'))
+      .addSubcommand(s => s.setName('history').setDescription('Show the latest searches and how many videos each one found'))
       .addSubcommand(s => s.setName('votes').setDescription('Show what members have voted: liked and disliked terms and accounts'))
       .addSubcommand(s => s.setName('status').setDescription('Show settings, queue, votes and search budget')),
   ];
@@ -1395,7 +1426,7 @@ const KIND_ICON = { news: '📰', fun: '🎭' };
 function nextSearchText(c) {
   if (!c) return '';
   const t = nextTerm(c, false);
-  const site = provider === 'serpapi' && SITE_FILTER && ROTATE ? ` on ${PLATFORM_SITES[(c.rot || 0) % PLATFORM_SITES.length]}` : '';
+  const site = provider === 'serpapi' && SITE_FILTER && ROTATE && t.kind === 'news' ? ` on ${PLATFORM_SITES[(c.rot || 0) % PLATFORM_SITES.length]}` : '';
   return ` · next search: ${t.q}${site}`;
 }
 
@@ -1410,9 +1441,11 @@ async function handleTerms(i, sub) {
     const lines = c.terms.map(t => {
       const x = st.terms[t.q];
       const votes = x && (x.ru || x.rd) ? ` · 👍 ${x.ru} 👎 ${x.rd}` : '';
-      return `${KIND_ICON[t.kind] || '🎭'} ${t.q} — ${winOf(t.w).label} · searched ×${termWeight(t, st).toFixed(2)}${votes}`;
+      const finds = recentRaw(c, t.q, 3);
+      const win = t.wide && t.kind !== 'news' && t.w === 'w' ? 'm' : t.w;
+      return `${KIND_ICON[t.kind] || '🎭'} ${t.q} — ${winOf(win).label}${win !== t.w ? ' (widened: it found nothing for a week)' : ''} · searched ×${termWeight(t, st, c).toFixed(2)}${finds.length ? ` · last finds: ${finds.join(', ')}` : ''}${votes}`;
     });
-    return say(clip(`🔎 **Search terms** (${c.terms.length}) — 📰 news · 🎭 entertainment\n${lines.join('\n')}\n\n×1.00 is normal. Terms members like are searched more, ones they dislike less (never below ×0.35).`, 1950));
+    return say(clip(`🔎 **Search terms** (${c.terms.length}) — 📰 news · 🎭 entertainment\n${lines.join('\n')}\n\n×1.00 is normal. Terms members like are searched more, ones they dislike less. A term that keeps finding nothing is searched less, and a week-long one starts looking back a month for good once that finds videos.`, 1950));
   }
 
   if (sub === 'add') {
@@ -1424,6 +1457,7 @@ async function handleTerms(i, sub) {
     if (existing) {
       existing.kind = kind;
       existing.w = w;
+      existing.wide = false;
       saveData(gid);
       return say(`✅ Updated **${text}** → ${KIND_ICON[kind]} ${winOf(w).label}.`);
     }
@@ -1460,6 +1494,16 @@ async function handleVideosFeed(i) {
   }
 
   if (i.options.getSubcommandGroup(false) === 'terms') return handleTerms(i, sub);
+
+  if (sub === 'history') {
+    const c = cfg(gid);
+    const all = c ? c.log : [];
+    if (!all.length) return say('No searches yet — the first one runs a few minutes after the bot starts.');
+    const lines = [...all].reverse().slice(0, 12).map(e =>
+      `<t:${unix(e.at)}:R> · ${e.q}${e.s ? ` · ${e.s.replace('site:', '')}` : ''}${e.w === 'm' ? ' · month' : ''} → ${e.err ? 'failed' : `${e.raw} found, ${e.ok} usable, ${e.add} queued`}`);
+    const empty = all.filter(e => !e.err && e.raw === 0).length;
+    return say(clip(`🕘 **Recent searches** — ${empty} of the last ${all.length} found nothing\n${lines.join('\n')}`, 1950));
+  }
 
   if (sub === 'votes') {
     const c = cfg(gid);
@@ -1742,5 +1786,5 @@ module.exports = {
   initLibyaVideos,
   getLibyaVideosCommands,
   curateUrl,
-  _test: { heartbeat, isActiveNow, gapMs, pickNext, searchPlan, normTitle, embedOk, postNext, tiktokOk, nextTerm, voteStats, newsAllowed, isNewsTitle, acctOf, pollVotes, recordPost, cfg, isBlocked, scoreOf, onRawPacket },
+  _test: { heartbeat, isActiveNow, gapMs, pickNext, searchPlan, normTitle, embedOk, postNext, tiktokOk, nextTerm, voteStats, newsAllowed, isNewsTitle, acctOf, pollVotes, recordPost, cfg, isBlocked, scoreOf, onRawPacket, termWeight, yieldFactor },
 };
