@@ -22,6 +22,8 @@
 // Member votes: every posted video gets 👍 and 👎 reactions. The bot reads the counts back and learns
 // which terms and accounts members like. It is deliberately slow to react: a single vote (or a single
 // troll) barely moves anything; only a clear, repeated pattern changes what is searched or blocked.
+// Each person gets ONE vote per video: clicking 👍 removes their 👎 and the other way round (the bot
+// needs the Manage Messages permission in the feed channel for that).
 // See /videos-feed votes and /videos-feed terms list.
 //
 // Search budget (SerpApi free plan = 250 searches/month): the bot asks SerpApi's free
@@ -102,11 +104,12 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
+  Routes,
 } = require('discord.js');
 const crypto = require('crypto');
 
 const KEY = '__videos';
-const SCHEMA = 6;                 // 2 plain links · 3 Arabic + title de-dupe · 4 queue + drip · 5 shorts only · 6 terms + votes
+const SCHEMA = 8;                 // 2 plain links · 3 Arabic + title de-dupe · 4 queue + drip · 5 shorts only · 6 terms + votes · 8 term list update
 const DEFAULT_QUERY = 'ليبيا';
 const WINDOW = ['h', 'd', 'w'].includes(process.env.VIDEOS_WINDOW) ? process.env.VIDEOS_WINDOW : 'w';   // window for terms added without one
 const WIN = { h: { ms: 3600e3, label: 'past hour' }, d: { ms: 86400e3, label: 'past 24h' }, w: { ms: 604800e3, label: 'past week' } };
@@ -278,8 +281,10 @@ const STARTER_TERMS = [
   { q: 'مقالب ليبية', kind: 'fun', w: 'w' },
   { q: 'أكلات ليبية', kind: 'fun', w: 'w' },
   { q: 'أغاني ليبية', kind: 'fun', w: 'w' },
-  { q: 'عرس ليبي', kind: 'fun', w: 'w' },
   { q: 'الدوري الليبي', kind: 'fun', w: 'w' },
+  { q: 'الرينقو ليبيا', kind: 'fun', w: 'w' },
+  { q: 'ميمز ليبية', kind: 'fun', w: 'w' },
+  { q: 'الذكاء_الاصطناعي ليبيا', kind: 'fun', w: 'w' },
 ];
 const starterTerms = () => STARTER_TERMS.map(t => ({ ...t, credit: 0 }));
 const TERMS_CAP = 20;
@@ -311,6 +316,7 @@ const NEWS_WORDS = new Set([
   'الدبيبه', 'حفتر', 'المنفي', 'ترامب', 'اشتباكات', 'الاشتباكات',
 ]);
 let reactWarned = false;
+let voteWarned = false;
 
 // ─── Title de-duplication ────────────────────────────────────────────────────
 
@@ -759,6 +765,13 @@ function upgrade(c) {
   if (v < 6) {                                                    // videos queued before v6 came from the news-style search
     c.queue.forEach(it => { if (!it.k) { it.k = 'n'; it.q = it.q || DEFAULT_QUERY; it.a = it.a || acctOf(it); } });
   }
+  if (v < 8) {                                                    // v8: wedding term out; Libya-specific Arabic versions of three new terms in
+    const gone = new Set(['عرس ليبي', 'الرينقو', 'meme', 'الذكاء_الاصطناعي']);
+    c.terms = c.terms.filter(t => !gone.has(t.q));
+    for (const q of ['الرينقو ليبيا', 'ميمز ليبية', 'الذكاء_الاصطناعي ليبيا']) {
+      if (!c.terms.some(t => t.q.toLowerCase() === q.toLowerCase())) c.terms.push({ q, kind: 'fun', w: 'w', credit: 0 });
+    }
+  }
   c.lastPoll = c.lastPoll || 0;
   if (typeof c.rot !== 'number') c.rot = 0;
   if (!c.lastSearch) c.lastSearch = c.lastRun || 0;
@@ -1124,6 +1137,45 @@ async function pollVotes(gid, c) {
   }
 }
 
+const VOTE_OPPOSITE = { '👍': '👎', '👎': '👍' };
+
+// One vote per person: when someone clicks 👍 the bot removes their 👎 (and the other way round),
+// so the last click wins. It reads the raw gateway event, so it works on every post, old or new.
+// Removing someone else's reaction needs the Manage Messages permission in the feed channel.
+async function onRawPacket(packet) {
+  if (!packet || packet.t !== 'MESSAGE_REACTION_ADD' || !packet.d) return;
+  const d = packet.d;
+  const opposite = d.emoji && !d.emoji.id ? VOTE_OPPOSITE[d.emoji.name] : null;
+  if (!opposite || !d.user_id || !d.message_id || !d.channel_id) return;
+  if (client.user && d.user_id === client.user.id) return;          // the bot's own starting 👍/👎
+
+  let owner = null;                                                  // only videos this bot posted
+  for (const g of Object.keys(db)) {
+    const c = db[g] && db[g][KEY];
+    if (c && c.channelId === d.channel_id && Array.isArray(c.ledger) && c.ledger.some(e => e.m === d.message_id)) {
+      owner = c;
+      break;
+    }
+  }
+  if (!owner) return;
+
+  try {
+    await client.rest.delete(Routes.channelMessageUserReaction(d.channel_id, d.message_id, encodeURIComponent(opposite), d.user_id));
+    owner.voteErr = '';                                              // it worked, so the permission is fine
+  } catch (e) {
+    if (e.code === 10014 || e.status === 404) return;                // they hadn't clicked the other one: nothing to remove
+    if (e.code === 50013 || e.status === 403) {
+      owner.voteErr = 'I need the Manage Messages permission in the feed channel to remove a person\'s opposite vote';
+      if (!voteWarned) {
+        voteWarned = true;
+        console.warn('[videos] cannot remove opposite votes: missing Manage Messages in the feed channel');
+      }
+      return;
+    }
+    console.warn('[videos] removing the opposite vote failed:', e.message);
+  }
+}
+
 async function postNext(gid, c, opts = {}) {
   if (!c.queue.length) return { posted: false, note: 'The queue is empty.' };
   const channel = await client.channels.fetch(c.channelId).catch(() => null);
@@ -1458,6 +1510,7 @@ async function handleVideosFeed(i) {
         c ? `Queue: **${c.queue.length}** waiting (📰 ${c.queue.filter(v => v.k === 'n').length} · 🎭 ${c.queue.filter(v => v.k !== 'n').length}) · next post ${nextPostText(c)}` : 'Queue: 0 waiting',
         c ? `Mix: news limited to ${NEWS_MAX} of every ${NEWS_WINDOW} posts · votes: ${voteStats(c).rated} rated (👍 ${voteStats(c).up} · 👎 ${voteStats(c).down})` : null,
         c && c.reactErr ? `⚠️ Reactions: ${c.reactErr}` : null,
+        c && c.voteErr ? `⚠️ One vote per person: ${c.voteErr}` : null,
         `Drip: one video every ${fmtDur(MIN_GAP_MS)}–${fmtDur(MAX_GAP_MS)} (adapts to the queue), ${activeLabel()}`,
         searchLine,
         `Sources kept (${SHORTS_ONLY ? 'shorts only' : 'all video lengths'}): YouTube · TikTok${TIKTOK_HOST ? ` (→ ${TIKTOK_HOST})` : ''} · Facebook (→ ${FACEBOOK_HOST}) · Instagram (→ ${INSTAGRAM_HOST})`,
@@ -1477,13 +1530,14 @@ async function handleVideosFeed(i) {
     const soft = [];
     if (!perms.has(PermissionFlagsBits.AddReactions)) soft.push('**Add Reactions**');
     if (!perms.has(PermissionFlagsBits.ReadMessageHistory)) soft.push('**Read Message History**');
+    if (!perms.has(PermissionFlagsBits.ManageMessages)) soft.push('**Manage Messages** (to remove a person\'s opposite vote)');
     const c = cfg(gid, true);
     c.channelId = ch.id;
     c.paused = false;
     saveData(gid);
     return say(
       `✅ Videos will be posted in ${ch}.` +
-      (soft.length ? `\n⚠️ Give me ${soft.join(' and ')} there so the 👍/👎 votes work.` : '') +
+      (soft.length ? `\n⚠️ Give me ${soft.join(', ')} there so the 👍/👎 votes work.` : '') +
       (provider ? ' The first search runs within a few minutes, then videos trickle in. Use `/videos-feed status` to watch the queue.' : '\n⚠️ No API key is configured yet, so nothing will happen until you add SERPAPI_KEY or YOUTUBE_API_KEY in Railway.'),
     );
   }
@@ -1672,6 +1726,8 @@ function initLibyaVideos(deps) {
     }
   });
 
+  client.on('raw', packet => { onRawPacket(packet).catch(e => console.warn('[videos] vote handler error:', e.message)); });
+
   client.once('clientReady', () => {
     if (!provider) return;
     // Wait for index.js to finish loading MongoDB before the first check.
@@ -1686,5 +1742,5 @@ module.exports = {
   initLibyaVideos,
   getLibyaVideosCommands,
   curateUrl,
-  _test: { heartbeat, isActiveNow, gapMs, pickNext, searchPlan, normTitle, embedOk, postNext, tiktokOk, nextTerm, voteStats, newsAllowed, isNewsTitle, acctOf, pollVotes, recordPost, cfg, isBlocked, scoreOf },
+  _test: { heartbeat, isActiveNow, gapMs, pickNext, searchPlan, normTitle, embedOk, postNext, tiktokOk, nextTerm, voteStats, newsAllowed, isNewsTitle, acctOf, pollVotes, recordPost, cfg, isBlocked, scoreOf, onRawPacket },
 };
