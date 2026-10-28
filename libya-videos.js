@@ -12,7 +12,17 @@
 //      one slower. Videos only go out during active hours (08:00–23:59 Libya time). The
 //      NEWEST videos go first (a backlog never buries fresh ones; the oldest simply age
 //      out), and among the latest batches consecutive posts come from different platforms
-//      where possible. Videos still queued after 24 h are dropped as stale.
+//      where possible. Queued videos are dropped when stale: news after 12 h, entertainment after 72 h.
+//
+// What gets searched: a LIST of terms (/videos-feed terms ...), mostly Libyan-dialect entertainment
+// terms looking back a week, plus one news term looking back a day. Each search takes the next term
+// (liked terms more often, disliked ones less) on the next platform. News is capped at 1 in every 4
+// posts, so it never floods the feed but never disappears either.
+//
+// Member votes: every posted video gets 👍 and 👎 reactions. The bot reads the counts back and learns
+// which terms and accounts members like. It is deliberately slow to react: a single vote (or a single
+// troll) barely moves anything; only a clear, repeated pattern changes what is searched or blocked.
+// See /videos-feed votes and /videos-feed terms list.
 //
 // Search budget (SerpApi free plan = 250 searches/month): the bot asks SerpApi's free
 // Account API how many searches are left and when the plan renews, keeps 10 in reserve for
@@ -61,12 +71,13 @@
 //   VIDEOS_DRAIN_HOURS     aim to empty the queue in about this long (default 6)
 //   VIDEOS_ACTIVE_HOURS    hours videos may be posted, default 8-23 ("off" = any time)
 //   VIDEOS_TZ              time zone for those hours (default Africa/Tripoli)
-//   VIDEOS_QUEUE_TTL_HOURS drop queued videos older than this (default 24)
+//   VIDEOS_NEWS_TTL_HOURS / VIDEOS_FUN_TTL_HOURS   queue lifetime of news / entertainment (default 12 / 72)
+//   VIDEOS_NEWS_SHARE      news share of the feed, 0.05–0.9 (default 0.25 = 1 in 4 posts)
 //   SERPAPI_ENGINE         google_short_videos (default) or google_videos (general Videos tab)
 //   VIDEOS_MAX_SECONDS     longest clip counted as "short" when its length is known (default 180)
 //   VIDEOS_SHORTS_ONLY     set to 0 to also allow long videos (YouTube watch links, Facebook
 //                          /videos and /watch links, Instagram IGTV). Default: shorts only.
-//   VIDEOS_WINDOW          h = past hour, d = past 24h (default), w = past week
+//   VIDEOS_WINDOW          h, d or w: window for terms added without one (default w = past week)
 //   VIDEOS_SITE_FILTER     set to 0 to stop adding site: filters to the SerpApi query
 //   VIDEOS_VERIFY_EMBEDS   set to 0 to stop checking Facebook/TikTok links before posting
 //   VIDEOS_ROTATE          set to 0 to search all four platforms in one query instead of one
@@ -95,13 +106,15 @@ const {
 const crypto = require('crypto');
 
 const KEY = '__videos';
-const SCHEMA = 5;                 // 2 = plain links · 3 = Arabic + title de-dupe · 4 = queue + drip · 5 = shorts only
+const SCHEMA = 6;                 // 2 plain links · 3 Arabic + title de-dupe · 4 queue + drip · 5 shorts only · 6 terms + votes
 const DEFAULT_QUERY = 'ليبيا';
-const WINDOW = ['h', 'd', 'w'].includes(process.env.VIDEOS_WINDOW) ? process.env.VIDEOS_WINDOW : 'd';
+const WINDOW = ['h', 'd', 'w'].includes(process.env.VIDEOS_WINDOW) ? process.env.VIDEOS_WINDOW : 'w';   // window for terms added without one
+const WIN = { h: { ms: 3600e3, label: 'past hour' }, d: { ms: 86400e3, label: 'past 24h' }, w: { ms: 604800e3, label: 'past week' } };
+const winOf = w => WIN[w] || WIN.d;
 const WINDOW_MS = { h: 3600e3, d: 86400e3, w: 604800e3 }[WINDOW];
 const WINDOW_LABEL = { h: 'past hour', d: 'past 24h', w: 'past week' }[WINDOW];
-const SEEN_CAP = 800;             // remembered video IDs per guild (queued + posted)
-const TITLES_CAP = 300;           // remembered titles per guild
+const SEEN_CAP = 1500;            // remembered video IDs per guild (queued + posted)
+const TITLES_CAP = 400;           // remembered titles per guild
 const TITLE_SIMILARITY = 0.7;     // 0–1: how alike two titles must be to count as the same video
 const FETCH_TIMEOUT_MS = 15000;
 const POST_GAP_MS = 1500;         // pause between preview posts from /videos-feed test
@@ -252,6 +265,53 @@ function isActiveNow() {
 
 const activeLabel = () => (ACTIVE ? `${String(ACTIVE[0]).padStart(2, '0')}:00–${String(ACTIVE[1]).padStart(2, '0')}:59 ${TZ}` : 'any time');
 
+// ─── Search terms, news mix and member votes ─────────────────────────────────
+
+// Starting list. Entertainment terms look back a week (they don't expire like news does); the one
+// news term looks back a day and its videos also expire from the queue much sooner. Edit the list
+// with /videos-feed terms add / remove / list / reset. The bot learns which terms members like.
+const STARTER_TERMS = [
+  { q: 'ليبيا', kind: 'news', w: 'd' },
+  { q: 'بالليبي', kind: 'fun', w: 'w' },
+  { q: 'كوميديا ليبية', kind: 'fun', w: 'w' },
+  { q: 'طرائف ليبية', kind: 'fun', w: 'w' },
+  { q: 'مقالب ليبية', kind: 'fun', w: 'w' },
+  { q: 'أكلات ليبية', kind: 'fun', w: 'w' },
+  { q: 'أغاني ليبية', kind: 'fun', w: 'w' },
+  { q: 'عرس ليبي', kind: 'fun', w: 'w' },
+  { q: 'الدوري الليبي', kind: 'fun', w: 'w' },
+];
+const starterTerms = () => STARTER_TERMS.map(t => ({ ...t, credit: 0 }));
+const TERMS_CAP = 20;
+
+const NEWS_TTL_MS = intEnv('VIDEOS_NEWS_TTL_HOURS', 12) * 3600e3;     // news goes stale fast…
+const FUN_TTL_MS = intEnv('VIDEOS_FUN_TTL_HOURS', 72) * 3600e3;       // …entertainment doesn't
+const NEWS_WINDOW = 4;                                                // news share is judged over the last 4 posts
+const NEWS_MAX = Math.max(1, Math.round(Math.min(0.9, Math.max(0.05, Number(process.env.VIDEOS_NEWS_SHARE) || 0.25)) * NEWS_WINDOW));
+const NEWS_IDLE_MS = 3 * 3600e3;      // if nothing was posted for this long, a news video may go out anyway
+
+// Votes (👍/👎 reactions on posted videos). Designed so a lone troll can't move anything:
+//  · a score is (👍 + 3) / (👍 + 👎 + 6), i.e. it starts neutral at 0.5 and each vote only nudges it
+//  · one video counts at most 5 votes per direction, and old votes fade (half-life 14 days)
+//  · a term only gets searched less (never below 35% of normal); an account is only blocked after
+//    6+ 👎 spread over 3+ different videos with a score under 0.28
+const POLL_MS = 10 * 60e3;            // how often reaction counts are read back
+const VOTE_WINDOW_MS = 3 * 86400e3;   // posts keep collecting votes for 3 days
+const VOTE_CAP = 5;
+const VOTE_PRIOR = 3;
+const VOTE_HALF_LIFE_MS = 14 * 86400e3;
+const LEDGER_CAP = 400;
+const BLOCK_SCORE = 0.28;
+const BLOCK_MIN_DOWNS = 6;
+const BLOCK_MIN_VIDEOS = 3;
+
+// Words that mark a news-style title (matched as whole words after Arabic normalisation).
+const NEWS_WORDS = new Set([
+  'عاجل', 'العاجل', 'نشره', 'النشره', 'اخبار', 'الاخبار', 'تصريحات', 'تصريح', 'بيان', 'مباشر',
+  'الدبيبه', 'حفتر', 'المنفي', 'ترامب', 'اشتباكات', 'الاشتباكات',
+]);
+let reactWarned = false;
+
 // ─── Title de-duplication ────────────────────────────────────────────────────
 
 // Reduces a title to a comparable form: lower-case, no links/#hashtags/@mentions,
@@ -280,6 +340,75 @@ function jaccard(a, b) {
 
 // Titles with fewer than 3 real words ("فيديو", "ليبيا اليوم") are too generic to compare.
 const MIN_TITLE_TOKENS = 3;
+
+const isNewsTitle = norm => [...tokenSet(norm)].some(w => NEWS_WORDS.has(w));
+
+// "tt:@name", "fb:pagename", … or '' when the account can't be told (e.g. Instagram reel links).
+function acctOf(v) {
+  try {
+    const seg = new URL(v.key).pathname.split('/').filter(Boolean);
+    if (v.source === 'TikTok' && seg[0] && seg[0][0] === '@') return `tt:${seg[0].toLowerCase()}`;
+    if (v.source === 'Facebook' && seg[0] && !['reel', 'share', 'watch', 'groups', 'people', 'profile.php'].includes(seg[0])) return `fb:${seg[0].toLowerCase()}`;
+  } catch { /* fall through */ }
+  if (v.channel && typeof v.channel === 'string') return `${String(v.source || 'x').slice(0, 2).toLowerCase()}:${v.channel.toLowerCase().slice(0, 40)}`;
+  return '';
+}
+
+const scoreOf = x => (!x ? 0.5 : (x.u + VOTE_PRIOR) / (x.u + x.d + 2 * VOTE_PRIOR));
+
+// Aggregates the vote ledger per term and per account, with the caps and fading described above.
+function voteStats(c) {
+  const now = Date.now();
+  const terms = {};
+  const accts = {};
+  let up = 0;
+  let down = 0;
+  let rated = 0;
+  const add = (m, k, u, d) => {
+    const x = m[k] || (m[k] = { u: 0, d: 0, n: 0, dv: 0, ru: 0, rd: 0 });
+    x.u += u.w; x.d += d.w; x.n++; x.ru += u.raw; x.rd += d.raw;
+    if (d.raw > 0) x.dv++;
+  };
+  for (const e of c.ledger || []) {
+    const f = Math.pow(0.5, Math.max(0, now - (e.at || now)) / VOTE_HALF_LIFE_MS);
+    const u = Math.min(e.u || 0, VOTE_CAP);
+    const d = Math.min(e.d || 0, VOTE_CAP);
+    if (u || d) rated++;
+    up += u;
+    down += d;
+    if (e.q) add(terms, e.q, { w: u * f, raw: u }, { w: d * f, raw: d });
+    if (e.a) add(accts, e.a, { w: u * f, raw: u }, { w: d * f, raw: d });
+  }
+  return { terms, accts, up, down, rated };
+}
+
+const isBlocked = (st, acct) => {
+  const x = acct && st.accts[acct];
+  return !!x && x.dv >= BLOCK_MIN_VIDEOS && x.d >= BLOCK_MIN_DOWNS && scoreOf(x) < BLOCK_SCORE;
+};
+
+const termWeight = (t, st) => Math.min(1.8, Math.max(0.35, 2 * scoreOf(st.terms[t.q])));
+
+// Smooth weighted round-robin: every term is searched in proportion to its weight (liked terms
+// more, disliked ones less, never below 35%), in a steady rotation. commit=false only peeks.
+function nextTerm(c, commit = true) {
+  if (!Array.isArray(c.terms) || !c.terms.length) c.terms = starterTerms();
+  const st = voteStats(c);
+  const w = c.terms.map(t => termWeight(t, st));
+  const total = w.reduce((a, b) => a + b, 0);
+  let bi = 0;
+  let bc = -Infinity;
+  c.terms.forEach((t, i) => {
+    const cr = (t.credit || 0) + w[i];
+    if (cr > bc) { bc = cr; bi = i; }
+  });
+  const term = c.terms[bi];
+  if (commit) {
+    c.terms.forEach((t, i) => { t.credit = (t.credit || 0) + w[i]; });
+    term.credit -= total;
+  }
+  return term;
+}
 
 // ─── Link curation: keep only YouTube / TikTok / Facebook / Instagram VIDEOS ─
 
@@ -432,11 +561,11 @@ function siteQuery(c, override) {
 // Google Videos via SerpApi. tbs=qdr:d is the "past 24 hours" filter. The site: filter asks
 // Google for the four platforms only, so the ~10 results per search aren't wasted on sites
 // that get dropped anyway; gl/hl bias the results towards Libya and Arabic.
-async function fetchSerpApi(query, site) {
+async function fetchSerpApi(query, site, w) {
   const params = new URLSearchParams({
     engine: ENGINE,
     q: site ? `${query} ${site}` : query,
-    tbs: `qdr:${WINDOW}`,
+    tbs: `qdr:${WIN[w] ? w : 'd'}`,
     api_key: process.env.SERPAPI_KEY,
   });
   if (GL) params.set('gl', GL);
@@ -482,7 +611,7 @@ async function fetchSerpApi(query, site) {
 
 // YouTube Data API. Short (under 4 min) videos, newest first, inside the time window.
 // search.list costs 100 quota units; the free daily quota is 10,000.
-async function fetchYouTube(query) {
+async function fetchYouTube(query, _site, w) {
   const params = new URLSearchParams({
     part: 'snippet',
     type: 'video',
@@ -490,7 +619,7 @@ async function fetchYouTube(query) {
     videoDuration: 'short',
     maxResults: '25',
     q: query,
-    publishedAfter: new Date(Date.now() - WINDOW_MS).toISOString(),
+    publishedAfter: new Date(Date.now() - winOf(w).ms).toISOString(),
     key: process.env.YOUTUBE_API_KEY,
   });
   if (HL) params.set('relevanceLanguage', HL);
@@ -516,8 +645,8 @@ async function fetchYouTube(query) {
     });
 }
 
-function fetchVideos(query, site) {
-  return provider === 'youtube' ? fetchYouTube(query) : fetchSerpApi(query, site);
+function fetchVideos(query, site, w) {
+  return provider === 'youtube' ? fetchYouTube(query, site, w) : fetchSerpApi(query, site, w);
 }
 
 // ─── Search budget ───────────────────────────────────────────────────────────
@@ -619,6 +748,18 @@ function upgrade(c) {
   if (!Array.isArray(c.queue)) c.queue = [];                    // v4: waiting videos
   if (!c.usage || typeof c.usage !== 'object') c.usage = { month: '', count: 0 };
   if (v < 5) c.queue = c.queue.filter(stillWanted);              // v5: shorts only
+  if (!Array.isArray(c.terms) || !c.terms.length) {               // v6: a list of search terms
+    c.terms = starterTerms();
+    if (c.query && c.query !== DEFAULT_QUERY && !c.terms.some(t => t.q === c.query)) {
+      c.terms.push({ q: c.query, kind: 'fun', w: WINDOW, credit: 0 });   // keep a custom single term the admin had set
+    }
+  }
+  if (!Array.isArray(c.ledger)) c.ledger = [];                    // v6: posted videos + their 👍/👎 counts
+  if (!Array.isArray(c.hist)) c.hist = [];                        // v6: kinds of the latest posts
+  if (v < 6) {                                                    // videos queued before v6 came from the news-style search
+    c.queue.forEach(it => { if (!it.k) { it.k = 'n'; it.q = it.q || DEFAULT_QUERY; it.a = it.a || acctOf(it); } });
+  }
+  c.lastPoll = c.lastPoll || 0;
   if (typeof c.rot !== 'number') c.rot = 0;
   if (!c.lastSearch) c.lastSearch = c.lastRun || 0;
   c.nextPostAt = c.nextPostAt || 0;
@@ -643,6 +784,10 @@ function cfg(guildId, create = false) {
       seen: [],
       titles: [],
       queue: [],
+      terms: starterTerms(),
+      ledger: [],
+      hist: [],
+      lastPoll: 0,
       usage: { month: '', count: 0 },
       lastSearch: 0,
       rot: 0,
@@ -669,10 +814,12 @@ async function withLock(gid, fn) {
 // ─── Fetching and queueing ───────────────────────────────────────────────────
 
 // Fetch, keep the four sources, and work out which of them this guild hasn't had yet.
-async function gather(c, getVideos, siteOverride) {
-  const site = siteQuery(c, siteOverride);
-  const raw = await getVideos(c.query, site);
+async function gather(c, getVideos, opts = {}) {
+  const term = opts.term || nextTerm(c, false);
+  const site = siteQuery(c, opts.site);
+  const raw = await getVideos(term.q, site, term.w);
   const { kept, dropped, droppedItems } = curate(raw);
+  const st = voteStats(c);
   const seen = new Set(c.seen);
   // v.raw check = videos posted by v1 (their IDs were made from the raw search-result URL)
   const unseen = kept.filter(v => !seen.has(v.id) && !seen.has(videoId(v.raw)));
@@ -681,8 +828,16 @@ async function gather(c, getVideos, siteOverride) {
   const known = (c.titles || []).map(tokenSet);
   const fresh = [];
   const dupTitles = [];
+  const blocked = [];
   for (const v of unseen) {
     v.titleNorm = normTitle(v.title);
+    v.q = term.q;
+    v.a = acctOf(v);
+    v.k = term.kind === 'news' || isNewsTitle(v.titleNorm) ? 'n' : 'f';
+    if (isBlocked(st, v.a)) {          // members have clearly voted this account down
+      blocked.push(v);
+      continue;
+    }
     const tok = tokenSet(v.titleNorm);
     if (tok.size >= MIN_TITLE_TOKENS) {
       if (known.some(k => k.size >= MIN_TITLE_TOKENS && jaccard(tok, k) >= TITLE_SIMILARITY)) {
@@ -694,7 +849,7 @@ async function gather(c, getVideos, siteOverride) {
     fresh.push(v);
   }
   return {
-    rawCount: raw.length, kept, dropped, droppedItems, fresh, dupTitles, site,
+    rawCount: raw.length, kept, dropped, droppedItems, fresh, dupTitles, blocked, site, term,
     alreadyPosted: kept.length - unseen.length,
   };
 }
@@ -706,7 +861,7 @@ function rememberTitle(c, v) {
 }
 
 function enqueue(c, v, at = Date.now()) {
-  const q = { id: v.id, url: v.url, key: v.key, source: v.source, title: clip(v.title, 150), at };
+  const q = { id: v.id, url: v.url, key: v.key, source: v.source, title: clip(v.title, 150), at, q: clip(v.q || '', 40), k: v.k || 'f', a: v.a || '' };
   if (c.mode === 'embed') {        // extras only needed for the branded card
     q.snippet = clip(v.snippet, 160);
     q.thumbnail = v.thumbnail;
@@ -722,10 +877,11 @@ function enqueue(c, v, at = Date.now()) {
 // Run one search now and put the new videos in the queue. Nothing is posted here.
 async function searchAndQueue(gid, c) {
   c.lastSearch = Date.now();       // set first, so a failure can't turn into a rapid retry loop
-  const label = (siteQuery(c) || 'all sites').replace('site:', '');
+  const term = nextTerm(c, true);   // terms rotate by weight, platforms rotate evenly; both move on even if the search fails
+  const label = `${term.q} · ${(siteQuery(c) || 'all sites').replace('site:', '')}`;
   let g;
   try {
-    g = await gather(c, fetchVideos);
+    g = await gather(c, fetchVideos, { term });
   } catch (e) {
     c.rot = (c.rot || 0) + 1;      // a failing platform must never block the rotation
     c.lastNote = clip(`${label}: failed — ${e.message}`, 120);
@@ -743,19 +899,22 @@ async function searchAndQueue(gid, c) {
     added++;
   }
   for (const d of g.dupTitles) c.seen.push(d.id);     // look-alike titles are not re-checked every time
+  for (const b of g.blocked) c.seen.push(b.id);       // videos from voted-down accounts aren't re-checked either
   if (c.seen.length > SEEN_CAP) c.seen = c.seen.slice(-SEEN_CAP);
-  c.lastNote = `${label}: ${g.rawCount} result(s), ${g.kept.length} usable, ${added} queued`;
+  c.lastNote = `${label}: ${g.rawCount} result(s), ${g.kept.length} usable, ${added} queued${g.blocked.length ? `, ${g.blocked.length} from blocked accounts` : ''}`;
   saveData(gid);
   return {
-    added, site: g.site, rawCount: g.rawCount, usable: g.kept.length,
+    added, site: g.site, term: term.q, rawCount: g.rawCount, usable: g.kept.length,
     alreadyPosted: g.alreadyPosted, dupTitles: g.dupTitles.length,
   };
 }
 
+const ttlOf = v => (v.k === 'n' ? NEWS_TTL_MS : v.k === 'f' ? FUN_TTL_MS : QUEUE_TTL_MS);
+
 function expireQueue(c) {
-  const cutoff = Date.now() - QUEUE_TTL_MS;
+  const now = Date.now();
   const before = c.queue.length;
-  c.queue = c.queue.filter(v => (v.at || 0) >= cutoff);
+  c.queue = c.queue.filter(v => (v.at || 0) >= now - ttlOf(v));
   return before - c.queue.length;
 }
 
@@ -857,19 +1016,41 @@ async function postVideo(channel, v, mode) {
   return channel.send(payload);
 }
 
+// News gets a limited share of the feed: at most NEWS_MAX of the last NEWS_WINDOW posts (1 in 4 by
+// default). Entertainment goes first whenever the limit is reached.
+function newsAllowed(c) {
+  return (c.hist || []).slice(-NEWS_WINDOW).filter(x => x === 'n').length < NEWS_MAX;
+}
+
+// How much the members' votes favour a video: its search term and its account, 0–1 (0.5 = no opinion).
+function itemScore(st, v) {
+  return 0.5 * scoreOf(st.terms[v.q]) + 0.5 * (v.a ? scoreOf(st.accts[v.a]) : 0.5);
+}
+
 // Newest first, so a backlog never buries fresh videos (older ones simply age out). Among the
-// latest batches (see FRESH_BAND_MS) a different platform than the last post is preferred; within
-// the same batch the best-ranked search result goes first.
-function pickNext(c, skip = new Set()) {
-  const all = c.queue.map((_, i) => i).filter(i => !skip.has(c.queue[i].id));
+// latest batches (see FRESH_BAND_MS) a different platform than the last post is preferred, then
+// the video the members' votes favour most, then the best-ranked search result.
+// Returns -1 when only news is waiting and the news limit says to hold it back for now.
+function pickNext(c, skip = new Set(), opts = {}) {
+  let all = c.queue.map((_, i) => i).filter(i => !skip.has(c.queue[i].id));
   if (!all.length) return -1;
+  if (!opts.ignoreNewsCap && !newsAllowed(c)) {
+    const entertainment = all.filter(i => c.queue[i].k !== 'n');
+    if (entertainment.length) all = entertainment;
+    else if (Date.now() - (c.lastPosted || 0) < NEWS_IDLE_MS) return -1;      // only news waiting: hold it back…
+  }                                                                            // …unless the feed has been silent for hours
+  const st = voteStats(c);
   const at = i => c.queue[i].at || 0;
   const newest = Math.max(...all.map(at));
   const band = all.filter(i => at(i) >= newest - FRESH_BAND_MS);
   const other = band.filter(i => c.queue[i].source !== c.lastSource);
   const pool = other.length ? other : band;
+  const sc = i => itemScore(st, c.queue[i]);
   let best = pool[0];
-  for (const i of pool) if (at(i) > at(best)) best = i;      // strict ">" keeps the best-ranked on ties
+  for (const i of pool) {
+    const d = sc(i) - sc(best);
+    if (d > 1e-9 || (Math.abs(d) <= 1e-9 && at(i) > at(best))) best = i;       // ties: newest, then best-ranked (lowest index)
+  }
   return best;
 }
 
@@ -881,7 +1062,69 @@ function gapMs(queueLen) {
   return Math.round(gap * (0.8 + Math.random() * 0.4));
 }
 
-async function postNext(gid, c) {
+// After a video is posted: add the 👍/👎 buttons and note the message so the votes can be read back.
+async function recordPost(c, v, msg) {
+  try {
+    if (msg && typeof msg.react === 'function') {
+      await msg.react('👍');
+      await msg.react('👎');
+      c.reactErr = '';
+    }
+  } catch (e) {
+    c.reactErr = e.code === 50013 ? 'I need the Add Reactions permission in the feed channel' : clip(e.message, 80);
+    if (!reactWarned) {
+      reactWarned = true;
+      console.warn('[videos] could not add 👍/👎 reactions:', e.message);
+    }
+  }
+  if (msg && msg.id) {
+    c.ledger.push({ m: msg.id, q: v.q || '', a: v.a || '', k: v.k || 'f', s: v.source, at: Date.now(), u: 0, d: 0 });
+    if (c.ledger.length > LEDGER_CAP) c.ledger = c.ledger.slice(-LEDGER_CAP);
+  }
+  c.hist.push(v.k === 'n' ? 'n' : 'f');
+  if (c.hist.length > 12) c.hist = c.hist.slice(-12);
+}
+
+// Reads the 👍/👎 counts of recent posts back from Discord (a couple of requests every 10 minutes,
+// works without any special bot intents). The bot's own reaction is not counted.
+async function pollVotes(gid, c) {
+  try {
+    const now = Date.now();
+    if (now - (c.lastPoll || 0) < POLL_MS) return;
+    const want = new Map();
+    for (const e of c.ledger) if (now - e.at < VOTE_WINDOW_MS) want.set(e.m, e);
+    if (!want.size) return;
+    c.lastPoll = now;
+    const channel = await client.channels.fetch(c.channelId).catch(() => null);
+    if (!channel || !channel.messages) return;
+    let before;
+    let changed = false;
+    for (let page = 0; page < 3 && want.size; page++) {
+      const batch = await channel.messages.fetch({ limit: 100, ...(before ? { before } : {}) }).catch(() => null);
+      if (!batch || !batch.size) break;
+      for (const m of batch.values()) {
+        const e = want.get(m.id);
+        if (!e) continue;
+        want.delete(m.id);
+        const count = emoji => {
+          const r = m.reactions && m.reactions.cache ? m.reactions.cache.get(emoji) : null;
+          return r ? Math.max(0, r.count - (r.me ? 1 : 0)) : 0;
+        };
+        const u = count('👍');
+        const d = count('👎');
+        if (u !== e.u || d !== e.d) { e.u = u; e.d = d; changed = true; }
+      }
+      before = batch.last().id;
+      const oldestWanted = want.size ? Math.min(...[...want.values()].map(x => x.at)) : Infinity;
+      if (batch.last().createdTimestamp < oldestWanted - 60e3) break;     // paged past everything we're looking for
+    }
+    if (changed) saveData(gid);
+  } catch (e) {
+    console.warn('[videos] reading votes failed:', e.message);
+  }
+}
+
+async function postNext(gid, c, opts = {}) {
   if (!c.queue.length) return { posted: false, note: 'The queue is empty.' };
   const channel = await client.channels.fetch(c.channelId).catch(() => null);
   if (!channel || !channel.isTextBased()) {
@@ -891,7 +1134,7 @@ async function postNext(gid, c) {
   let skipped = 0;
   const deferred = new Set();        // failed the check this round, kept in the queue to be retried later
   while (skipped < 5) {
-    const idx = pickNext(c, deferred);
+    const idx = pickNext(c, deferred, { ignoreNewsCap: !!opts.force });
     if (idx < 0) break;
     const v = c.queue[idx];
     if (v.source === 'TikTok' && v.key) {              // always use the current TikTok embed host, even for items queued earlier
@@ -909,8 +1152,9 @@ async function postNext(gid, c) {
       continue;
     }
 
+    let msg;
     try {
-      await postVideo(channel, v, c.mode);
+      msg = await postVideo(channel, v, c.mode);
     } catch (e) {
       console.error('[videos] post failed:', e.message);
       if (e.code === 50013 || e.code === 50001) {     // missing permissions: keep the video, retry later
@@ -927,18 +1171,22 @@ async function postNext(gid, c) {
     c.queue.splice(idx, 1);
     c.lastSource = v.source;
     c.lastPosted = Date.now();
+    await recordPost(c, v, msg);
     c.nextPostAt = c.queue.length ? Date.now() + gapMs(c.queue.length) : 0;   // empty queue: next video goes out right away
     saveData(gid);
     return { posted: true, video: v, skipped };
   }
 
-  c.nextPostAt = c.queue.length ? Date.now() + (deferred.size ? 5 * 60e3 : 60e3) : 0;
+  const held = !skipped && c.queue.length > 0;       // nothing posted only because the news limit is holding news back
+  c.nextPostAt = c.queue.length ? Date.now() + (deferred.size || held ? 5 * 60e3 : 60e3) : 0;
   saveData(gid);
   return {
     posted: false,
     note: skipped
       ? `Skipped ${skipped} link(s) the embed service couldn't turn into a playable video${deferred.size ? ` (${deferred.size} will be retried)` : ''}.`
-      : 'The queue is empty.',
+      : held
+        ? 'Only news is waiting, so it is being held back to keep the feed varied (use /videos-feed next to post it anyway).'
+        : 'The queue is empty.',
   };
 }
 
@@ -985,6 +1233,7 @@ async function heartbeat() {
           if (expireQueue(c)) saveData(gid);
           await maybeSearch(gid, c, gids.length);
           await maybePost(gid, c);
+          await pollVotes(gid, c);
         });
       } catch (e) {
         console.error(`[videos] guild ${gid} heartbeat failed:`, e.message);
@@ -1012,14 +1261,27 @@ function getLibyaVideosCommands() {
           .setDescription('Text channel')
           .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
           .setRequired(true)))
-      .addSubcommand(s => s
-        .setName('query')
-        .setDescription('Change the search term (default: ليبيا)')
-        .addStringOption(o => o
-          .setName('text')
-          .setDescription('e.g. ليبيا, طرابلس, libya')
-          .setMaxLength(100)
-          .setRequired(true)))
+      .addSubcommandGroup(g => g
+        .setName('terms')
+        .setDescription('The search terms the feed rotates through')
+        .addSubcommand(s => s.setName('list').setDescription('Show the terms, how members rated them and how often each is searched'))
+        .addSubcommand(s => s
+          .setName('add')
+          .setDescription('Add a search term')
+          .addStringOption(o => o.setName('text').setDescription('e.g. أكلات ليبية').setMaxLength(100).setRequired(true))
+          .addStringOption(o => o
+            .setName('kind')
+            .setDescription('Entertainment (default) or news')
+            .addChoices({ name: 'Entertainment', value: 'fun' }, { name: 'News', value: 'news' }))
+          .addStringOption(o => o
+            .setName('window')
+            .setDescription('How far back to look (default: a week for entertainment, 24 hours for news)')
+            .addChoices({ name: 'Past hour', value: 'h' }, { name: 'Past 24 hours', value: 'd' }, { name: 'Past week', value: 'w' })))
+        .addSubcommand(s => s
+          .setName('remove')
+          .setDescription('Remove a search term')
+          .addStringOption(o => o.setName('text').setDescription('The term to remove').setMaxLength(100).setRequired(true)))
+        .addSubcommand(s => s.setName('reset').setDescription('Go back to the starting list of terms')))
       .addSubcommand(s => s
         .setName('style')
         .setDescription('How videos are posted')
@@ -1038,6 +1300,7 @@ function getLibyaVideosCommands() {
       .addSubcommand(s => s
         .setName('test')
         .setDescription('Dry run: search now and show what would be queued (nothing is saved)')
+        .addStringOption(o => o.setName('term').setDescription('Test one specific search term (default: the next one in the rotation)').setMaxLength(100))
         .addStringOption(o => o
           .setName('site')
           .setDescription('Search just one platform (default: the next one in the rotation)')
@@ -1051,7 +1314,8 @@ function getLibyaVideosCommands() {
           .setName('post')
           .setDescription('Also post up to 3 of them in THIS channel to preview how they embed')))
       .addSubcommand(s => s.setName('clear').setDescription('Empty the queue of waiting videos'))
-      .addSubcommand(s => s.setName('status').setDescription('Show settings, queue and search budget')),
+      .addSubcommand(s => s.setName('votes').setDescription('Show what members have voted: liked and disliked terms and accounts'))
+      .addSubcommand(s => s.setName('status').setDescription('Show settings, queue, votes and search budget')),
   ];
 }
 
@@ -1074,6 +1338,66 @@ function nextPostText(c) {
   return `<t:${unix(c.nextPostAt)}:R>`;
 }
 
+const KIND_ICON = { news: '📰', fun: '🎭' };
+
+function nextSearchText(c) {
+  if (!c) return '';
+  const t = nextTerm(c, false);
+  const site = provider === 'serpapi' && SITE_FILTER && ROTATE ? ` on ${PLATFORM_SITES[(c.rot || 0) % PLATFORM_SITES.length]}` : '';
+  return ` · next search: ${t.q}${site}`;
+}
+
+// /videos-feed terms list | add | remove | reset
+async function handleTerms(i, sub) {
+  const gid = i.guild.id;
+  const say = content => i.reply({ content, flags: 64 });
+  const c = cfg(gid, true);
+
+  if (sub === 'list') {
+    const st = voteStats(c);
+    const lines = c.terms.map(t => {
+      const x = st.terms[t.q];
+      const votes = x && (x.ru || x.rd) ? ` · 👍 ${x.ru} 👎 ${x.rd}` : '';
+      return `${KIND_ICON[t.kind] || '🎭'} ${t.q} — ${winOf(t.w).label} · searched ×${termWeight(t, st).toFixed(2)}${votes}`;
+    });
+    return say(clip(`🔎 **Search terms** (${c.terms.length}) — 📰 news · 🎭 entertainment\n${lines.join('\n')}\n\n×1.00 is normal. Terms members like are searched more, ones they dislike less (never below ×0.35).`, 1950));
+  }
+
+  if (sub === 'add') {
+    const text = i.options.getString('text', true).trim();
+    const kind = i.options.getString('kind') || 'fun';
+    const w = i.options.getString('window') || (kind === 'news' ? 'd' : WINDOW);
+    if (!text) return say('❌ Type a search term.');
+    const existing = c.terms.find(t => t.q.toLowerCase() === text.toLowerCase());
+    if (existing) {
+      existing.kind = kind;
+      existing.w = w;
+      saveData(gid);
+      return say(`✅ Updated **${text}** → ${KIND_ICON[kind]} ${winOf(w).label}.`);
+    }
+    if (c.terms.length >= TERMS_CAP) return say(`❌ The list is full (${TERMS_CAP} terms). Remove one first.`);
+    c.terms.push({ q: text, kind, w, credit: 0 });
+    saveData(gid);
+    return say(`✅ Added ${KIND_ICON[kind]} **${text}** (${winOf(w).label}). It joins the rotation now; preview it with \`/videos-feed test\` and this term.`);
+  }
+
+  if (sub === 'remove') {
+    const text = i.options.getString('text', true).trim().toLowerCase();
+    const idx = c.terms.findIndex(t => t.q.toLowerCase() === text);
+    if (idx < 0) return say('❌ That term isn\'t in the list. Use `/videos-feed terms list` to see them.');
+    if (c.terms.length <= 1) return say('❌ At least one term has to stay.');
+    const [gone] = c.terms.splice(idx, 1);
+    saveData(gid);
+    return say(`🗑️ Removed **${gone.q}**.`);
+  }
+
+  if (sub === 'reset') {
+    c.terms = starterTerms();
+    saveData(gid);
+    return say(`🔄 Back to the starting list (${c.terms.length} terms).`);
+  }
+}
+
 async function handleVideosFeed(i) {
   const gid = i.guild.id;
   const sub = i.options.getSubcommand();
@@ -1081,6 +1405,32 @@ async function handleVideosFeed(i) {
 
   if (!i.memberPermissions || !i.memberPermissions.has(PermissionFlagsBits.Administrator)) {
     return say('❌ Only server administrators can use this command.');
+  }
+
+  if (i.options.getSubcommandGroup(false) === 'terms') return handleTerms(i, sub);
+
+  if (sub === 'votes') {
+    const c = cfg(gid);
+    const st = voteStats(c || { ledger: [] });
+    const rows = (m, min) => Object.entries(m)
+      .filter(([, x]) => x.n >= min && x.ru + x.rd > 0)
+      .map(([k, x]) => ({ k, s: scoreOf(x), ru: x.ru, rd: x.rd }));
+    const fmt = r => `${r.k} (${r.s.toFixed(2)} · 👍${r.ru} 👎${r.rd})`;
+    const liked = arr => arr.filter(r => r.s > 0.5).sort((a, b) => b.s - a.s).slice(0, 3).map(fmt).join(' · ') || '—';
+    const disliked = arr => arr.filter(r => r.s < 0.5).sort((a, b) => a.s - b.s).slice(0, 3).map(fmt).join(' · ') || '—';
+    const terms = rows(st.terms, 1);
+    const accts = rows(st.accts, 2);
+    const blocked = Object.keys(st.accts).filter(k => isBlocked(st, k));
+    return say(clip([
+      `👍👎 **Votes** — ${st.rated} rated video(s) · 👍 ${st.up} · 👎 ${st.down}`,
+      `Liked terms: ${liked(terms)}`,
+      `Disliked terms: ${disliked(terms)}`,
+      `Liked accounts: ${liked(accts)}`,
+      `Disliked accounts: ${disliked(accts)}`,
+      `Blocked accounts: ${blocked.length ? blocked.join(', ') : 'none'}`,
+      '',
+      'Scores run 0–1 and 0.50 means no opinion. A single vote barely moves a score, so one person can\'t sway the feed.',
+    ].join('\n'), 1950));
   }
 
   if (sub === 'status') {
@@ -1102,15 +1452,17 @@ async function handleVideosFeed(i) {
       content: [
         '📺 **Libya videos feed**',
         `Channel: ${c && c.channelId ? `<#${c.channelId}>` : 'not set'}`,
-        `Search: \`${(c && c.query) || DEFAULT_QUERY}\` · ${WINDOW_LABEL}${GL || HL ? ` · region ${GL || '-'}/${HL || '-'}` : ''}${provider === 'serpapi' && SITE_FILTER && ROTATE ? ` · next platform: ${PLATFORM_SITES[((c && c.rot) || 0) % PLATFORM_SITES.length]}` : ''}`,
+        `Terms: ${c ? c.terms.length : STARTER_TERMS.length} (${c ? c.terms.filter(t => t.kind === 'news').length : 1} news · ${c ? c.terms.filter(t => t.kind !== 'news').length : STARTER_TERMS.length - 1} entertainment)${GL || HL ? ` · region ${GL || '-'}/${HL || '-'}` : ''}${nextSearchText(c)}`,
         `Style: ${c && c.mode === 'embed' ? 'embed card' : 'plain link (playable embed)'}`,
         `State: ${!c || !c.channelId ? 'not configured' : c.paused ? '⏸️ paused' : '▶️ running'}`,
-        c ? `Queue: **${c.queue.length}** waiting · next post ${nextPostText(c)}` : 'Queue: 0 waiting',
+        c ? `Queue: **${c.queue.length}** waiting (📰 ${c.queue.filter(v => v.k === 'n').length} · 🎭 ${c.queue.filter(v => v.k !== 'n').length}) · next post ${nextPostText(c)}` : 'Queue: 0 waiting',
+        c ? `Mix: news limited to ${NEWS_MAX} of every ${NEWS_WINDOW} posts · votes: ${voteStats(c).rated} rated (👍 ${voteStats(c).up} · 👎 ${voteStats(c).down})` : null,
+        c && c.reactErr ? `⚠️ Reactions: ${c.reactErr}` : null,
         `Drip: one video every ${fmtDur(MIN_GAP_MS)}–${fmtDur(MAX_GAP_MS)} (adapts to the queue), ${activeLabel()}`,
         searchLine,
         `Sources kept (${SHORTS_ONLY ? 'shorts only' : 'all video lengths'}): YouTube · TikTok${TIKTOK_HOST ? ` (→ ${TIKTOK_HOST})` : ''} · Facebook (→ ${FACEBOOK_HOST}) · Instagram (→ ${INSTAGRAM_HOST})`,
         c && c.lastSearch ? `Last search: <t:${unix(c.lastSearch)}:R>${c.lastNote ? ` (${c.lastNote})` : ''}${c.lastPosted ? ` · last post: <t:${unix(c.lastPosted)}:R>` : ''}` : 'Last search: never',
-      ].join('\n'),
+      ].filter(Boolean).join('\n'),
     });
   }
 
@@ -1122,21 +1474,18 @@ async function handleVideosFeed(i) {
     if (!perms || !perms.has(need)) {
       return say(`❌ I need **View Channel**, **Send Messages** and **Embed Links** in ${ch}.`);
     }
+    const soft = [];
+    if (!perms.has(PermissionFlagsBits.AddReactions)) soft.push('**Add Reactions**');
+    if (!perms.has(PermissionFlagsBits.ReadMessageHistory)) soft.push('**Read Message History**');
     const c = cfg(gid, true);
     c.channelId = ch.id;
     c.paused = false;
     saveData(gid);
     return say(
       `✅ Videos will be posted in ${ch}.` +
+      (soft.length ? `\n⚠️ Give me ${soft.join(' and ')} there so the 👍/👎 votes work.` : '') +
       (provider ? ' The first search runs within a few minutes, then videos trickle in. Use `/videos-feed status` to watch the queue.' : '\n⚠️ No API key is configured yet, so nothing will happen until you add SERPAPI_KEY or YOUTUBE_API_KEY in Railway.'),
     );
-  }
-
-  if (sub === 'query') {
-    const c = cfg(gid, true);
-    c.query = i.options.getString('text', true).trim();
-    saveData(gid);
-    return say(`✅ Now searching for \`${c.query}\`. Videos already in the queue stay there; use \`/videos-feed clear\` to empty it.`);
   }
 
   if (sub === 'style') {
@@ -1169,7 +1518,7 @@ async function handleVideosFeed(i) {
     const c = cfg(gid);
     if (!c || !c.channelId) return say('❌ Set a channel first with `/videos-feed channel`.');
     await i.deferReply({ flags: 64 });
-    const out = await withLock(gid, () => postNext(gid, c));
+    const out = await withLock(gid, () => postNext(gid, c, { force: true }));
     if (out.busy) return i.editReply({ content: '⏳ The feed is busy for a moment — try again.' });
     return i.editReply({
       content: out.posted
@@ -1201,7 +1550,7 @@ async function handleVideosFeed(i) {
       const budget = out.left != null ? ` Searches left ≈ ${Math.max(out.left - 1, 0)}.` : '';
       return i.editReply({
         content: r.added
-          ? `✅ Searched ${r.site ? r.site.replace('site:', '') : 'all sites'} and added **${r.added}** new video(s) to the queue — **${c.queue.length}** waiting. They go out gradually (use \`/videos-feed next\` to post one now).${budget}`
+          ? `✅ Searched ${r.term}${r.site ? ` on ${r.site.replace('site:', '')}` : ''} and added **${r.added}** new video(s) to the queue — **${c.queue.length}** waiting. They go out gradually (use \`/videos-feed next\` to post one now).${budget}`
           : `ℹ️ Nothing new to queue (${r.rawCount} raw, ${r.usable} usable, ${r.alreadyPosted} already seen, ${r.dupTitles} duplicate titles). **${c.queue.length}** still waiting.${budget}`,
       });
     } catch (e) {
@@ -1223,18 +1572,22 @@ async function handleVideosFeed(i) {
       if (provider === 'serpapi' && plan.left !== null && plan.left <= 0) {
         return i.editReply({ content: '⚠️ No SerpApi searches are left this month.' });
       }
-      const g = await gather(c, fetchVideos, i.options.getString('site'));
+      const termArg = (i.options.getString('term') || '').trim();
+      const term = termArg
+        ? (c.terms.find(t => t.q.toLowerCase() === termArg.toLowerCase()) || { q: termArg, kind: 'fun', w: WINDOW })
+        : nextTerm(c, false);
+      const g = await gather(c, fetchVideos, { site: i.options.getString('site'), term });
       charge(c);
       saveData(gid);
 
       const bySource = {};
       for (const v of g.kept) bySource[v.source] = (bySource[v.source] || 0) + 1;
       const lines = [
-        `🧪 **Fetch test** — ${providerLabel()} · \`${c.query}${g.site ? ` ${g.site}` : ''}\` · ${WINDOW_LABEL}`,
+        `🧪 **Fetch test** — ${providerLabel()} · ${KIND_ICON[g.term.kind] || '🎭'} \`${g.term.q}${g.site ? ` ${g.site}` : ''}\` · ${winOf(g.term.w).label}`,
         `Raw results: **${g.rawCount}**`,
         `Usable videos: **${g.kept.length}**` +
           (g.kept.length ? ` (${Object.entries(bySource).map(([k, n]) => `${k} ${n}`).join(', ')})` : ''),
-        `Already seen: ${g.alreadyPosted} · Duplicate titles skipped: ${g.dupTitles.length} · Would be queued: **${g.fresh.length}**`,
+        `Already seen: ${g.alreadyPosted} · Duplicate titles skipped: ${g.dupTitles.length} · Would be queued: **${g.fresh.length}** (📰 ${g.fresh.filter(v => v.k === 'n').length} news-like)${g.blocked.length ? ` · Blocked accounts: ${g.blocked.length}` : ''}`,
       ];
       if (g.dropped.size) {
         lines.push(`Dropped: ${clip([...g.dropped].map(([h, n]) => `${h} ×${n}`).join(', '), 300)}`);
@@ -1303,7 +1656,7 @@ function initLibyaVideos(deps) {
   if (!provider) {
     console.warn('[videos] No SERPAPI_KEY or YOUTUBE_API_KEY set — feed is idle (the /videos-feed command still works).');
   } else {
-    console.log(`[videos] Provider: ${providerLabel()} · drip ${fmtDur(MIN_GAP_MS)}–${fmtDur(MAX_GAP_MS)} · active ${activeLabel()} · window: ${WINDOW_LABEL}`);
+    console.log(`[videos] Provider: ${providerLabel()} · drip ${fmtDur(MIN_GAP_MS)}–${fmtDur(MAX_GAP_MS)} · active ${activeLabel()}`);
   }
 
   client.on('interactionCreate', async interaction => {
@@ -1333,5 +1686,5 @@ module.exports = {
   initLibyaVideos,
   getLibyaVideosCommands,
   curateUrl,
-  _test: { heartbeat, isActiveNow, gapMs, pickNext, searchPlan, normTitle, embedOk, postNext, tiktokOk },
+  _test: { heartbeat, isActiveNow, gapMs, pickNext, searchPlan, normTitle, embedOk, postNext, tiktokOk, nextTerm, voteStats, newsAllowed, isNewsTitle, acctOf, pollVotes, recordPost, cfg, isBlocked, scoreOf },
 };
