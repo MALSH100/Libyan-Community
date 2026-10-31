@@ -783,6 +783,7 @@ function upgrade(c) {
   if (!Array.isArray(c.ledger)) c.ledger = [];                    // v6: posted videos + their 👍/👎 counts
   if (!Array.isArray(c.hist)) c.hist = [];                        // v6: kinds of the latest posts
   if (!Array.isArray(c.log)) c.log = [];                          // v9: what recent searches found
+  if (!Array.isArray(c.skips)) c.skips = [];                      // links skipped because they wouldn't play as video
   if (v < 6) {                                                    // videos queued before v6 came from the news-style search
     c.queue.forEach(it => { if (!it.k) { it.k = 'n'; it.q = it.q || DEFAULT_QUERY; it.a = it.a || acctOf(it); } });
   }
@@ -982,7 +983,10 @@ async function embedOk(v) {
     if (res.status !== 200) return null;
     const html = (await res.text()).slice(0, 300000);
     if (/(?:property|name)="(?:og:video(?::url|:secure_url)?|twitter:player(?::stream)?)"/i.test(html)) return true;
-    if (/name="twitter:card"/i.test(html)) return false;
+    // A page with a title but no video tag is a failure: facebed's picture-only card, or Facebook's login
+    // wall ("Log in or sign up to view") that facebed passes along for videos that aren't public.
+    // Anything else (e.g. the plain redirect page browsers get) is left undecided.
+    if (/(?:property|name)="(?:og:title|og:description|twitter:card)"/i.test(html)) return false;
     return null;
   } catch {
     return null;
@@ -1225,6 +1229,8 @@ async function postNext(gid, c, opts = {}) {
 
     if ((await embedOk(v)) === false) {               // the embed service has no video for this one
       skipped++;
+      c.skips.push({ at: Date.now(), s: v.source });
+      if (c.skips.length > 100) c.skips = c.skips.slice(-100);
       v.tries = (v.tries || 0) + 1;
       // TikTok failures are often temporary: keep the video and retry later, drop it after 3 failures.
       // Facebook answers "no video" definitively, so that one is dropped straight away.
@@ -1423,6 +1429,15 @@ function nextPostText(c) {
 
 const KIND_ICON = { news: '📰', fun: '🎭' };
 
+// "Skipped as unplayable (24h): Facebook 5 · TikTok 1" — links that facebed / the TikTok service couldn't turn into a video.
+function skipsLine(c) {
+  const since = Date.now() - 86400e3;
+  const n = {};
+  for (const e of c.skips || []) if (e.at >= since) n[e.s] = (n[e.s] || 0) + 1;
+  const parts = Object.entries(n).map(([k, v]) => `${k} ${v}`);
+  return parts.length ? `Skipped as unplayable (24h): ${parts.join(' · ')}` : null;
+}
+
 function nextSearchText(c) {
   if (!c) return '';
   const t = nextTerm(c, false);
@@ -1555,6 +1570,7 @@ async function handleVideosFeed(i) {
         c ? `Mix: news limited to ${NEWS_MAX} of every ${NEWS_WINDOW} posts · votes: ${voteStats(c).rated} rated (👍 ${voteStats(c).up} · 👎 ${voteStats(c).down})` : null,
         c && c.reactErr ? `⚠️ Reactions: ${c.reactErr}` : null,
         c && c.voteErr ? `⚠️ One vote per person: ${c.voteErr}` : null,
+        c ? skipsLine(c) : null,
         `Drip: one video every ${fmtDur(MIN_GAP_MS)}–${fmtDur(MAX_GAP_MS)} (adapts to the queue), ${activeLabel()}`,
         searchLine,
         `Sources kept (${SHORTS_ONLY ? 'shorts only' : 'all video lengths'}): YouTube · TikTok${TIKTOK_HOST ? ` (→ ${TIKTOK_HOST})` : ''} · Facebook (→ ${FACEBOOK_HOST}) · Instagram (→ ${INSTAGRAM_HOST})`,
