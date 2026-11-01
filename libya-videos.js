@@ -40,7 +40,10 @@
 // The news term is searched on ONE platform at a time (YouTube → TikTok → Facebook → Instagram → …)
 // so Facebook can't crowd out the rest; entertainment terms are searched across all platforms at once.
 //
-// Before a Facebook or TikTok link is posted the bot asks the embed service for it exactly like
+// Balance: if one platform (Instagram, say) drops under 12% of the latest videos, the next entertainment
+// search targets that platform's own short-video pages (YouTube Shorts, Instagram reels...).
+//
+// Before a Facebook, TikTok or Instagram link is posted the bot asks the embed service for it exactly like
 // Discord does. If the service can't produce a video (facebed answers with a picture-only card;
 // fxTikTok answers with an error), the link is skipped and the next one is used instead. TikTok
 // failures are often temporary, so such a video is retried later and only dropped after 3 failures.
@@ -83,6 +86,7 @@
 //   VIDEOS_WINDOW          h, d or w: window for terms added without one (default w = past week)
 //   VIDEOS_SITE_FILTER     set to 0 to stop adding site: filters to the SerpApi query
 //   VIDEOS_VERIFY_EMBEDS   set to 0 to stop checking Facebook/TikTok links before posting
+//   VIDEOS_BALANCE         set to 0 to stop targeted searches for a platform that is missing from the feed
 //   VIDEOS_ROTATE          set to 0 to search all four platforms in one query instead of one
 //                          platform per search, in turn (default)
 //   VIDEOS_GL / VIDEOS_HL  Google country / language for SerpApi, default ly / ar
@@ -132,6 +136,16 @@ const ROTATE = process.env.VIDEOS_ROTATE !== '0';
 const VERIFY_EMBEDS = process.env.VIDEOS_VERIFY_EMBEDS !== '0';
 const DISCORD_UA = 'Mozilla/5.0 (compatible; Discordbot/2.0; +https://discordapp.com)';
 const PLATFORM_SITES = ['youtube.com', 'tiktok.com', 'facebook.com', 'instagram.com'];
+// What a platform-specific search asks Google for. YouTube Shorts and Instagram reels have their own
+// path, so asking for just that path keeps profile pages, photo posts and long videos out of the 12 results.
+const PLATFORM_FILTER = {
+  'youtube.com': 'site:youtube.com/shorts',
+  'tiktok.com': 'site:tiktok.com',
+  'facebook.com': 'site:facebook.com',
+  'instagram.com': 'site:instagram.com/reel',
+};
+const PLATFORM_NAMES = { 'youtube.com': 'YouTube', 'tiktok.com': 'TikTok', 'facebook.com': 'Facebook', 'instagram.com': 'Instagram' };
+const BALANCE = process.env.VIDEOS_BALANCE !== '0';
 const SITE_QUERY = '(site:youtube.com OR site:tiktok.com OR site:facebook.com OR site:instagram.com)';
 
 const intEnv = (name, def) => {
@@ -577,11 +591,33 @@ async function getJson(url) {
 // are specific enough that splitting them by platform leaves nothing (that returned 0 results), so
 // they are searched across all platforms at once.
 function siteQuery(c, override, term) {
-  if (override) return `site:${override}`;
+  if (override) return PLATFORM_FILTER[override] || `site:${override}`;
   if (!SITE_FILTER) return '';
   if (term && term.kind !== 'news') return '';       // niche entertainment terms find few videos: search all platforms at once
   if (!ROTATE) return SITE_QUERY;
-  return `site:${PLATFORM_SITES[(c.rot || 0) % PLATFORM_SITES.length]}`;
+  return PLATFORM_FILTER[PLATFORM_SITES[(c.rot || 0) % PLATFORM_SITES.length]];
+}
+
+// Which platform is most missing from the feed? Looks at the latest 30 posts plus everything waiting.
+// A platform below 12% of that mix gets a targeted search (unless its last two targeted searches found
+// nothing, in which case it is left alone for 36 hours rather than wasting searches).
+const platformDead = (c, site) => {
+  const es = (c.log || []).filter(e => e.s === PLATFORM_FILTER[site]).slice(-2);
+  return es.length === 2 && es.every(e => e.raw === 0) && Date.now() - es[1].at < 36 * 3600e3;
+};
+function underserved(c) {
+  if (!BALANCE || provider !== 'serpapi') return null;
+  const counts = { YouTube: 0, TikTok: 0, Facebook: 0, Instagram: 0 };
+  const recent = [...(c.ledger || []).slice(-30).map(e => e.s), ...(c.queue || []).map(v => v.source)];
+  recent.forEach(src => { if (src in counts) counts[src]++; });
+  const total = Object.values(counts).reduce((a, b) => a + b, 0);
+  if (total < 10) return null;
+  let low = null;
+  for (const [site, name] of Object.entries(PLATFORM_NAMES)) {
+    const share = counts[name] / total;
+    if (share < 0.12 && !platformDead(c, site) && (!low || share < low.share)) low = { site, share };
+  }
+  return low ? low.site : null;
 }
 
 // Google Videos via SerpApi. tbs=qdr:d is the "past 24 hours" filter. The site: filter asks
@@ -918,11 +954,12 @@ async function searchAndQueue(gid, c) {
   // (evergreen videos don't go stale). Once the month window finds videos it stays on it.
   const widened = picked.kind !== 'news' && picked.w === 'w' && (picked.wide || emptyStreak(c, picked.q) >= 2);
   const term = widened ? { ...picked, w: 'm' } : picked;
-  const site = siteQuery(c, undefined, term);
-  const label = `${term.q} · ${(site || 'all platforms').replace('site:', '')}${widened ? ' · month' : ''}`;
+  const boost = term.kind !== 'news' ? underserved(c) : null;     // entertainment search, but a platform is missing from the feed
+  const site = siteQuery(c, boost || undefined, term);
+  const label = `${term.q} · ${(site || 'all platforms').replace('site:', '')}${widened ? ' · month' : ''}${boost ? ' · boost' : ''}`;
   let g;
   try {
-    g = await gather(c, fetchVideos, { term });
+    g = await gather(c, fetchVideos, { term, site: boost || undefined });
   } catch (e) {
     if (term.kind === 'news') c.rot = (c.rot || 0) + 1;     // a failing platform must never block the news rotation
     logSearch(c, { q: term.q, s: site, w: term.w, raw: 0, ok: 0, add: 0, err: 1 });
@@ -973,6 +1010,7 @@ function expireQueue(c) {
 async function embedOk(v) {
   if (!VERIFY_EMBEDS || !v) return null;
   if (v.source === 'TikTok') return TIKTOK_HOST ? tiktokOk(v) : null;
+  if (v.source === 'Instagram') return INSTAGRAM_HOST ? redirectOk(v, INSTAGRAM_HOST) : null;
   if (v.source !== 'Facebook') return null;
   try {
     const res = await fetch(v.url, {
@@ -1011,9 +1049,10 @@ async function crawlerHop(url) {
 // When it can't fetch the video (TikTok blocks or limits it, region-locked, removed...) it answers with
 // an HTTP error, and Discord then shows just the link. Same answers to us, same outcome, so we can tell
 // BEFORE posting. true = reaches a video file, false = clear error, null = can't tell.
-async function tiktokOk(v) {
+// Instagram's c.instagramfix.com works the same way (302 → the video's .mp4 on Instagram's CDN).
+async function redirectOk(v, fixerHost) {
   try {
-    const fixer = TIKTOK_HOST.split('.').slice(-2).join('.');
+    const fixer = fixerHost.split('.').slice(-2).join('.');
     let url = v.url;
     for (let step = 0; step < 4; step++) {
       const r = await crawlerHop(url);
@@ -1039,6 +1078,8 @@ async function tiktokOk(v) {
     return null;
   }
 }
+
+const tiktokOk = v => redirectOk(v, TIKTOK_HOST);
 
 async function postVideo(channel, v, mode) {
   if (mode !== 'embed') return channel.send({ content: v.url });
@@ -1232,9 +1273,9 @@ async function postNext(gid, c, opts = {}) {
       c.skips.push({ at: Date.now(), s: v.source });
       if (c.skips.length > 100) c.skips = c.skips.slice(-100);
       v.tries = (v.tries || 0) + 1;
-      // TikTok failures are often temporary: keep the video and retry later, drop it after 3 failures.
+      // TikTok / Instagram failures are often temporary: keep the video and retry later, drop it after 3 failures.
       // Facebook answers "no video" definitively, so that one is dropped straight away.
-      if (v.source === 'TikTok' && v.tries < 3) deferred.add(v.id);
+      if ((v.source === 'TikTok' || v.source === 'Instagram') && v.tries < 3) deferred.add(v.id);
       else c.queue.splice(idx, 1);
       console.log(`[videos] ${v.source} link can't be played as video (try ${v.tries}${deferred.has(v.id) ? ', will retry' : ', dropped'}): ${v.url.slice(0, 120)}`);
       continue;
@@ -1802,5 +1843,5 @@ module.exports = {
   initLibyaVideos,
   getLibyaVideosCommands,
   curateUrl,
-  _test: { heartbeat, isActiveNow, gapMs, pickNext, searchPlan, normTitle, embedOk, postNext, tiktokOk, nextTerm, voteStats, newsAllowed, isNewsTitle, acctOf, pollVotes, recordPost, cfg, isBlocked, scoreOf, onRawPacket, termWeight, yieldFactor },
+  _test: { heartbeat, isActiveNow, gapMs, pickNext, searchPlan, normTitle, embedOk, postNext, tiktokOk, nextTerm, voteStats, newsAllowed, isNewsTitle, acctOf, pollVotes, recordPost, cfg, isBlocked, scoreOf, onRawPacket, termWeight, yieldFactor, underserved, redirectOk, siteQuery },
 };
