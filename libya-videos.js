@@ -114,7 +114,7 @@ const {
 const crypto = require('crypto');
 
 const KEY = '__videos';
-const SCHEMA = 8;                 // 2 plain links · 3 Arabic + title de-dupe · 4 queue + drip · 5 shorts only · 6 terms + votes · 8 term list update
+const SCHEMA = 9;                 // 2 plain links · 3 Arabic + title de-dupe · 4 queue + drip · 5 shorts only · 6 terms + votes · 8/9 term list updates
 const DEFAULT_QUERY = 'ليبيا';
 const WINDOW = ['h', 'd', 'w'].includes(process.env.VIDEOS_WINDOW) ? process.env.VIDEOS_WINDOW : 'w';   // window for terms added without one
 const WIN = { h: { ms: 3600e3, label: 'past hour' }, d: { ms: 86400e3, label: 'past 24h' }, w: { ms: 604800e3, label: 'past week' }, m: { ms: 30 * 86400e3, label: 'past month' } };
@@ -299,7 +299,11 @@ const STARTER_TERMS = [
   { q: 'الدوري الليبي', kind: 'fun', w: 'w' },
   { q: 'الرينقو ليبيا', kind: 'fun', w: 'w' },
   { q: 'ميمز ليبية', kind: 'fun', w: 'w' },
-  { q: 'الذكاء_الاصطناعي ليبيا', kind: 'fun', w: 'w' },
+  { q: 'ذكاء اصطناعي ليبيا', kind: 'fun', w: 'w' },
+  { q: 'ترند ليبيا', kind: 'fun', w: 'w' },
+  { q: 'نكت ليبية', kind: 'fun', w: 'w' },
+  { q: 'ضحك ليبي', kind: 'fun', w: 'w' },
+  { q: 'باللهجة الليبية', kind: 'fun', w: 'w' },
 ];
 const starterTerms = () => STARTER_TERMS.map(t => ({ ...t, credit: 0 }));
 const TERMS_CAP = 20;
@@ -350,6 +354,9 @@ function normTitle(t) {
     .replace(/\s+/g, ' ')
     .trim();
 }
+
+// Two spellings of the same term (أكلات / اكلات, أغاني / اغاني, with or without underscores) count as one.
+const termKey = q => normTitle(String(q || '').replace(/_/g, ' ')) || String(q || '').toLowerCase();
 
 const tokenSet = norm => new Set(String(norm).split(' ').filter(w => w.length > 1));
 
@@ -827,7 +834,14 @@ function upgrade(c) {
     const gone = new Set(['عرس ليبي', 'الرينقو', 'meme', 'الذكاء_الاصطناعي']);
     c.terms = c.terms.filter(t => !gone.has(t.q));
     for (const q of ['الرينقو ليبيا', 'ميمز ليبية', 'الذكاء_الاصطناعي ليبيا']) {
-      if (!c.terms.some(t => t.q.toLowerCase() === q.toLowerCase())) c.terms.push({ q, kind: 'fun', w: 'w', credit: 0 });
+      if (!c.terms.some(t => termKey(t.q) === termKey(q))) c.terms.push({ q, kind: 'fun', w: 'w', credit: 0 });
+    }
+  }
+  if (v < 9) {                                                    // v9: more dialect/entertainment terms; the hashtag-form AI term becomes the plain one
+    const oldAI = termKey('الذكاء_الاصطناعي ليبيا');
+    c.terms = c.terms.filter(t => termKey(t.q) !== oldAI);
+    for (const q of ['ذكاء اصطناعي ليبيا', 'ترند ليبيا', 'نكت ليبية', 'ضحك ليبي', 'باللهجة الليبية']) {
+      if (!c.terms.some(t => termKey(t.q) === termKey(q))) c.terms.push({ q, kind: 'fun', w: 'w', credit: 0 });
     }
   }
   c.lastPoll = c.lastPoll || 0;
@@ -1509,7 +1523,7 @@ async function handleTerms(i, sub) {
     const kind = i.options.getString('kind') || 'fun';
     const w = i.options.getString('window') || (kind === 'news' ? 'd' : WINDOW);
     if (!text) return say('❌ Type a search term.');
-    const existing = c.terms.find(t => t.q.toLowerCase() === text.toLowerCase());
+    const existing = c.terms.find(t => termKey(t.q) === termKey(text));
     if (existing) {
       existing.kind = kind;
       existing.w = w;
@@ -1525,7 +1539,7 @@ async function handleTerms(i, sub) {
 
   if (sub === 'remove') {
     const text = i.options.getString('text', true).trim().toLowerCase();
-    const idx = c.terms.findIndex(t => t.q.toLowerCase() === text);
+    const idx = c.terms.findIndex(t => termKey(t.q) === termKey(text));
     if (idx < 0) return say('❌ That term isn\'t in the list. Use `/videos-feed terms list` to see them.');
     if (c.terms.length <= 1) return say('❌ At least one term has to stay.');
     const [gone] = c.terms.splice(idx, 1);
@@ -1729,7 +1743,7 @@ async function handleVideosFeed(i) {
       }
       const termArg = (i.options.getString('term') || '').trim();
       const term = termArg
-        ? (c.terms.find(t => t.q.toLowerCase() === termArg.toLowerCase()) || { q: termArg, kind: 'fun', w: WINDOW })
+        ? (c.terms.find(t => termKey(t.q) === termKey(termArg)) || { q: termArg, kind: 'fun', w: WINDOW })
         : nextTerm(c, false);
       const g = await gather(c, fetchVideos, { site: i.options.getString('site'), term });
       charge(c);
@@ -1843,5 +1857,5 @@ module.exports = {
   initLibyaVideos,
   getLibyaVideosCommands,
   curateUrl,
-  _test: { heartbeat, isActiveNow, gapMs, pickNext, searchPlan, normTitle, embedOk, postNext, tiktokOk, nextTerm, voteStats, newsAllowed, isNewsTitle, acctOf, pollVotes, recordPost, cfg, isBlocked, scoreOf, onRawPacket, termWeight, yieldFactor, underserved, redirectOk, siteQuery },
+  _test: { heartbeat, isActiveNow, gapMs, pickNext, searchPlan, normTitle, embedOk, postNext, tiktokOk, nextTerm, voteStats, newsAllowed, isNewsTitle, acctOf, pollVotes, recordPost, cfg, isBlocked, scoreOf, onRawPacket, termWeight, yieldFactor, underserved, redirectOk, siteQuery, termKey },
 };
