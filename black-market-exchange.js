@@ -164,7 +164,7 @@ function buildRateEmbed(ex, latest) {
     .setTitle('🇱🇾 Libyan Dinar — USD Parallel Rate')
     .setDescription(lines.join('\n'))
     .setTimestamp(new Date(latest.timestamp || latest.scrapedAt))
-    .setFooter({ text: 'Source: Fulus • Checked hourly • Created & Designed by Captain' });
+    .setFooter({ text: 'Created & Designed by Captain' });
 
   if (latest.banks && latest.banks.length) {
     const value = latest.banks.map(b => `${b.name}: **${fmt2(b.rate)}**`).join('\n').slice(0, 1024);
